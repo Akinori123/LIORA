@@ -1,0 +1,6 @@
+{
+  "name": "LIORA",
+  "description": "Assistente pessoal inteligente multimodal inspirada em J.A.R.V.I.S., com identidade visual em preto, branco e vermelho.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

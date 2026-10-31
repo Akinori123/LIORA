@@ -1,0 +1,1836 @@
+Sim, Mestre. E o ponto mais importante é este: o que você descreveu não é “um Jarvis com um prompt”. É praticamente um sistema operacional pessoal orientado por IA, com voz, visão, memória, automação, dispositivos e um barramento de ferramentas.
+
+E, justamente por isso, eu não baixaria outro projeto “Jarvis completo” do GitHub para tentar consertá-lo. Eu faria o contrário: construiria o Ultron do zero, em módulos, com cada parte testável isoladamente.
+
+A arquitetura seria esta:
+
+                         ┌─────────────────────┐
+                         │       LIORA│
+                         │   Agent Orchestrator │
+                         └──────────┬──────────┘
+                                    │
+          ┌─────────────────────────┼──────────────────────────┐
+          │                         │                          │
+       CÉREBRO                    VOZ                       MEMÓRIA
+          │                         │                          │
+   Gemini / OpenRouter         Gemini Live              SQLite + Vector DB
+          │                  áudio bidirecional             │
+          │                         │                  ┌───────┴───────┐
+          │                         │                  │               │
+          │                         │              memória longa   histórico
+          │                         │
+          └─────────────────────────┼─────────────────────────────
+                                    │
+                              TOOL MANAGER
+                                    │
+       ┌───────────────┬────────────┼──────────────┬───────────────┐
+       │               │            │              │               │
+     PC/Windows      Browser      Arquivos      Internet        Casa
+       │               │            │              │               │
+   UI Automation    Playwright    PowerShell     Search      Home Assistant
+   processos        websites      programas      APIs        luz/TV/etc.
+       │
+       └───────────────────────────────────────────────────────────┐
+                                                                   │
+                              DISPOSITIVOS                         │
+                                                                   │
+                     ┌───────────────┬──────────────┬──────────────┘
+                     │               │              │
+                   CELULAR         CÂMERA          OUTROS
+                     │               │
+                  Android        gestos/rosto
+                     │
+                 WebSocket
+                     │
+                  Tailscale
+A decisão de arquitetura que eu tomaria
+
+Eu usaria Google Gemini como núcleo de voz/conversa, OpenRouter como segunda camada de modelos, e deixaria a possibilidade de adicionar um modelo local depois.
+
+A razão é que o Gemini Live atualmente já oferece áudio bidirecional em baixa latência, VAD para detectar quando você começa a falar e suporte a interrupção durante a resposta. A própria documentação recomenda descartar imediatamente o buffer de áudio quando o usuário interrompe o modelo.
+
+Para a voz, a linha atual do Gemini também possui modelos Live e TTS, permitindo separar conversação em tempo real de síntese de voz mais controlada.
+
+O OpenRouter seria extremamente útil como roteador de modelos. O padrão de tool calling permite que o modelo peça uma ferramenta estruturada, seu programa execute, devolva o resultado e o modelo continue a tarefa. O OpenRouter padroniza esse processo entre diversos provedores.
+
+Então você poderia ter:
+
+Ultron
+ ├── Gemini Live → voz/conversa
+ ├── Gemini principal → raciocínio
+ ├── OpenRouter → outros modelos
+ └── Ollama/local → modo privado/offline futuramente
+1. Eu começaria pela interface — mas não pela interface sozinha
+
+Você está certo em pensar em uma interface bonita.
+
+Só que eu faria uma interface bonita + uma única tarefa real funcionando.
+
+Nada de passar duas semanas fazendo uma esfera azul girando enquanto, por baixo, existe apenas um alert("olá"). Isso é cinema, não engenharia.
+
+Interface inicial
+
+Eu faria o desktop com:
+
+Electron + React + TypeScript
+
+Electron permite construir aplicações desktop usando HTML/CSS/JavaScript e distribuir a mesma base para Windows, macOS e Linux.
+
+Visual:
+
+┌───────────────────────────────────────────────────────────────┐
+│  ULTRON                                      ● ONLINE         │
+│                                                               │
+│                  ◉                                              │
+│               ULTRON                                            │
+│          "Boa noite, Mestre."                                  │
+│                                                               │
+│  ───────────────────────────────────────────────────────────   │
+│                                                               │
+│  Você: "Abra meu projeto do SaaS."                            │
+│                                                               │
+│  Ultron: "Abrindo agora."                                     │
+│                                                               │
+│  [MIC] [CAMERA] [INTERRUPT]                   CPU 43%          │
+│                                                               │
+├───────────────┬────────────────┬────────────────┬─────────────┤
+│ Conversas     │ Ferramentas    │ Dispositivos   │ Memória     │
+└───────────────┴────────────────┴────────────────┴─────────────┘
+Telas
+
+Eu criaria desde o início:
+
+Home
+
+orb/animação
+status do Ultron
+transcrição
+microfone
+interrupção
+
+Tools
+
+PC
+browser
+arquivos
+programação
+internet
+e-mail
+casa
+celular
+
+Devices
+
+PC
+celular
+TV
+impressora
+lâmpadas
+câmeras
+outros
+
+Memory
+
+o que ele sabe
+preferências
+projetos
+pessoas
+tarefas
+fatos importantes
+
+Activity
+
+tudo que o agente fez
+
+Security
+
+permissões
+tokens
+contas conectadas
+ações bloqueadas
+confirmações
+2. O cérebro do Ultron
+
+Aqui está a parte que realmente importa.
+
+Não deixe o LLM executar comandos diretamente.
+
+O fluxo deve ser:
+
+Você
+ ↓
+voz
+ ↓
+Gemini
+ ↓
+interpretação
+ ↓
+planejamento
+ ↓
+Tool Manager
+ ↓
+Permission Manager
+ ↓
+execução
+ ↓
+resultado
+ ↓
+Gemini
+ ↓
+resposta
+ ↓
+voz
+
+Exemplo:
+
+"Ultron, abre o Chrome, pesquisa RTX 5090 preço Brasil e me mostra as três opções mais baratas."
+
+O modelo não deveria simplesmente ganhar acesso ao Windows.
+
+Ele deveria produzir algo como:
+
+{
+  "goal": "pesquisar preço RTX 5090 no Brasil",
+  "steps": [
+    {
+      "tool": "open_application",
+      "args": {
+        "application": "chrome"
+      }
+    },
+    {
+      "tool": "browser_search",
+      "args": {
+        "query": "RTX 5090 preço Brasil"
+      }
+    },
+    {
+      "tool": "extract_results",
+      "args": {
+        "limit": 3
+      }
+    }
+  ]
+}
+
+E o seu programa decide:
+
+Pode executar?
+
+Então executa.
+
+3. O segredo para ter centenas de capacidades: Tools
+
+Aqui entra uma tecnologia que eu considero especialmente importante para o projeto: MCP — Model Context Protocol.
+
+O MCP permite expor tools, resources e prompts de forma padronizada para um agente. A versão 2 do SDK TypeScript está na linha estável atual, e a arquitetura foi justamente criada para conectar agentes aos sistemas onde seus dados e ferramentas vivem.
+
+Em vez de criar:
+
+ultron.js
+   └── 18.000 linhas
+
+você cria:
+
+tools/
+    system/
+    files/
+    browser/
+    email/
+    coding/
+    media/
+    home/
+    phone/
+    printer/
+    vision/
+    developer/
+
+Por exemplo:
+
+tools/system/
+    open_app
+    close_app
+    get_cpu
+    get_gpu
+    get_ram
+    shutdown_pc
+    restart_pc
+    lock_pc
+
+tools/files/
+    search_files
+    read_file
+    create_file
+    move_file
+    rename_file
+    copy_file
+    delete_file
+
+tools/browser/
+    open_browser
+    search_web
+    open_url
+    click
+    type
+    screenshot
+    download
+
+tools/home/
+    turn_on_light
+    turn_off_light
+    set_temperature
+    turn_on_tv
+    change_tv_input
+
+Aí o Ultron pode chegar, no futuro, a ter centenas de tools sem virar uma massa impossível de manter.
+
+4. Controle do Windows
+
+Aqui eu faria algo híbrido.
+
+Para coisas do sistema:
+PowerShell
+Python
+Windows APIs
+Para aplicações:
+
+Windows UI Automation
+
+O Windows possui uma infraestrutura oficial de UI Automation para que programas possam inspecionar elementos da interface e interagir com eles programaticamente.
+
+Isso é muito melhor do que simplesmente:
+
+click(523, 291)
+
+porque coordenadas quebram quando:
+
+muda a resolução
+move uma janela
+muda o tema
+aparece um popup
+o aplicativo atualiza
+
+Em vez disso:
+
+"clique no botão Enviar"
+
+pode procurar o elemento real da UI.
+
+5. E para tarefas visuais?
+
+Aqui entra o Computer Use do Gemini.
+
+A documentação atual descreve justamente um sistema para agentes controlarem interfaces desktop, mobile e browser através de screenshots + ações de mouse/teclado. O modelo produz as ações e seu cliente local precisa executá-las.
+
+Então o Ultron poderia eventualmente fazer:
+
+"Abra o Photoshop e exporte essa imagem em PNG."
+
+Ele poderia:
+
+tirar screenshot
+↓
+entender a interface
+↓
+clicar
+↓
+abrir menu
+↓
+escolher opção
+↓
+digitar nome
+↓
+salvar
+
+Mas eu não usaria Computer Use para absolutamente tudo.
+
+Eu criaria uma hierarquia:
+
+1. API oficial
+2. ferramenta nativa
+3. UI Automation
+4. browser automation
+5. Computer Use
+
+Quanto mais determinístico, melhor.
+
+6. Browser: Playwright
+
+Para a internet, eu colocaria Playwright.
+
+Isso permite que o Ultron tenha um navegador controlado.
+
+Exemplos:
+
+"Entre nesse site."
+
+"Pesquise isso."
+
+"Baixe o PDF."
+
+"Abra meu painel."
+
+"Crie o anúncio."
+
+"Preencha esse formulário."
+
+"Compare esses produtos."
+
+E aí o agente teria ferramentas como:
+
+browser.open()
+browser.click()
+browser.type()
+browser.scroll()
+browser.extract()
+browser.screenshot()
+browser.download()
+
+Isso também reduz a necessidade de mandar o modelo “clicar às cegas”.
+
+7. Memória: você acertou em pensar no .md, mas não deve usar só MD
+
+Aqui está uma distinção muito importante.
+
+.md é ótimo para memória humana.
+
+Por exemplo:
+
+memory/
+    identity.md
+    preferences.md
+    projects.md
+    routines.md
+    people.md
+    devices.md
+
+Mas .md sozinho não é um sistema de memória.
+
+Eu faria memória em camadas.
+
+Memória 1 — identidade
+memory/core/identity.md
+
+Exemplo:
+
+# Identidade do Mestre
+
+Nome preferido: Mestre
+
+Idioma principal: Português brasileiro
+
+O assistente se chama Ultron.
+
+Personalidade:
+- inteligente
+- direto
+- elegante
+- técnico
+- humor sutil
+Memória 2 — preferências
+memory/user/preferences.md
+# Preferências
+
+## Computador
+- Sistema: Windows
+- GPU: RTX 3060
+- CPU: Xeon E5-2680 v4
+
+## Desenvolvimento
+- VS Code
+- Python
+- JavaScript/TypeScript
+
+## Interface
+- Futurista
+- tecnológica
+- escura
+Memória 3 — projetos
+memory/projects/saas.md
+memory/projects/ultron.md
+memory/projects/ester-rios.md
+Memória 4 — diário
+memory/journal/2026-10-02.jsonl
+Memória 5 — banco de dados
+
+Aqui entra:
+
+SQLite
+
+para coisas estruturadas:
+
+tasks
+contacts
+devices
+preferences
+events
+commands
+permissions
+projects
+Memória 6 — memória semântica
+
+Aí você pode usar um banco vetorial.
+
+Por exemplo:
+
+SQLite
++
+embeddings
++
+vector search
+
+Isso permite perguntar:
+
+"O que eu estava fazendo naquele projeto que tinha uma agenda?"
+
+sem precisar saber o nome exato do arquivo.
+
+8. O cérebro deveria ter dois tipos de memória
+
+Eu faria:
+
+                    MEMORY ENGINE
+                          │
+              ┌───────────┴────────────┐
+              │                        │
+       LONG-TERM MEMORY          WORKING MEMORY
+              │                        │
+         fatos duradouros          conversa atual
+         preferências              tarefa atual
+         projetos                  passos atuais
+         dispositivos              resultados
+
+Isso é muito melhor do que jogar toda a conversa no contexto.
+
+9. Casa inteira
+
+Para luzes, TV, sensores, tomadas, automações etc., eu colocaria Home Assistant como camada intermediária.
+
+Home Assistant fornece API REST para controle dos dispositivos e usa autenticação por token, funcionando como uma ponte entre o Ultron e o ecossistema da casa.
+
+Então seria:
+
+ULTRON
+   ↓
+Home Assistant
+   ↓
+luz
+TV
+tomada
+ar-condicionado
+sensor
+câmera
+etc.
+
+Isso é excelente porque o Ultron não precisa saber conversar diretamente com cada marca.
+
+Ele só precisa saber:
+
+home.turn_on("quarto")
+home.turn_off("sala")
+home.set_temperature("ar", 23)
+
+E o Home Assistant resolve o resto.
+
+10. Celular
+
+Eu criaria um Ultron Mobile.
+
+Arquitetura:
+
+PC
+│
+├── Ultron Core
+│
+│       ↕ WebSocket
+│
+└────── Android App
+
+O celular poderia ter:
+
+MIC
+CAMERA
+GPS opcional
+NOTIFICAÇÕES
+GESTOS
+DEVICE STATUS
+REMOTE CONTROL
+
+Exemplo:
+
+"Ultron, liga meu PC."
+
+O telefone manda:
+
+POST /wake
+
+ou mensagem WebSocket.
+
+O PC poderia ser ligado usando Wake-on-LAN, desde que a placa-mãe/rede estejam configuradas para isso.
+
+11. E acesso remoto de fora de casa?
+
+Aqui entra uma coisa como Tailscale.
+
+Ele cria uma rede privada entre seus dispositivos e permite conectar computadores, celulares e servidores mesmo fora de casa; para dispositivos que não podem instalar Tailscale, um subnet router pode disponibilizar a rede local para seus outros dispositivos.
+
+Então:
+
+CELULAR
+   │
+Internet
+   │
+Tailscale
+   │
+┌───────────────┐
+│ PC DO MESTRE  │
+└───────────────┘
+      │
+      ├── impressora
+      ├── TV
+      ├── Home Assistant
+      ├── NAS
+      └── outros dispositivos
+
+Isso evita expor diretamente um monte de serviços na internet.
+
+12. E-mail
+
+Aqui podemos ter integração real por API.
+
+Por exemplo, o Gmail API permite criar e enviar drafts e operar mensagens/labels.
+
+Então:
+
+"Ultron, leia meus e-mails importantes."
+
+ou
+
+"Responda aquele e-mail dizendo que posso participar amanhã."
+
+Ele poderia:
+
+Gmail
+ ↓
+buscar mensagem
+ ↓
+entender
+ ↓
+criar resposta
+ ↓
+mostrar proposta
+ ↓
+CONFIRMAÇÃO
+ ↓
+enviar
+
+Eu não deixaria envio de e-mail completamente autônomo no início.
+
+13. Instagram
+
+Aqui precisamos separar duas coisas.
+
+API oficial
+
+Quando a plataforma oferece a operação necessária, usamos API.
+
+Navegador
+
+Quando não há API adequada para determinada ação, podemos usar browser automation.
+
+Mas Instagram é um exemplo perfeito de por que não podemos projetar o sistema assumindo que qualquer operação estará disponível ou será estável.
+
+Então eu faria:
+
+Instagram Adapter
+       │
+   ┌───┴────┐
+   │        │
+ API       Browser
+
+com fallback.
+
+E nunca faria o núcleo do Ultron depender exclusivamente da interface de um site.
+
+14. Gestos com a mão
+
+Isso é totalmente plausível.
+
+A câmera:
+
+Webcam
+ ↓
+Vision Engine
+ ↓
+hand landmarks
+ ↓
+Gesture Classifier
+ ↓
+Ultron Event
+
+Gestos possíveis:
+
+✋ mão aberta       → pausar
+☝ dedo             → selecionar
+✌ dois dedos       → próximo
+🤏 pinça            → confirmar
+👍 polegar          → confirmar
+👎                  → cancelar
+
+E eu faria isso localmente, sem mandar vídeo da câmera para uma API sem necessidade.
+
+15. Reconhecimento da sua voz
+
+Também dá.
+
+Mas aqui existe uma regra importante:
+
+voz ≠ autenticação forte
+
+Eu poderia permitir:
+
+"Ultron, abra meu projeto."
+
+diretamente.
+
+Mas para:
+
+"Ultron, envie R$ 8.000."
+
+eu exigiria:
+
+voz reconhecida
++
+dispositivo autorizado
++
+confirmação adicional
+
+Porque uma gravação de voz pode ser reproduzida.
+
+16. Autonomia
+
+Essa parte é uma das mais interessantes.
+
+Você falou:
+
+"autodecisão"
+
+Eu não faria:
+
+LLM
+ ↓
+FAÇA QUALQUER COISA
+
+Eu faria:
+
+              ULTRON
+                 │
+              PLANNER
+                 │
+              POLICY
+                 │
+          PERMISSION ENGINE
+                 │
+            EXECUTOR
+                 │
+             VERIFIER
+                 │
+              MEMORY
+Quatro categorias de ação
+Categoria	Exemplo	Confirmação
+Read-only	pesquisar, consultar CPU	não
+Reversível	abrir app, organizar janela	geralmente não
+Sensível	enviar e-mail, publicar	sim
+Destrutiva	apagar arquivos, formatar	sim
+
+Isso permite o Ultron ser autônomo sem ser suicida.
+
+17. O Ultron deveria verificar o próprio trabalho
+
+Essa parte faria uma diferença gigantesca.
+
+Imagine:
+
+"Ultron, cria uma pasta Projeto 2027 e move esses arquivos."
+
+Ele não deveria simplesmente executar.
+
+Depois da execução:
+
+EXECUTOR
+   ↓
+VERIFIER
+   ↓
+"Projeto 2027 existe?"
+"Arquivos realmente foram movidos?"
+"Quantidade esperada confere?"
+
+Só então:
+
+"Concluído."
+
+Esse mecanismo reduz absurdamente a quantidade de bugs silenciosos.
+
+18. Estrutura do projeto
+
+Eu começaria com algo próximo disso:
+
+ULTRON/
+│
+├── app/
+│   ├── desktop/
+│   │   ├── electron/
+│   │   └── renderer/
+│   │
+│   ├── mobile/
+│   │
+│   └── shared/
+│
+├── core/
+│   ├── agent/
+│   │   ├── planner.py
+│   │   ├── executor.py
+│   │   ├── verifier.py
+│   │   └── orchestrator.py
+│   │
+│   ├── voice/
+│   ├── vision/
+│   ├── memory/
+│   ├── security/
+│   └── events/
+│
+├── tools/
+│   ├── system/
+│   ├── files/
+│   ├── browser/
+│   ├── web/
+│   ├── email/
+│   ├── coding/
+│   ├── home/
+│   ├── phone/
+│   ├── printer/
+│   ├── media/
+│   └── ai/
+│
+├── mcp/
+│   ├── system_server/
+│   ├── home_server/
+│   ├── browser_server/
+│   └── memory_server/
+│
+├── memory/
+│   ├── core/
+│   ├── user/
+│   ├── projects/
+│   ├── journal/
+│   └── summaries/
+│
+├── data/
+│   ├── ultron.db
+│   ├── embeddings/
+│   └── logs/
+│
+├── config/
+│   ├── permissions.yaml
+│   ├── devices.yaml
+│   └── policies.yaml
+│
+├── tests/
+│
+├── docs/
+│
+├── .env
+├── README.md
+└── docker-compose.yml
+
+Essa estrutura já evita boa parte do caos dos projetos “Jarvis Frankenstein” encontrados na internet.
+
+19. O MD que eu considero realmente importante
+
+Eu criaria principalmente estes:
+
+docs/ULTRON_ARCHITECTURE.md
+docs/TOOLS.md
+docs/SECURITY.md
+docs/MEMORY.md
+docs/DEV_GUIDE.md
+memory/core/identity.md
+memory/user/preferences.md
+
+E teria também um documento mestre:
+
+ULTRON_SYSTEM.md
+
+Ele explicaria:
+
+# ULTRON
+
+## Identidade
+Quem é Ultron.
+
+## Objetivo
+Ser o assistente pessoal do Mestre.
+
+## Princípios
+- Não inventar resultados.
+- Confirmar ações destrutivas.
+- Nunca expor credenciais.
+- Verificar ações importantes.
+- Preferir APIs oficiais.
+- Registrar operações.
+
+## Ferramentas
+Lista de tools.
+
+## Memória
+Como recuperar memórias.
+
+## Permissões
+Níveis de autorização.
+
+## Comunicação
+Tom da voz.
+
+## Erros
+Como reportar falhas.
+
+Mas esse arquivo não substituiria o banco de memória.
+
+20. Banco de ferramentas
+
+Outra coisa que eu colocaria:
+
+tool_registry.json
+
+Algo como:
+
+{
+  "name": "delete_file",
+  "description": "Deletes one file",
+  "risk": "destructive",
+  "requires_confirmation": true,
+  "reversible": false
+}
+
+Enquanto:
+
+{
+  "name": "get_cpu_usage",
+  "description": "Returns CPU usage",
+  "risk": "read_only",
+  "requires_confirmation": false,
+  "reversible": false
+}
+
+Assim o próprio sistema sabe o que pode fazer sozinho.
+
+21. O verdadeiro diferencial: Event Bus
+
+Isso permitirá que seu Ultron deixe de ser somente "pergunte → responda".
+
+Ele passa a observar eventos.
+
+Exemplo:
+
+EVENT BUS
+
+PC ligado
+↓
+Ultron inicializa
+
+Novo email
+↓
+Ultron avalia importância
+
+Download terminou
+↓
+Ultron verifica arquivo
+
+Celular chegou em casa
+↓
+Ultron executa rotina
+
+17:00
+↓
+rotina diária
+
+Câmera detectou gesto
+↓
+interpreta comando
+
+CPU > 90%
+↓
+gera alerta
+
+Aí começa a ficar realmente parecido com um assistente pessoal.
+
+22. E programação?
+
+Aqui eu iria além.
+
+Criaria ferramentas:
+
+code.read
+code.search
+code.create
+code.edit
+code.run
+code.test
+code.debug
+code.git
+code.analyze
+
+Assim você poderia dizer:
+
+"Ultron, encontre o bug."
+
+Ele faria:
+
+analisar projeto
+↓
+localizar arquivos
+↓
+entender arquitetura
+↓
+reproduzir erro
+↓
+criar teste
+↓
+corrigir
+↓
+executar testes
+↓
+verificar
+↓
+mostrar diff
+
+É aqui que um agente realmente começa a parecer um engenheiro de software local em vez de um chatbot.
+
+23. E o CodeGPT no VS Code?
+
+Sim. Eu usaria IA para construir o próprio Ultron.
+
+Mas com uma regra:
+
+IA não recebe permissão para reescrever o projeto inteiro.
+
+Eu daria tarefas pequenas:
+
+"Crie o módulo memory_store."
+
+Depois:
+
+"Escreva os testes."
+
+Depois:
+
+"Crie o tool registry."
+
+Depois:
+
+"Implemente o executor."
+
+Depois:
+
+"Conecte o Gemini."
+
+
+Cada etapa:
+
+código
+↓
+teste
+↓
+commit
+↓
+próximo módulo
+
+Git passa a ser obrigatório.
+
+24. As fases que eu seguiria
+FASE 1 — Interface
+
+Criar:
+
+Electron
+React
+TypeScript
+Tailwind
+animações
+orb
+chat
+status
+
+Sem IA ainda.
+
+Objetivo:
+
+abrir o Ultron como programa real.
+
+FASE 2 — Voz
+
+Adicionar Gemini Live.
+
+Objetivo:
+
+Mestre fala
+↓
+Ultron escuta
+↓
+Ultron responde
+↓
+Mestre interrompe
+↓
+Ultron para
+
+Essa capacidade de interrupção já é suportada pelo Live API.
+
+FASE 3 — Primeiro Tool
+
+Somente:
+
+system_info
+
+Você:
+
+"Ultron, quanto de RAM estou usando?"
+
+Ele consulta o Windows e responde.
+
+FASE 4 — Controle do PC
+
+Adicionar:
+
+open_app
+close_app
+search_file
+read_file
+create_file
+move_file
+screenshot
+process_list
+volume
+brightness
+FASE 5 — Browser
+
+Adicionar:
+
+search
+open
+click
+type
+extract
+download
+FASE 6 — Memória
+
+Adicionar:
+
+SQLite
+Markdown
+embeddings
+retrieval
+summaries
+FASE 7 — E-mail
+
+Primeiro Gmail.
+
+Depois:
+
+Outlook
+Google Calendar
+
+A API do Gmail já permite operações de draft e envio, por exemplo.
+
+FASE 8 — Casa
+Home Assistant
+MQTT
+TV
+luzes
+tomadas
+sensores
+FASE 9 — Celular
+Ultron Mobile
+WebSocket
+notificações
+microfone
+camera
+controle remoto
+FASE 10 — Visão
+camera
+face
+gestures
+screen understanding
+object detection
+FASE 11 — Agentes autônomos
+
+Aqui entram:
+
+planner
+task queue
+scheduler
+event bus
+verification
+permissions
+FASE 12 — Carro
+
+Isso seria por último.
+
+A viabilidade depende completamente do carro, fabricante, APIs disponíveis, integração oficial e hardware existente.
+
+Eu limitaria o sistema a funções compatíveis com interfaces autorizadas e não colocaria o agente para tomar decisões relacionadas à condução em si.
+
+25. O primeiro MVP do Ultron deveria ser ridiculamente pequeno
+
+Eu faria o Ultron 0.1 conseguir somente:
+
+✓ abrir interface
+✓ ouvir
+✓ responder
+✓ interromper
+✓ consultar CPU/RAM/GPU
+✓ abrir aplicativos
+✓ localizar arquivos
+✓ abrir arquivos
+✓ pesquisar internet
+✓ lembrar algumas preferências
+✓ registrar tudo que executou
+
+Só isso.
+
+Mas feito direito.
+
+Depois:
+
+0.2 → browser
+0.3 → memória
+0.4 → e-mail
+0.5 → casa
+0.6 → celular
+0.7 → visão
+0.8 → autonomia
+26. Minha stack final para o seu caso
+Componente	Tecnologia
+Interface desktop	Electron + React + TypeScript
+Backend local	Python + FastAPI
+Comunicação	WebSocket
+Voz em tempo real	Gemini Live
+Raciocínio	Gemini
+Modelos alternativos	OpenRouter
+Modelo local futuro	Ollama
+PC	Python + PowerShell + Windows UI Automation
+Browser	Playwright
+Memória estruturada	SQLite
+Memória semântica	Vector DB
+Ferramentas	MCP
+Casa	Home Assistant
+Mobile	Android / React Native
+Rede remota	Tailscale
+Visão	OpenCV + MediaPipe
+Segurança	Permission Engine + Vault
+Logs	SQLite/JSONL
+Versionamento	Git
+
+MCP faz bastante sentido aqui justamente porque ele permite que as ferramentas sejam desacopladas do cérebro do agente. O Gemini também já possui suporte a conexões MCP remotas na API, embora com requisitos específicos de transporte/autenticação.
+
+27. E uma coisa que eu mudaria no nome da arquitetura
+
+Eu não chamaria isso internamente de:
+
+Jarvis
+
+nem:
+
+AI Assistant
+
+Eu chamaria:
+
+ULTRON CORE
+
+E teria:
+
+ULTRON CORE
+│
+├── ULTRON VOICE
+├── ULTRON VISION
+├── ULTRON MEMORY
+├── ULTRON TOOLS
+├── ULTRON DEVICES
+├── ULTRON HOME
+├── ULTRON MOBILE
+├── ULTRON SECURITY
+├── ULTRON AGENTS
+└── ULTRON AUTOMATION
+
+Isso deixa o projeto com uma arquitetura clara desde o primeiro dia.
+
+O ponto central
+
+Mestre, não tente criar o Ultron inteiro de uma vez.
+
+O caminho correto é:
+
+INTERFACE
+   ↓
+VOZ
+   ↓
+CÉREBRO
+   ↓
+TOOLS
+   ↓
+CONTROLE DO PC
+   ↓
+MEMÓRIA
+   ↓
+INTERNET
+   ↓
+CASA
+   ↓
+CELULAR
+   ↓
+VISÃO
+   ↓
+AUTONOMIA
+
+E a grande sacada é que cada etapa vira uma peça do sistema final, em vez de ser código descartável.
+
+Esse desenho também resolve exatamente o problema que você relatou dos JARVIS baixados da internet: quando algo quebrar, teremos um módulo claramente responsável pelo problema, em vez de procurar um bug perdido dentro de 30 arquivos que ninguém sabe por que existem.
+
+Agora é a hora de começar, mas não mandando o agente “criar a Liora inteira”. Vamos começar pela fundação do frontend e pelo contrato do projeto.
+
+A primeira entrega deve deixar a pasta organizada, executável e pronta para receber a interface, sem backend, sem Gemini, sem voz e sem automações ainda.
+
+A ordem que eu recomendo agora
+PASSO 1
+Governança + Design Spec + Roadmap
+
+        ↓
+
+PASSO 2
+Scaffold React + TypeScript + Vite + Tauri
+
+        ↓
+
+PASSO 3
+Design System
+cores / fontes / espaçamento / componentes
+
+        ↓
+
+PASSO 4
+Shell da aplicação
+sidebar / header / áreas principais
+
+        ↓
+
+PASSO 5
+Liora Core 3D
+esfera / partículas / órbitas / estados
+
+        ↓
+
+PASSO 6
+Animações e microinterações
+
+        ↓
+
+PASSO 7
+Telas completas com dados mockados
+
+        ↓
+
+SÓ ENTÃO
+voz + IA + memória + ferramentas
+
+Isso evita o erro do projeto antigo: começar misturando UI, Gemini, áudio, automação, câmera e lógica de negócio tudo ao mesmo tempo.
+
+Agora, no Claude/Qwen Code
+
+Primeiro quero que o agente faça a fundação completa, mas ainda sem tentar desenhar a interface inteira.
+
+Cole este prompt:
+
+PROJETO LIORA — FASE 0 + FASE 1A
+FUNDAÇÃO DO FRONTEND
+
+Você está trabalhando em um projeto NOVO chamado LIORA.
+
+Diretório do projeto:
+D:\Downloads\Liora
+
+OBJETIVO
+
+Criar a fundação profissional do projeto e preparar o frontend da assistente virtual LIORA.
+
+A LIORA será uma assistente pessoal multimodal, local-first, híbrida online/offline e futuramente poderá controlar:
+
+- PC
+- navegador
+- arquivos
+- impressora
+- celular
+- TV
+- dispositivos da casa
+- e-mail
+- redes sociais
+- música
+- desenvolvimento de software
+- jogos
+- automações
+- câmera
+- voz
+- memória
+- serviços de IA
+
+MAS NESTA ETAPA:
+NÃO implementar backend.
+NÃO implementar IA.
+NÃO implementar Gemini.
+NÃO implementar OpenRouter.
+NÃO implementar Qwen runtime.
+NÃO implementar voz.
+NÃO implementar STT/TTS.
+NÃO implementar automações.
+NÃO implementar controle de dispositivos.
+
+Estamos construindo SOMENTE a fundação e o FRONTEND.
+
+==================================================
+1. GOVERNANÇA
+==================================================
+
+Crie:
+
+AGENTS.md
+
+docs/
+    LIORA_DESIGN_SPEC.md
+    ROADMAP.md
+    ARCHITECTURE.md
+    PROJECT_STATE.md
+    DECISIONS.md
+
+Esses arquivos devem documentar:
+
+- objetivo da LIORA
+- princípios do projeto
+- arquitetura futura
+- fases do desenvolvimento
+- decisões técnicas
+- regras para agentes de programação
+- separação entre frontend e backend
+- regra de mudanças incrementais
+- proibição de refatorações grandes sem autorização
+- testes antes de considerar uma etapa concluída
+
+A arquitetura deve ser preparada para:
+
+UI
+→ Voice Engine
+→ Cognitive Core
+→ AI Router
+→ Memory
+→ Tool Registry
+→ Execution Guard
+→ External Services / Devices
+
+Mas esses módulos NÃO devem ser implementados agora.
+
+==================================================
+2. STACK DO FRONTEND
+==================================================
+
+Criar frontend com:
+
+- React
+- TypeScript
+- Vite
+- Tauri
+- Three.js
+- React Three Fiber
+- Framer Motion
+- Zustand
+- Lucide React
+
+Usar npm.
+
+NÃO usar Electron.
+
+Criar estrutura preparada para desktop.
+
+==================================================
+3. ESTRUTURA
+==================================================
+
+Organize o frontend para algo semelhante a:
+
+src/
+    app/
+    components/
+    layouts/
+    pages/
+    stores/
+    theme/
+    animations/
+    three/
+    voice-ui/
+    notifications/
+    data/
+    utils/
+    types/
+
+src-tauri/
+
+public/
+
+docs/
+
+tests/
+
+A estrutura pode ser ajustada caso exista justificativa técnica, mas documente a decisão.
+
+==================================================
+4. DESIGN SYSTEM
+==================================================
+
+Criar inicialmente o sistema visual da LIORA.
+
+IDENTIDADE:
+
+Preto + branco + vermelho.
+
+Background:
+#050505
+
+Surface:
+#111111
+
+Surface elevada:
+#171717
+
+Texto principal:
+#F5F5F5
+
+Branco:
+#FFFFFF
+
+Texto secundário:
+#A8A8A8
+
+Texto discreto:
+#666666
+
+Vermelho:
+#FF2B2B
+
+Vermelho energético:
+#FF4A4A
+
+Vermelho profundo:
+#8B0000
+
+Gradiente:
+#FF4545 → #D90E0E → #720000
+
+O branco deve ser visualmente importante.
+O vermelho é energia, foco e ação.
+O preto é ambiente.
+
+Criar tokens para:
+
+- colors
+- typography
+- spacing
+- radius
+- shadows
+- glow
+- transitions
+- z-index
+
+==================================================
+5. TIPOGRAFIA
+==================================================
+
+Usar:
+
+Display:
+Space Grotesk
+
+Interface:
+Inter
+
+Dados:
+JetBrains Mono
+
+Preparar tokens tipográficos.
+
+==================================================
+6. ÍCONES
+==================================================
+
+Usar Lucide React.
+
+A interface inicial deverá contemplar:
+
+Home
+Conversation
+Activity
+Memory
+Devices
+Automations
+Developer
+Integrations
+Settings
+
+==================================================
+7. TEMA
+==================================================
+
+Preparar arquitetura para múltiplos temas.
+
+Tema padrão:
+Crimson
+
+Futuramente permitir:
+
+Crimson
+Ice
+Violet
+Emerald
+Amber
+Custom
+
+Nesta fase basta criar a arquitetura e o tema Crimson.
+
+==================================================
+8. FRONTEND SHELL
+==================================================
+
+Criar uma aplicação inicial executável.
+
+Layout:
+
+- Sidebar esquerda
+- Header
+- Área de conteúdo central
+- Context panel opcional à direita
+- Área preparada para LIORA CORE no centro
+
+Sidebar:
+
+Modo compacto:
+aproximadamente 72px
+
+Modo expandido:
+aproximadamente 250–270px
+
+Itens:
+
+LIORA
+
+Home
+Conversation
+Activity
+Memory
+Devices
+Automations
+Developer
+Integrations
+Settings
+
+==================================================
+9. PÁGINAS
+==================================================
+
+Criar páginas navegáveis usando dados MOCKADOS:
+
+Home
+Conversation
+Activity
+Memory
+Devices
+Automations
+Developer
+Integrations
+Settings
+
+Ainda não conectar absolutamente nada real.
+
+==================================================
+10. HOME
+==================================================
+
+Criar a Home como tela principal.
+
+No centro deixar um espaço preparado para o:
+
+LIORA CORE
+
+Não implementar a esfera 3D completa ainda.
+
+Criar apenas um placeholder elegante que depois receberá o sistema Three.js.
+
+Texto inicial:
+
+LIORA
+
+"Como posso ajudar?"
+
+Criar estados mockados:
+
+IDLE
+LISTENING
+THINKING
+SPEAKING
+EXECUTING
+SUCCESS
+WARNING
+ERROR
+OFFLINE
+
+O estado pode ser controlado localmente apenas para demonstrar a interface.
+
+==================================================
+11. RESPONSIVIDADE
+==================================================
+
+A aplicação deve ser preparada para diferentes tamanhos de janela desktop.
+
+Não desenvolver mobile frontend neste momento.
+
+==================================================
+12. REGRAS
+==================================================
+
+NÃO fazer:
+
+- backend
+- API
+- banco de dados
+- voz
+- câmera
+- Gemini
+- OpenRouter
+- Qwen runtime
+- automação real
+- controle de PC
+- smart home
+- redes sociais
+- e-mail
+- login
+
+NÃO criar arquivos gigantes.
+
+NÃO colocar toda a aplicação em App.tsx.
+
+Componentizar desde o começo.
+
+==================================================
+13. TESTES
+==================================================
+
+Ao terminar:
+
+1. instalar dependências
+2. verificar build
+3. executar TypeScript checks
+4. executar testes básicos disponíveis
+5. iniciar o frontend para confirmar que abre
+
+Se Tauri exigir configuração adicional, documentar claramente.
+
+==================================================
+14. GIT
+==================================================
+
+Inicializar Git se ainda não existir.
+
+NÃO fazer push.
+
+NÃO criar branch remoto.
+
+Não apagar arquivos existentes.
+
+==================================================
+15. RELATÓRIO
+==================================================
+
+Ao finalizar informe:
+
+- estrutura criada
+- arquivos principais
+- stack instalada
+- decisões técnicas
+- comandos executados
+- resultado do build
+- resultado dos testes
+- como executar localmente
+- pendências
+- próximos passos
+
+Importante:
+
+Não avance para a implementação da esfera 3D completa.
+
+Esta tarefa termina quando a fundação do frontend estiver executável e organizada.
+
+⚠️ Não troque de modelo durante a execução.
+O que deve sair dessa primeira execução
+
+No final, Mestre, eu quero conseguir entrar em:
+
+D:\Downloads\Liora
+
+e encontrar algo próximo de:
+
+Liora/
+│
+├── AGENTS.md
+├── package.json
+├── vite.config.ts
+├── tsconfig.json
+│
+├── docs/
+│   ├── LIORA_DESIGN_SPEC.md
+│   ├── ROADMAP.md
+│   ├── ARCHITECTURE.md
+│   ├── PROJECT_STATE.md
+│   └── DECISIONS.md
+│
+├── src/
+│   ├── app/
+│   ├── components/
+│   ├── layouts/
+│   ├── pages/
+│   ├── stores/
+│   ├── theme/
+│   ├── animations/
+│   ├── three/
+│   ├── voice-ui/
+│   ├── notifications/
+│   ├── data/
+│   ├── utils/
+│   └── types/
+│
+├── src-tauri/
+│
+├── public/
+│
+└── tests/
+
+E principalmente:
+
+npm run ...
+
+abrindo uma Liora visualmente funcional, mesmo que ainda seja apenas mock.
+
+Depois disso
+
+Não mande o agente criar tudo de uma vez.
+
+O próximo passo será Design System real, e depois partiremos para a parte que eu considero a alma visual da Liora:
+
+LIORA CORE 3D
+
+Aí sim vamos construir a esfera que você imaginou — não um vídeo, mas uma cena 3D real com partículas, órbitas, pontos luminosos, profundidade, reação ao áudio e, posteriormente, interação pela mão via câmera.
+
+Essa será a primeira coisa que fará você olhar para a tela e pensar: “Agora sim. Essa é a Liora.”

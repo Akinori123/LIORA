@@ -1,0 +1,23 @@
+[package]
+name = "liora"
+version = "0.1.0"
+description = "LIORA — Soberania Cognitiva e Automação Desktop Local"
+authors = ["LIORA Core Team"]
+license = "Apache-2.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0", features = [] }
+tauri-plugin-opener = "2.0.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+num_cpus = "1.16"
+hostname = "0.4"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+sysinfo = "0.30"

@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+:root {
+  --accent-primary: #FF2B2B;
+  --accent-glow: rgba(255, 43, 43, 0.15);
+  --accent-bg: rgba(255, 43, 43, 0.1);
+  --accent-border: rgba(255, 43, 43, 0.3);
+  --bg-surface: #0a0a0a;
+  --bg-surface-elevated: #121212;
+  --bg-base: #050505;
+}
+
+[data-theme="crimson"] {
+  --accent-primary: #FF2B2B;
+  --accent-glow: rgba(255, 43, 43, 0.15);
+  --accent-bg: rgba(255, 43, 43, 0.1);
+  --accent-border: rgba(255, 43, 43, 0.3);
+  --bg-surface: #0a0a0a;
+  --bg-surface-elevated: #121212;
+  --bg-base: #050505;
+}
+
+[data-theme="emerald"] {
+  --accent-primary: #10b981;
+  --accent-glow: rgba(16, 185, 129, 0.15);
+  --accent-bg: rgba(16, 185, 129, 0.1);
+  --accent-border: rgba(16, 185, 129, 0.3);
+  --bg-surface: #0a0a0a;
+  --bg-surface-elevated: #121212;
+  --bg-base: #050505;
+}
+
+[data-theme="amber"] {
+  --accent-primary: #f59e0b;
+  --accent-glow: rgba(245, 158, 11, 0.15);
+  --accent-bg: rgba(245, 158, 11, 0.1);
+  --accent-border: rgba(245, 158, 11, 0.3);
+  --bg-surface: #0a0a0a;
+  --bg-surface-elevated: #121212;
+  --bg-base: #050505;
+}
+
+[data-theme="ice"] {
+  --accent-primary: #38bdf8;
+  --accent-glow: rgba(56, 189, 248, 0.15);
+  --accent-bg: rgba(56, 189, 248, 0.1);
+  --accent-border: rgba(56, 189, 248, 0.3);
+  --bg-surface: #0a0a0a;
+  --bg-surface-elevated: #121212;
+  --bg-base: #050505;
+}
+
+/* Atomic utility classes for reactive theming */
+.text-accent {
+  color: var(--accent-primary) !important;
+}
+.bg-accent {
+  background-color: var(--accent-primary) !important;
+}
+.bg-accent-subtle {
+  background-color: var(--accent-bg) !important;
+}
+.border-accent {
+  border-color: var(--accent-primary) !important;
+}
+.border-accent-subtle {
+  border-color: var(--accent-border) !important;
+}
+.ring-accent {
+  --tw-ring-color: var(--accent-primary) !important;
+}
+.shadow-accent {
+  box-shadow: 0 10px 25px -5px var(--accent-glow) !important;
+}
+.hover\:text-accent:hover {
+  color: var(--accent-primary) !important;
+}
+.hover\:bg-accent:hover {
+  background-color: var(--accent-primary) !important;
+}
+.hover\:border-accent:hover {
+  border-color: var(--accent-primary) !important;
+}
+.focus\:border-accent:focus {
+  border-color: var(--accent-primary) !important;
+}
+.focus\:ring-accent:focus {
+  --tw-ring-color: var(--accent-primary) !important;
+}
+
+html, body, #root {
+  background-color: var(--bg-base, #050505) !important;
+  color: #FFFFFF !important;
+  color-scheme: dark;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Custom Atomic Selection */
+::selection {
+  background-color: var(--accent-bg);
+  color: var(--accent-primary);
+}
+
+/* Custom Sleek Scrollbars with Dynamic Theme Accents */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-surface, #0A0A0A);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #262626;
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-primary);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #262626 var(--bg-surface, #0A0A0A);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
