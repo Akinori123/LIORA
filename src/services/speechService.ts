@@ -61,6 +61,9 @@ class SpeechService {
   private scriptProcessor: ScriptProcessorNode | null = null;
   private rawAudioSamples: Float32Array[] = [];
   private animFrameId: number | null = null;
+  // CORREÇÃO (Etapa 7): loop do medidor por setInterval (sobrevive à minimização)
+  private meterIntervalId: ReturnType<typeof setInterval> | null = null;
+  private lastEmitTime: number = 0;
   private audioLevelListeners = new Set<AudioLevelCallback>();
   private frequencyListeners = new Set<FrequencyCallback>();
 
@@ -416,12 +419,22 @@ class SpeechService {
         silentGain.connect(audioCtx.destination);
       }
 
+      // CORREÇÃO (Etapa 7 — microfone morre ao minimizar): o requestAnimationFrame
+      // PAUSA AUTOMATICAMENTE quando a janela é minimizada (comportamento nativo
+      // do WebView2), matando o VAD e o medidor de nível — a LIORA "surdia" em
+      // segundo plano. Substituído por setInterval de 50ms (20Hz), que continua
+      // rodando com a janela minimizada, mantendo a escuta contínua.
       const timeData = new Uint8Array(this.analyser.fftSize);
       const freqData = new Uint8Array(this.analyser.frequencyBinCount);
       let smoothedLevel = 0;
-      let lastEmitTime = 0;
+      // Etapa E: reinicializa o timestamp de emissão a cada restart do medidor
+      // (evita burst de emissões atrasadas do ciclo anterior)
+      this.lastEmitTime = 0;
 
-      const pollLevel = (timestamp: number) => {
+      if (this.meterIntervalId) {
+        clearInterval(this.meterIntervalId);
+      }
+      this.meterIntervalId = setInterval(() => {
         if (!this.shouldBeListening || !this.analyser) return;
 
         this.analyser.getByteTimeDomainData(timeData);
@@ -441,8 +454,9 @@ class SpeechService {
         smoothedLevel = smoothedLevel * 0.65 + targetLevel * 0.35;
 
         // Emite a 20Hz (a cada ~50ms)
-        if (!lastEmitTime || timestamp - lastEmitTime >= 50) {
-          lastEmitTime = timestamp;
+        const nowTs = performance.now();
+        if (!this.lastEmitTime || nowTs - this.lastEmitTime >= 50) {
+          this.lastEmitTime = nowTs;
 
           const levelEmit = Math.round(smoothedLevel);
           this.audioLevelListeners.forEach(listener => listener(levelEmit));
@@ -450,7 +464,6 @@ class SpeechService {
           // VAD (Voice Activity Detection): detecção de voz e barge-in
           if (levelEmit >= 10 || rms > 0.02) {
             if (this.isSpeaking()) {
-              console.log('[SpeechService Barge-In] Usuário falou. Interrompendo áudio LIORA...');
               this.stopSpeaking();
             }
 
@@ -493,11 +506,7 @@ class SpeechService {
           }
           this.frequencyListeners.forEach(listener => listener(frequencyBins));
         }
-
-        this.animFrameId = requestAnimationFrame(pollLevel);
-      };
-
-      this.animFrameId = requestAnimationFrame(pollLevel);
+      }, 50);
     } catch (err: any) {
       console.info('[GlobalVoiceBar AudioContext] Microfone físico não inicializado. Ativando sintetizador espectral de fallback:', err?.message || err);
       this.startFallbackAudioMeter();
@@ -637,6 +646,13 @@ class SpeechService {
     if (this.animFrameId) {
       cancelAnimationFrame(this.animFrameId);
       this.animFrameId = null;
+    }
+    // CORREÇÃO (Etapa E): limpa o intervalo do medidor em TODAS as rotas de
+    // desligamento — antes o intervalo sobrevivia a stopListening simples e o
+    // VAD continuava rodando (emitindo nível 0 silenciosamente) com mic "desligado".
+    if (this.meterIntervalId) {
+      clearInterval(this.meterIntervalId);
+      this.meterIntervalId = null;
     }
     // Módulo 3: Silencia o ganho sem matar a captura de hardware
     if (this.micGainNode && this.audioContext) {

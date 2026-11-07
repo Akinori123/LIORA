@@ -176,7 +176,7 @@ export const Sidebar: React.FC = () => {
             {(isSidebarExpanded || isMobileDrawerOpen) && (
               <div className="flex flex-col truncate">
                 <span className="text-xs font-semibold text-white truncate">Sistema Ativo</span>
-                <span className="text-[10px] text-[#A8A8A8] truncate">Gemini 3.8 Flash • R0–R3</span>
+                <span className="text-[10px] text-[#A8A8A8] truncate">Gemini 3.1 Flash Lite • R0–R3</span>
               </div>
             )}
           </div>

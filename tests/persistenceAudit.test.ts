@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -80,7 +80,6 @@ function resetTestEnvironment() {
     activeSessionId: null,
     messages: [],
     isGenerating: false,
-    activeAbortController: null
   });
 }
 
@@ -107,7 +106,7 @@ test('AUDIT 1: Criar duas conversas com mensagens diferentes', async () => {
     await useLioraStore.getState().sendMessage('Pergunta Beta');
 
     const state = useLioraStore.getState();
-    assert.equal(state.sessions.length, 2, 'Devem existir exatamente 2 sessões');
+    assert.equal(state.sessions.length, 2, 'Devem existir exatamente 2 sessÃµes');
     assert.ok(state.sessions.some(s => s.id === id1));
     assert.ok(state.sessions.some(s => s.id === id2));
 
@@ -128,31 +127,31 @@ test('AUDIT 1: Criar duas conversas com mensagens diferentes', async () => {
   }
 });
 
-test('AUDIT 2: Recarregar a aplicação e recuperar ambas as conversas', () => {
+test('AUDIT 2: Recarregar a aplicaÃ§Ã£o e recuperar ambas as conversas', () => {
   // O teste 1 persistiu as conversas no mockStorage
-  // Simular recarregamento da aplicação (limpar estado de memória e re-hidratar do storage)
+  // Simular recarregamento da aplicaÃ§Ã£o (limpar estado de memÃ³ria e re-hidratar do storage)
   useLioraStore.setState({
     sessions: [],
     activeSessionId: null,
     messages: []
   });
 
-  // Re-hidratar a partir do armazenamento (como ocorre ao dar F5 na aplicação)
+  // Re-hidratar a partir do armazenamento (como ocorre ao dar F5 na aplicaÃ§Ã£o)
   useLioraStore.getState().reloadFromStorage();
 
   const restored = useLioraStore.getState();
-  assert.equal(restored.sessions.length, 2, 'Ambas as conversas devem ser recuperadas após reload');
+  assert.equal(restored.sessions.length, 2, 'Ambas as conversas devem ser recuperadas apÃ³s reload');
   
   const alfa = restored.sessions.find(s => s.title === 'Conversa Alfa');
   const beta = restored.sessions.find(s => s.title === 'Conversa Beta');
 
-  assert.ok(alfa, 'Conversa Alfa deve existir após reload');
-  assert.ok(beta, 'Conversa Beta deve existir após reload');
+  assert.ok(alfa, 'Conversa Alfa deve existir apÃ³s reload');
+  assert.ok(beta, 'Conversa Beta deve existir apÃ³s reload');
   assert.equal(alfa.messages.length, 2);
   assert.equal(beta.messages.length, 2);
 });
 
-test('AUDIT 3: Abrir cada conversa e confirmar que suas mensagens estão estritamente isoladas', () => {
+test('AUDIT 3: Abrir cada conversa e confirmar que suas mensagens estÃ£o estritamente isoladas', () => {
   const store = useLioraStore.getState();
   const alfa = store.sessions.find(s => s.title === 'Conversa Alfa')!;
   const beta = store.sessions.find(s => s.title === 'Conversa Beta')!;
@@ -163,7 +162,7 @@ test('AUDIT 3: Abrir cada conversa e confirmar que suas mensagens estão estrita
   const alfaActiveMsgs = useLioraStore.getState().messages;
   assert.equal(alfaActiveMsgs.length, 2);
   assert.equal(alfaActiveMsgs[0].text, 'Pergunta Alfa');
-  assert.ok(!alfaActiveMsgs.some(m => m.text.includes('Beta')), 'Mensagens de Beta não devem vazar para Alfa');
+  assert.ok(!alfaActiveMsgs.some(m => m.text.includes('Beta')), 'Mensagens de Beta nÃ£o devem vazar para Alfa');
 
   // Abrir Beta
   useLioraStore.getState().openSession(beta.id);
@@ -171,14 +170,14 @@ test('AUDIT 3: Abrir cada conversa e confirmar que suas mensagens estão estrita
   const betaActiveMsgs = useLioraStore.getState().messages;
   assert.equal(betaActiveMsgs.length, 2);
   assert.equal(betaActiveMsgs[0].text, 'Pergunta Beta');
-  assert.ok(!betaActiveMsgs.some(m => m.text.includes('Alfa')), 'Mensagens de Alfa não devem vazar para Beta');
+  assert.ok(!betaActiveMsgs.some(m => m.text.includes('Alfa')), 'Mensagens de Alfa nÃ£o devem vazar para Beta');
 
-  // Confirmar que o activeSessionId persistido no storage é o de Beta
+  // Confirmar que o activeSessionId persistido no storage Ã© o de Beta
   const stored = loadHistory();
   assert.equal(stored.activeSessionId, beta.id);
 });
 
-test('AUDIT 4: Acrescentar mensagens e confirmar que são salvas no armazenamento', async () => {
+test('AUDIT 4: Acrescentar mensagens e confirmar que sÃ£o salvas no armazenamento', async () => {
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async () => {
@@ -188,7 +187,7 @@ test('AUDIT 4: Acrescentar mensagens e confirmar que são salvas no armazenament
     const betaId = useLioraStore.getState().activeSessionId!;
     await useLioraStore.getState().sendMessage('Segunda pergunta para Beta');
 
-    // Verificar mensagens na sessão ativa
+    // Verificar mensagens na sessÃ£o ativa
     const currentMsgs = useLioraStore.getState().messages;
     assert.equal(currentMsgs.length, 4, 'Beta agora deve ter 4 mensagens');
     assert.equal(currentMsgs[2].text, 'Segunda pergunta para Beta');
@@ -202,13 +201,13 @@ test('AUDIT 4: Acrescentar mensagens e confirmar que são salvas no armazenament
 
     // Confirmar que Alfa continuou intacta no storage com 2 mensagens
     const storedAlfa = stored.sessions.find(s => s.title === 'Conversa Alfa')!;
-    assert.equal(storedAlfa.messages.length, 2, 'Alfa não deve sofrer alteração');
+    assert.equal(storedAlfa.messages.length, 2, 'Alfa nÃ£o deve sofrer alteraÃ§Ã£o');
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test('AUDIT 5: Excluir uma conversa e confirmar que ela não reaparece após novo carregamento', () => {
+test('AUDIT 5: Excluir uma conversa e confirmar que ela nÃ£o reaparece apÃ³s novo carregamento', () => {
   const store = useLioraStore.getState();
   const alfa = store.sessions.find(s => s.title === 'Conversa Alfa')!;
   
@@ -223,47 +222,47 @@ test('AUDIT 5: Excluir uma conversa e confirmar que ela não reaparece após nov
   useLioraStore.getState().reloadFromStorage();
 
   const reloaded = useLioraStore.getState();
-  assert.ok(!reloaded.sessions.some(s => s.id === alfa.id), 'Conversa excluída não pode reaparecer no reload');
+  assert.ok(!reloaded.sessions.some(s => s.id === alfa.id), 'Conversa excluÃ­da nÃ£o pode reaparecer no reload');
   assert.equal(reloaded.sessions.length, 1);
   assert.equal(reloaded.sessions[0].title, 'Conversa Beta');
 });
 
-test('AUDIT 6: Garantir que a exclusão da conversa ativa selecione outra conversa válida ou retorne ao estado inicial sem erros', () => {
+test('AUDIT 6: Garantir que a exclusÃ£o da conversa ativa selecione outra conversa vÃ¡lida ou retorne ao estado inicial sem erros', () => {
   resetTestEnvironment();
 
-  // Criar três conversas: C1, C2, C3
+  // Criar trÃªs conversas: C1, C2, C3
   const id1 = useLioraStore.getState().createSession('C1');
   const id2 = useLioraStore.getState().createSession('C2');
   const id3 = useLioraStore.getState().createSession('C3');
 
-  // C3 é a ativa atualmente
+  // C3 Ã© a ativa atualmente
   assert.equal(useLioraStore.getState().activeSessionId, id3);
 
-  // Caso A: Excluir C3 (ativa). Deve selecionar outra conversa válida (C2 ou C1)
+  // Caso A: Excluir C3 (ativa). Deve selecionar outra conversa vÃ¡lida (C2 ou C1)
   useLioraStore.getState().deleteSession(id3);
   const nextActiveId = useLioraStore.getState().activeSessionId;
-  assert.ok(nextActiveId === id2 || nextActiveId === id1, 'Deve selecionar outra conversa válida');
+  assert.ok(nextActiveId === id2 || nextActiveId === id1, 'Deve selecionar outra conversa vÃ¡lida');
   assert.equal(useLioraStore.getState().sessions.length, 2);
 
-  // Caso B: Excluir restantes até a última
+  // Caso B: Excluir restantes atÃ© a Ãºltima
   useLioraStore.getState().deleteSession(id2);
   assert.equal(useLioraStore.getState().activeSessionId, id1);
 
-  // Excluir a última conversa (C1)
+  // Excluir a Ãºltima conversa (C1)
   useLioraStore.getState().deleteSession(id1);
 
-  // Deve retornar ao estado inicial seguro com uma nova sessão padrão limpa, sem null/undefined ou crash
+  // Deve retornar ao estado inicial seguro com uma nova sessÃ£o padrÃ£o limpa, sem null/undefined ou crash
   const stateAfterLastDelete = useLioraStore.getState();
-  assert.equal(stateAfterLastDelete.sessions.length, 1, 'Deve criar sessão limpa ao deletar última');
+  assert.equal(stateAfterLastDelete.sessions.length, 1, 'Deve criar sessÃ£o limpa ao deletar Ãºltima');
   assert.ok(typeof stateAfterLastDelete.activeSessionId === 'string' && stateAfterLastDelete.activeSessionId.length > 0);
   assert.equal(stateAfterLastDelete.messages.length, 0);
 
-  // Verificar que o storage sobreviveu e tem a sessão padrão
+  // Verificar que o storage sobreviveu e tem a sessÃ£o padrÃ£o
   const stored = loadHistory();
   assert.equal(stored.sessions.length, 1);
 });
 
-test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que ela é persistida corretamente sem corromper', async () => {
+test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que ela Ã© persistida corretamente sem corromper', async () => {
   resetTestEnvironment();
 
   const originalFetch = globalThis.fetch;
@@ -275,9 +274,9 @@ test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que e
       const signal = options?.signal as AbortSignal;
       const stream = new ReadableStream({
         async start(controller) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: 'Início da resposta da IA...' })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: 'InÃ­cio da resposta da IA...' })}\n\n`));
           
-          // Espera abort do usuário
+          // Espera abort do usuÃ¡rio
           signal.addEventListener('abort', () => {
             controller.error(new DOMException('The user aborted a request.', 'AbortError'));
           });
@@ -290,7 +289,7 @@ test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que e
       });
     };
 
-    const sessId = useLioraStore.getState().createSession('Sessão Interrupção');
+    const sessId = useLioraStore.getState().createSession('SessÃ£o InterrupÃ§Ã£o');
     
     // Inicia envio de mensagem
     const sendPromise = useLioraStore.getState().sendMessage('Gere um plano complexo');
@@ -306,7 +305,7 @@ test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que e
     assert.equal(msgs[0].sender, 'user');
     assert.equal(msgs[1].sender, 'assistant');
     assert.equal(msgs[1].status, 'cancelled', 'Mensagem deve ter status cancelled');
-    assert.match(msgs[1].text, /Geração interrompida/);
+    assert.match(msgs[1].text, /GeraÃ§Ã£o interrompida/);
 
     // Verificar se a mensagem cancelada foi salva corretamente no storage sem corromper o JSON
     const stored = loadHistory();
@@ -314,7 +313,7 @@ test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que e
     assert.equal(targetSession.messages.length, 2);
     assert.equal(targetSession.messages[1].status, 'cancelled');
 
-    // Simular reload e confirmar persistência íntegra
+    // Simular reload e confirmar persistÃªncia Ã­ntegra
     useLioraStore.setState({ sessions: [], activeSessionId: null, messages: [] });
     useLioraStore.getState().reloadFromStorage();
     const afterReload = useLioraStore.getState();
@@ -324,7 +323,7 @@ test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que e
   }
 });
 
-test('AUDIT 8: Simular falha de rede/API e confirmar que o erro é registrado sem perda das mensagens anteriores', async () => {
+test('AUDIT 8: Simular falha de rede/API e confirmar que o erro Ã© registrado sem perda das mensagens anteriores', async () => {
   resetTestEnvironment();
 
   const originalFetch = globalThis.fetch;
@@ -338,7 +337,7 @@ test('AUDIT 8: Simular falha de rede/API e confirmar que o erro é registrado se
       return createMockSseResponse(['Primeira mensagem respondida com sucesso.']);
     };
 
-    const sessId = useLioraStore.getState().createSession('Sessão Falha de Rede');
+    const sessId = useLioraStore.getState().createSession('SessÃ£o Falha de Rede');
     
     // Mensagem 1 - Sucesso
     await useLioraStore.getState().sendMessage('Mensagem inicial importante');
@@ -346,20 +345,20 @@ test('AUDIT 8: Simular falha de rede/API e confirmar que o erro é registrado se
 
     // Ativar falha de rede para a mensagem 2
     shouldFail = true;
-    await useLioraStore.getState().sendMessage('Segunda mensagem que falhará na rede');
+    await useLioraStore.getState().sendMessage('Segunda mensagem que falharÃ¡ na rede');
 
     const msgs = useLioraStore.getState().messages;
     assert.equal(msgs.length, 4, 'Todas as 4 mensagens devem estar preservadas');
     assert.equal(msgs[0].text, 'Mensagem inicial importante');
     assert.equal(msgs[1].text, 'Primeira mensagem respondida com sucesso.');
-    assert.equal(msgs[2].text, 'Segunda mensagem que falhará na rede');
+    assert.equal(msgs[2].text, 'Segunda mensagem que falharÃ¡ na rede');
     
-    // Mensagem 4 é a falha do assistente
+    // Mensagem 4 Ã© a falha do assistente
     assert.equal(msgs[3].status, 'error', 'Mensagem 4 deve registrar status de erro');
     assert.equal(msgs[3].errorCode, 'NETWORK_ERROR');
     assert.ok(msgs[3].errorMessage && msgs[3].errorMessage.length > 0);
 
-    // Verificar no armazenamento: histórico anterior intacto
+    // Verificar no armazenamento: histÃ³rico anterior intacto
     const stored = loadHistory();
     const storedSess = stored.sessions.find(s => s.id === sessId)!;
     assert.equal(storedSess.messages.length, 4);
@@ -382,7 +381,7 @@ test('AUDIT 9: Integridade do formato e robustez contra dados corrompidos ou IDs
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: [
-        { id: 'm1', sender: 'user', text: 'Olá', timestamp: '10:00', status: 'completed' }
+        { id: 'm1', sender: 'user', text: 'OlÃ¡', timestamp: '10:00', status: 'completed' }
       ]
     }
   ];
@@ -412,7 +411,7 @@ test('AUDIT 9: Integridade do formato e robustez contra dados corrompidos ou IDs
   mockStorage.setItem(PRIMARY_STORAGE_KEY, '"uma string qualquer"');
   assert.deepEqual(loadHistory(), { sessions: [], activeSessionId: null });
 
-  // 4. Sobrevive a campos faltantes ou mensagens malformadas com sanitização
+  // 4. Sobrevive a campos faltantes ou mensagens malformadas com sanitizaÃ§Ã£o
   const malformedPayload = {
     version: 1,
     activeSessionId: 'sess-x',
@@ -429,8 +428,9 @@ test('AUDIT 9: Integridade do formato e robustez contra dados corrompidos ou IDs
   assert.equal(typeof sanitizedLoad.sessions[0].title, 'string');
   assert.equal(sanitizedLoad.sessions[0].messages.length, 1);
 
-  // 5. Chamada de openSession com ID inexistente não trava a aplicação
+  // 5. Chamada de openSession com ID inexistente nÃ£o trava a aplicaÃ§Ã£o
   useLioraStore.setState({ sessions: sampleSessions, activeSessionId: 'sess-integrity-1' });
   useLioraStore.getState().openSession('id-totalmente-inexistente-9999');
-  assert.equal(useLioraStore.getState().activeSessionId, 'sess-integrity-1', 'ID inexistente deve ser ignorado com segurança');
+  assert.equal(useLioraStore.getState().activeSessionId, 'sess-integrity-1', 'ID inexistente deve ser ignorado com seguranÃ§a');
 });
+

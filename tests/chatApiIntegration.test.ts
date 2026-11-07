@@ -5,8 +5,35 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+// FIX 7: ciclo de vida do servidor importado diretamente — sobe o Express na porta
+// de teste antes de toda a suíte e encerra limpo no after, eliminando ECONNREFUSED.
+import { startServer, stopServer } from '../server.ts';
 
 const BASE_URL = 'http://localhost:3000';
+
+const __filename = fileURLToPath(import.meta.url);
+const projectRoot = path.resolve(path.dirname(__filename), '..');
+
+test.before(async () => {
+  await startServer(3000);
+
+  // Aguarda o servidor responder (até 15s)
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${BASE_URL}/api/system/bridge-status`);
+      if (res.status > 0) return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+}, { timeout: 30000 });
+
+test.after(async () => {
+  await stopServer();
+});
 
 test('POST /api/gemini/chat/stream rejects empty message with 400 INVALID_INPUT', async () => {
   const res = await fetch(`${BASE_URL}/api/gemini/chat/stream`, {
@@ -105,6 +132,7 @@ test('POST /api/gemini/chat/stream handles multi-turn conversation history corre
 
 test('POST /api/gemini/chat/stream responds cleanly when aborted midway', async () => {
   const controller = new AbortController();
+  let abortedCleanly = false;
 
   try {
     const res = await fetch(`${BASE_URL}/api/gemini/chat/stream`, {
@@ -121,9 +149,19 @@ test('POST /api/gemini/chat/stream responds cleanly when aborted midway', async 
     if (reader) {
       await reader.read();
       controller.abort();
-      await reader.cancel().catch(() => {});
+      try {
+        await reader.cancel();
+      } catch {
+        // cancel após abort pode lançar terminated — comportamento esperado
+      }
+      abortedCleanly = true;
     }
   } catch (err: any) {
-    assert.ok(err.name === 'AbortError' || controller.signal.aborted);
+    abortedCleanly = err.name === 'AbortError' || controller.signal.aborted;
   }
+
+  // O importante: o abort NÃO derruba o servidor. Confirma que a API ainda responde.
+  assert.ok(abortedCleanly, 'O cancelamento do stream deve ser limpo (AbortError ou cancel silencioso).');
+  const health = await fetch(`${BASE_URL}/api/health`);
+  assert.equal(health.status, 200, 'Servidor deve continuar saudável após abort de stream.');
 });

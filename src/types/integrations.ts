@@ -14,9 +14,12 @@ export type IntegrationProviderId =
   | 'homeassistant' 
   | 'discord'
   | 'slack'
+  // FASE 2: Produtividade (E-mail IMAP/SMTP e Calendário ICS/API)
+  | 'email'
+  | 'calendar'
   | 'custom';
 
-export type IntegrationCategory = 'ai' | 'cloud' | 'finance' | 'iot' | 'database' | 'social';
+export type IntegrationCategory = 'ai' | 'cloud' | 'finance' | 'iot' | 'database' | 'social' | 'productivity';
 
 export type IntegrationConnectionStatus = 
   | 'CONNECTED' 

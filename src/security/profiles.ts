@@ -7,13 +7,64 @@ import { SecurityProfileConfig, SecurityProfileName } from './types';
 
 /**
  * Perfil padrão inicial STRICT:
- * - Apenas 'system_info' é elegível na lista branca inicial.
+ * - Ferramentas R0 de leitura/consulta na lista branca, incluindo as nativas reais
+ *   instaladas pelo servidor (system_info, env_safe) e a rota real via OSRM.
  * - 'workspace_read_file' permanece expressamente fora da lista branca nesta fase.
- * - R1, R2 e R3 permanecem categoricamente bloqueados para execução nesta fase.
+ * - R1 e R2: NÃO executáveis sem consentimento — mas autorizáveis com token HMAC
+ *   de consentimento explícito (consumeConsentToken anti-replay), conforme o fluxo
+ *   do ConsentCard. allowR2=false significa "nunca executar R2 sem consentimento",
+ *   não "nunca executar R2". R3 permanece categoricamente bloqueado.
  */
 export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
   profileName: 'STRICT',
-  allowedTools: Object.freeze(['system_info', 'system_read_env_safe']),
+  allowedTools: Object.freeze([
+    'system_info',
+    'system_read_env_safe',
+    'calculate_route',
+    'fetchNews',
+    'list_processes',
+    'workspace_search_files',
+    'browser_extract_text',
+    'browser_screenshot',
+    'browser_close_session',
+    'getSystemStatus',
+    'memory_semantic_search',
+    'memory_list_context',
+    'code_search_symbols',
+    'code_grep',
+    'code_read_file',
+    'git_status',
+    'git_diff',
+    'iot_list_devices',
+    'device_command',
+    'open_gps_navigation',
+    'maps_search_places',
+    'resolve_place_alias',
+    // NÚCLEO DE CONTROLE TOTAL DO PC (leitura real)
+    'pc_take_screenshot',
+    'file_search_and_read',
+    // FASE 2: PRODUTIVIDADE — leitura (R1)
+    'email_fetch_and_read',
+    'calendar_list_events',
+    // Escrita (R2 — executa apenas com consentimento HMAC)
+    'email_send_or_reply',
+    'calendar_create_event',
+    // FASE 3: SUB-AGENTES — consulta (R1)
+    'check_background_task_status',
+    'list_background_tasks',
+    // FASE 3: SUB-AGENTES — start/cancel (R2 — executa apenas com consentimento HMAC)
+    'start_background_task',
+    'cancel_background_task',
+    // FASE 4: COFRE CRIPTOGRAFADO — listagem/health (R1, sem expor valores)
+    'vault_list_keys',
+    'vault_health_check',
+    // FASE 4: COFRE CRIPTOGRAFADO — chave/valor (R2 — apenas com consentimento HMAC)
+    'vault_store_credential',
+    'vault_get_credential',
+    'vault_delete_credential',
+    // AGENTE WEB AUTÓNOMO (R2 — executa apenas com consentimento HMAC)
+    'web_browser_agent'
+  ]),
   deniedTools: Object.freeze(['workspace_read_file']),
   requireConfirmationForR1: true,
   allowR2: false as const,
@@ -27,7 +78,28 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
  */
 export const STANDARD_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
   profileName: 'STANDARD',
-  allowedTools: Object.freeze(['system_info', 'system_read_env_safe']),
+  allowedTools: Object.freeze([
+    'system_info',
+    'system_read_env_safe',
+    'calculate_route',
+    'fetchNews',
+    'list_processes',
+    'workspace_search_files',
+    'browser_extract_text',
+    'browser_screenshot',
+    'browser_close_session',
+    'getSystemStatus',
+    'memory_semantic_search',
+    'memory_list_context',
+    'code_search_symbols',
+    'code_grep',
+    'code_read_file',
+    'git_status',
+    'git_diff',
+    'iot_list_devices',
+    'open_gps_navigation',
+    'maps_search_places'
+  ]),
   deniedTools: Object.freeze([]),
   requireConfirmationForR1: true,
   allowR2: false as const,
@@ -41,7 +113,28 @@ export const STANDARD_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
  */
 export const DEVELOPER_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
   profileName: 'DEVELOPER',
-  allowedTools: Object.freeze(['system_info', 'system_read_env_safe']),
+  allowedTools: Object.freeze([
+    'system_info',
+    'system_read_env_safe',
+    'calculate_route',
+    'fetchNews',
+    'list_processes',
+    'workspace_search_files',
+    'browser_extract_text',
+    'browser_screenshot',
+    'browser_close_session',
+    'getSystemStatus',
+    'memory_semantic_search',
+    'memory_list_context',
+    'code_search_symbols',
+    'code_grep',
+    'code_read_file',
+    'git_status',
+    'git_diff',
+    'iot_list_devices',
+    'open_gps_navigation',
+    'maps_search_places'
+  ]),
   deniedTools: Object.freeze([]),
   requireConfirmationForR1: true,
   allowR2: false as const,

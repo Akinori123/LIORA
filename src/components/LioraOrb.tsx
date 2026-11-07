@@ -8,6 +8,9 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+// AUDITORIA 3D (OrbitControls): interatividade completa da Orbe — rotação por
+// arraste, zoom por wheel/pinch com limites saudáveis e damping orgânico.
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { OrbState } from '../types';
 import { useLioraStore } from '../store/lioraStore';
 import { getThemeColors, ThemeColors } from '../utils/themeColors';
@@ -140,6 +143,11 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hasWebGLError, setHasWebGLError] = React.useState(false);
+  // CORREÇÃO (Orbe sumido): watchdog de primeiro frame. Se após 4s nenhum pixel
+  // diferente de preto foi desenhado (shader compilou mas output preto — típico de
+  // UnrealBloomPass sem suporte a HalfFloat no WebView2), o componente troca
+  // automaticamente para o núcleo 2D elegante em vez de ficar em tela preta eterna.
+  const [renderBlackScreen, setRenderBlackScreen] = React.useState(false);
   const { settings, isGenerating: isProcessing } = useLioraStore();
 
   // Stable references for in-place updates without canvas unmounting or GC spikes
@@ -148,6 +156,7 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
   const ptLightRef = useRef<THREE.PointLight | null>(null);
   const ringMeshesRef = useRef<THREE.Mesh[]>([]);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
   const themeColorsRef = useRef<ThemeColors>(getThemeColors(settings?.theme));
 
   // Dynamic state refs for per-frame animation reading
@@ -173,11 +182,17 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     onSwipeDownRef.current = onSwipeDown;
   }, [onSwipeDown]);
 
-  // In-place camera distance update when minimized changes
+  // In-place camera distance update when minimized changes — via OrbitControls
+  // (AUDITORIA 3D: alterar camera.position diretamente era sobrescrito pelo
+  // controls.update(); agora anima a distância do próprio controls)
   useEffect(() => {
     isMinimizedRef.current = isMinimized;
-    if (cameraRef.current) {
-      cameraRef.current.position.z = isMinimized ? 6.2 : 4.6;
+    const controls = controlsRef.current;
+    if (controls) {
+      const targetDist = isMinimized ? 6.2 : 4.6;
+      const dir = controls.object.position.clone().sub(controls.target).normalize();
+      controls.object.position.copy(controls.target.clone().add(dir.multiplyScalar(targetDist)));
+      controls.update();
     }
   }, [isMinimized]);
 
@@ -232,6 +247,21 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     const container = containerRef.current;
     if (!container) return;
 
+    // CORREÇÃO (Orbe sumido no WebView2 do Tauri): detecta a disponibilidade real
+    // de WebGL ANTES de tentar criar o renderer. O WebView2 (WebView do Tauri no
+    // Windows) pode não expor contexto WebGL2/hardware acceleration em certas
+    // configs (GPU blocklist, remote desktop, driver antigo) — o THREE.WebGLRenderer
+    // então lançava depois ou renderizava preto sem erro capturável.
+    const probeCanvas = document.createElement('canvas');
+    const webglAttrs = { antialias: false, depth: false, stencil: false };
+    const webgl2 = probeCanvas.getContext('webgl2', webglAttrs);
+    const webgl1 = webgl2 ? null : probeCanvas.getContext('webgl', webglAttrs) || probeCanvas.getContext('experimental-webgl', webglAttrs);
+    if (!webgl2 && !webgl1) {
+      console.warn('[LioraOrb] WebGL indisponível no WebView (probe falhou). Exibindo núcleo 2D de fallback.');
+      setHasWebGLError(true);
+      return;
+    }
+
     const width = container.clientWidth || 360;
     const height = container.clientHeight || 360;
 
@@ -242,8 +272,14 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
       renderer = new THREE.WebGLRenderer({ 
         antialias: true, 
         alpha: true, 
-        powerPreference: 'high-performance' 
+        powerPreference: 'high-performance',
+        // Correção: evita falha em GPUs sem suporte a float render targets
+        failIfMajorPerformanceCaveat: false
       });
+      // CORREÇÃO (tela preta): clear color explícito transparente. Antes, com
+      // alpha:true mas sem clearColor definido, alguns WebViews renderizavam o
+      // buffer inicial opaco preto por cima do fundo da UI.
+      renderer.setClearColor(0x000000, 0);
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.1;
@@ -335,35 +371,47 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     ptLightRef.current = ptLight;
     scene.add(ptLight);
 
-    // Swipe-down and drag gesture detection
-    let isDragging = false;
+    // AUDITORIA 3D — ORBITCONTROLS: interatividade completa da Orbe.
+    // Configuração imersiva solicitada:
+    //  - Rotação fluida por arraste (botão esquerdo) e touch
+    //  - Zoom por wheel/pinch com limites saudáveis (não entra na esfera, não some)
+    //  - Pan desabilitado (o Orbe é o centro fixo da identidade visual)
+    //  - Damping 0.05 para movimento suave e orgânico
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableRotate = true;
+    controls.enableZoom = true;
+    controls.minDistance = 2.4;   // não entra dentro da esfera (raio ~1.0 + folga)
+    controls.maxDistance = 10.0;  // não some no infinito
+    controls.enablePan = false;   // centro fixo — identidade visual da LIORA
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.rotateSpeed = 0.8;
+    controls.zoomSpeed = 0.9;
+    controls.target.set(0, 0, 0);
+    controls.update();
+    controlsRef.current = controls;
+
+    // Gesto de swipe-down (minimizar o Orbe) PRESERVADO — independente do OrbitControls,
+    // com limiar vertical e bloqueio durante rotação intencional da câmera.
     let startY = 0;
-    let prevMouse = { x: 0, y: 0 };
-
+    let swipeAccumY = 0;
     const handleMouseDown = (e: MouseEvent) => {
-      isDragging = true;
       startY = e.clientY;
-      prevMouse = { x: e.clientX, y: e.clientY };
+      swipeAccumY = 0;
     };
-
     const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging) return;
-      aiGroup.rotation.y += (e.clientX - prevMouse.x) * 0.005;
-      aiGroup.rotation.x += (e.clientY - prevMouse.y) * 0.005;
-      prevMouse = { x: e.clientX, y: e.clientY };
+      if (e.buttons !== 1) return; // só conta com botão pressionado
+      swipeAccumY += e.movementY || 0;
     };
-
     const handleMouseUp = (e: MouseEvent) => {
-      if (isDragging && onSwipeDownRef.current) {
-        const deltaY = e.clientY - startY;
-        if (deltaY > 60) {
-          onSwipeDownRef.current();
-        }
+      // Swipe para baixo com pouco movimento horizontal = minimizar (não rotação)
+      const deltaY = e.clientY - startY;
+      if (deltaY > 60 && Math.abs(swipeAccumY - deltaY) < 20 && onSwipeDownRef.current) {
+        onSwipeDownRef.current();
       }
-      isDragging = false;
     };
 
-    // Touch support for mobile/trackpad gestures
+    // Touch support: swipe-down para minimizar (OrbitControls já cobre rotação/zoom touch)
     let touchStartY = 0;
     const handleTouchStart = (e: TouchEvent) => {
       if (e.touches.length > 0) {
@@ -380,8 +428,12 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     };
 
     container.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    // BUG FIX (swipe-down): os listeners de mousemove/mouseup devem estar no CANVAS,
+    // não no window — o OrbitControls usa setPointerCapture no pointerdown, e a
+    // captura roteia todos os eventos subsequentes para o próprio canvas. No window,
+    // o swipe-down nunca era recebido durante o drag (minimizar não funcionava).
+    container.addEventListener('mousemove', handleMouseMove);
+    container.addEventListener('mouseup', handleMouseUp);
     container.addEventListener('touchstart', handleTouchStart, { passive: true });
     container.addEventListener('touchend', handleTouchEnd, { passive: true });
 
@@ -404,6 +456,8 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     const FRAME_INTERVAL_IDLE = 1000 / TARGET_FPS_IDLE; // ~33ms
     const startTime = performance.now();
     let lastInteractionTime = Date.now();
+    // FIX W9: flag para evitar múltiplos setTimeout de retomada agendados
+    let isHiddenPauseScheduled = false;
 
     const resetInteraction = () => {
       lastInteractionTime = Date.now();
@@ -411,14 +465,49 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     window.addEventListener('mousemove', resetInteraction, { passive: true });
     window.addEventListener('keydown', resetInteraction, { passive: true });
 
+    // FIX W9: listener de visibilidade — retoma o RAF imediatamente quando a janela volta ao foco
+    const handleVisibilityChange = () => {
+      if (!document.hidden && !isHiddenPauseScheduled) {
+        cancelAnimationFrame(animId);
+        animId = requestAnimationFrame(animate);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Watchdog vars (declared outside animate for closure)
+    let blackFrameCheckDone = false;
+    let blackFrameCheckFrames = 0;
+
     const animate = () => {
+      // BUG CRÍTICO CORRIGIDO: o requestAnimationFrame de re-agendamento foi
+      // removido acidentalmente durante o FIX W9 (pausa em document.hidden),
+      // matando o loop após o PRIMEIRO frame. Sintomas: Orbe congelado/preto
+      // (watchdog nunca completava) e OrbitControls mortos (damping sem update
+      // contínuo). O re-agendamento voltou para o topo — sempre agenda o próximo
+      // frame antes de qualquer early-return.
       animId = requestAnimationFrame(animate);
 
-      // 1. Otimização de GPU Crítica: pausa completa se aba estiver oculta ou elemento fora de tela
+      // FIX W9: pausa o loop de RAF quando a janela/aba perde foco (document.hidden)
+      // e reagenda com setTimeout de 250ms, evitando consumo de CPU/GPU em segundo plano.
       if (typeof document !== 'undefined' && document.hidden) {
+        if (!isHiddenPauseScheduled) {
+          isHiddenPauseScheduled = true;
+          setTimeout(() => {
+            isHiddenPauseScheduled = false;
+            if (typeof document !== 'undefined' && !document.hidden) {
+              animId = requestAnimationFrame(animate);
+            }
+          }, 250);
+        }
         return;
       }
-      if (container.offsetParent === null) {
+
+      // 1. Otimização de GPU: pausa se elemento fora de tela. CORREÇÃO: antes usava
+      // container.offsetParent === null, que também é true quando o elemento está
+      // dentro de position:fixed (layout da HomeView!) — o loop morria nesse caso.
+      // Substituído por checagem de dimensões reais via getBoundingClientRect.
+      const rect = container.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
         return;
       }
 
@@ -491,7 +580,38 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
         reactorMat.emissiveIntensity = isIdleLong ? 0.45 : 0.75;
       }
       
+      // AUDITORIA 3D: damping do OrbitControls exige update() por frame —
+      // sem isso o amortecimento não funciona (movimento cortado e sem inércia).
+      controlsRef.current?.update();
+
       composer.render();
+
+      // Watchdog de primeiro frame (uma única execução): amostra o pixel central
+      // do canvas. Se for preto puro nas 2 primeiras renderizações reais, dispara
+      // o fallback 2D (problema clássico de bloom/float targets no WebView2).
+      if (!blackFrameCheckDone) {
+        blackFrameCheckFrames += 1;
+        if (blackFrameCheckFrames >= 4) {
+          blackFrameCheckDone = true;
+          try {
+            const gl = renderer.getContext();
+            const px = new Uint8Array(4);
+            // Lê o pixel central do framebuffer (y invertido em GL)
+            gl.readPixels(
+              Math.floor(gl.drawingBufferWidth / 2),
+              Math.floor(gl.drawingBufferHeight / 2),
+              1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px
+            );
+            const isPureBlack = px[0] < 4 && px[1] < 4 && px[2] < 4 && px[3] < 4;
+            if (isPureBlack) {
+              console.warn('[LioraOrb] Primeiros frames 100% pretos — bloom/float targets não suportados no WebView. Ativando núcleo 2D de fallback.');
+              setRenderBlackScreen(true);
+            }
+          } catch (e) {
+            // readPixels indisponível (preserveDrawingBuffer) — não bloqueia
+          }
+        }
+      }
     };
     animate();
 
@@ -515,6 +635,7 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
 
     return () => {
       cancelAnimationFrame(animId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (resizeObserver) resizeObserver.disconnect();
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
@@ -522,10 +643,33 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
       window.removeEventListener('keydown', resetInteraction);
       window.removeEventListener('resize', handleResize);
       container.removeEventListener('mousedown', handleMouseDown);
+      container.removeEventListener('mousemove', handleMouseMove);
+      container.removeEventListener('mouseup', handleMouseUp);
+      container.removeEventListener('touchstart', handleTouchStart);
+      container.removeEventListener('touchend', handleTouchEnd);
       container.removeEventListener('touchstart', handleTouchStart);
       container.removeEventListener('touchend', handleTouchEnd);
       
+      // AUDITORIA 3D: dispose do OrbitControls (remove listeners de wheel/pointer)
+      try { controlsRef.current?.dispose(); } catch {}
+      controlsRef.current = null;
+
       // Clean up WebGL resources
+      // dispose completo do composer e render targets (bloom) — evita vazamento de VRAM
+      try {
+        composer.passes.forEach((pass) => {
+          const p = pass as any;
+          p.renderTarget?.dispose?.();
+          p.renderTarget1?.dispose?.();
+          p.renderTarget2?.dispose?.();
+          p.copyUniforms && Object.values(p.copyUniforms).forEach((u: any) => u.value?.dispose?.());
+          p.material?.dispose?.();
+          p.dispose?.();
+        });
+        composer.dispose?.();
+      } catch (e) {
+        // ignore disposal edge cases
+      }
       coreMesh.geometry.dispose();
       coreMat.dispose();
       reactor.geometry.dispose();
@@ -541,7 +685,10 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     };
   }, []); // Run ONCE for persistent WebGL lifecycle without canvas recreation!
 
-  if (hasWebGLError) {
+  // CORREÇÃO: ErrorBoundary + fallback 2D elegante ativado quando (a) WebGL não
+  // inicializa, (b) o watchdog detecta frames 100% pretos, ou (c) qualquer erro
+  // de render é capturado — o usuário NUNCA fica com área central preta vazia.
+  if (hasWebGLError || renderBlackScreen) {
     return (
       <div 
         id="liora-core-canvas" 

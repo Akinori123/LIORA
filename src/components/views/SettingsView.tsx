@@ -13,6 +13,7 @@ import { storageAdapter } from '../../services/storageAdapter';
 import { isTauriEnvironment } from '../../security/localBridge';
 
 import { integrationsVault } from '../../services/integrationsVault';
+import { VaultManagerPanel } from '../security/VaultManagerPanel';
 import { AudioDiagnosticPanel } from '../voice/AudioDiagnosticPanel';
 
 export const SettingsView: React.FC = () => {
@@ -402,6 +403,10 @@ export const SettingsView: React.FC = () => {
             <Volume2 className="w-5 h-5 text-blue-400" />
             <h3 className="font-semibold text-white text-base">Áudio, Voz & Transcrição</h3>
           </div>
+
+          {/* ETAPA 6 (UI do cofre): gerenciamento visual de credenciais —
+              listar/apagar/adicionar sem depender de comandos de chat */}
+          <VaultManagerPanel />
 
           <div className="space-y-4 pt-2 text-xs">
             {/* Gemini API Key direct config */}

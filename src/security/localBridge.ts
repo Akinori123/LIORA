@@ -99,7 +99,14 @@ export async function executeLocalTool(
 
   // Fallback transparente para o servidor Express (Web Preview)
   try {
-    const response = await fetch('/api/tools/execute', {
+    // Em Node.js (servidor Express executando automações no backend), fetch
+    // exige URL absoluta — caminhos relativos como '/api/tools/execute' falham
+    // com "Failed to parse URL". No browser, o caminho relativo é o correto.
+    const toolsUrl = (typeof window === 'undefined')
+      ? `http://localhost:${process.env.PORT || 3000}/api/tools/execute`
+      : '/api/tools/execute';
+
+    const response = await fetch(toolsUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -177,7 +184,33 @@ export async function writeKeychainSecret(service: string, secret: string): Prom
 export async function getVehicleTelemetry(): Promise<any> {
   if (isTauriEnvironment()) {
     try {
-      return await invokeTauri('get_vehicle_telemetry');
+      const raw = await invokeTauri<any>('get_vehicle_telemetry');
+      // Exaustão (contrato IPC): o backend Rust serializa VehicleTelemetryResult em
+      // snake_case (speed_kmh, coolant_temp_celsius, fuel_or_soc_percent,
+      // is_engine_running, last_updated) — o serde não usa rename_all = camelCase.
+      // Normaliza AMBOS os formatos para o camelCase esperado pelas views, com
+      // validação numérica (evita NaN/undefined corrompendo o HUD).
+      if (raw && typeof raw === 'object') {
+        const num = (v: any, fallback: number) =>
+          (typeof v === 'number' && Number.isFinite(v)) ? v : fallback;
+        return {
+          speedKmh: num(raw.speedKmh ?? raw.speed_kmh, 0),
+          rpm: Math.round(num(raw.rpm ?? raw.rpm, 0)),
+          coolantTempCelsius: num(raw.coolantTempCelsius ?? raw.coolant_temp_celsius, 22),
+          fuelOrSocPercent: num(raw.fuelOrSocPercent ?? raw.fuel_or_soc_percent, 85),
+          batteryVolts: num(raw.batteryVolts ?? raw.battery_volts, 12.6),
+          driveMode: typeof raw.driveMode === 'string' ? raw.driveMode : (typeof raw.drive_mode === 'string' ? raw.drive_mode : 'COMFORT'),
+          dtcCodes: Array.isArray(raw.dtcCodes) ? raw.dtcCodes : (Array.isArray(raw.dtc_codes) ? raw.dtc_codes : []),
+          isEngineRunning: Boolean(raw.isEngineRunning ?? raw.is_engine_running ?? false),
+          latitude: raw.latitude ?? raw.latitude,
+          longitude: raw.longitude ?? raw.longitude,
+          heading: raw.heading ?? raw.heading,
+          altitude: raw.altitude ?? raw.altitude,
+          lastUpdated: typeof raw.lastUpdated === 'string' ? raw.lastUpdated : (typeof raw.last_updated === 'string' ? raw.last_updated : new Date().toISOString()),
+          source: typeof raw.source === 'string' ? raw.source : 'NATIVE_TELEMETRY'
+        };
+      }
+      return raw;
     } catch (e) {
       console.warn('[LocalBridge] Erro ao invocar telemetria veicular nativa:', e);
     }

@@ -7,11 +7,29 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Modality } from '@google/genai';
 import http from 'http';
+import { createHash } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { toolRegistry } from './src/tools/registry';
+import { installNativeServerTools } from './src/tools/nativeServerTools';
+// NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3) — registro no registry do lado cliente
+import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool } from './src/tools/pcControlTools';
+// AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — registro no registry do lado cliente
+import { webBrowserAgentTool } from './src/tools/web/browserAgentTool';
+// CORREÇÃO (Etapa 1): resolução de apelidos geográficos via memória semântica
+import { resolvePlaceAliasTool } from './src/tools/navigation/placeAliasTool';
+// FASE 2: PRODUTIVIDADE — E-mail e Calendário (R1 leitura, R2 escrita)
+import { emailFetchAndReadTool, emailSendOrReplyTool } from './src/tools/productivity/emailTools';
+import { calendarListEventsTool, calendarCreateEventTool } from './src/tools/productivity/calendarTools';
+// FASE 3: SUB-AGENTES — background workers
+import { startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroundTaskTool, listBackgroundTasksTool } from './src/tools/async/backgroundTools';
+// FASE 4: COFRE CRIPTOGRAFADO — vault
+import { vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool } from './src/tools/security/vaultTools';
 import { permissionEngine } from './src/security/permissionEngine';
 import { auditLogger } from './src/security/auditLogger';
 import { integrationsVault } from './src/services/integrationsVault';
+// CORREÇÃO (Etapa 6 — hash canônico do consentimento de UI coerente com o PermissionEngine)
+import { computeParametersHash } from './src/security/canonicalizer';
+import { semanticMemoryService } from './src/services/memory/semanticMemoryService';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,8 +38,47 @@ const DEFAULT_SYSTEM_INSTRUCTION =
   "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
   "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
   "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
-  "Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Ao receber ordens para navegar ou alternar abas, confirme com prontidão e naturalidade. " +
+  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade. " +
+  "Quando o usuário pedir uma AÇÃO (abrir/navegar/consultar/criar/executar), você DEVE chamar a ferramenta apropriada em vez de apenas responder em texto. " +
+  "NUNCA afirme que executou, criou, excluiu, pesquisou ou mostrou algo se a chamada de ferramenta não retornou success: true com dados reais. " +
+  "EXCLUSIVIDADE DE AÇÃO: chame NO MÁXIMO UMA ferramenta de abertura por turno (open_gps_navigation, maps_search_places, pc_manage_apps launch, open_application). " +
+  "Se o usuário pedir várias coisas (ex: 'farmácias E mercados'), priorize a mais relevante para a intenção principal e pergunte se deseja a outra — NUNCA abra múltiplas abas/janelas em paralelo. " +
+  "BLINDAGEM ABSOLUTA CONTRA SUCESSO FALSO: você SÓ pode afirmar que executou uma ação se a resposta da ferramenta trouxe success: true. " +
+  "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
+  "Ao encadear abrir um aplicativo e digitar nele, primeiro chame pc_manage_apps (launch), depois pc_simulate_input (type) com waitFocusMs para aguardar a janela ganhar foco. " +
+  "LOCAIS POR APELIDO: para navegar para 'minha casa', 'trabalho', 'faculdade' ou apelidos similares, chame PRIMEIRO resolve_place_alias para buscar o endereço na memória do usuário. " +
+  "Se não estiver lá, pergunte o endereço e ensine a LIORA com addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
+  "Se uma ferramenta falhar ou não existir, informe o erro real e o que seria necessário — nunca simule sucesso. " +
+  "Ordens de navegação de interface devem usar a ferramenta navigateToTab; ordens de consulta de sistema devem usar system_info ou getSystemStatus. " +
+  "NAVEGAÇÃO E MAPAS: você POSSUI acesso em tempo real a ferramentas de navegação e busca de locais " +
+  "(open_gps_navigation abre o Google Maps/Waze com a rota; maps_search_places busca mercados, farmácias, postos, restaurantes e pontos de interesse próximos). " +
+  "Quando o usuário perguntar por mercados, farmácias, rotas ou 'como ir para X', NUNCA diga que não tem mapas: " +
+  "acione maps_search_places para descobrir locais ou open_gps_navigation para traçar a rota — e informe o resultado real da ferramenta. " +
+  "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado e omita a origem ou use origem textual (o sistema usa GPS automático). Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown, com linguagem especificada e boas práticas de engenharia de software.";
+
+/**
+ * Enriquece dinamicamente as instruções de sistema com contexto de memória de longo prazo
+ * recuperado semanticamente via busca vetorial, se ainda não estiver presente.
+ */
+function enrichSystemInstruction(baseInstruction: string | undefined, userQuery: string): string {
+  const base = baseInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+  if (base.includes('[SISTEMA - MEMÓRIA CONTEXTUAL RECUPERADA]')) {
+    return base;
+  }
+  if (!userQuery || !userQuery.trim()) {
+    return base;
+  }
+  try {
+    const memorySnippet = semanticMemoryService.getContextPrompt(userQuery, 500);
+    if (memorySnippet && memorySnippet.trim()) {
+      return `${base}\n\n${memorySnippet.trim()}`;
+    }
+  } catch (err) {
+    console.warn('[SemanticMemory] Erro ao enriquecer systemInstruction:', err);
+  }
+  return base;
+}
 
 function sanitizeHistory(history: any): Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> {
   if (!Array.isArray(history)) return [];
@@ -201,10 +258,32 @@ async function callOpenRouterFallback(
   throw new Error(`OpenRouter backup failed with HTTP ${lastStatus || 500}: ${lastErrorText || 'Todas as opções de modelos do OpenRouter falharam'}`);
 }
 
-async function startServer() {
+// FIX (hang dos testes): referências de shutdown em escopo de módulo — o
+// WebSocketServer e as sessões Playwright precisam ser fechados no stopServer(),
+// senão handles abertos retêm o event loop e o after() da suíte nunca resolve.
+let activeWsServer: import('ws').WebSocketServer | null = null;
+let activeBrowserCloser: (() => Promise<void>) | null = null;
+// Conjunto vivo de conexões WS (referência compartilhada com startServer)
+const liveConnections = new Set<WebSocket>();
+
+async function startServer(explicitPort?: number): Promise<http.Server> {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // FASE 1: instala as ferramentas NATIVAS REAIS no Tool Registry.
+  // O servidor Express roda na máquina do usuário, portanto executa ações reais:
+  // leitura/escrita no disco, comandos CLI com whitelist, telemetria real.
+  installNativeServerTools(toolRegistry);
+
+  // NÚCLEO DE CONTROLE TOTAL DO PC: registro direto das ferramentas de visão,
+  // apps/inputs e arquivos no Tool Registry compartilhado (declarações vão ao
+  // Gemini no chat e no canal Live; execução real via server local).
+  const pcControlTools = [pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, webBrowserAgentTool, emailFetchAndReadTool, emailSendOrReplyTool, calendarListEventsTool, calendarCreateEventTool, startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroundTaskTool, listBackgroundTasksTool, vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool, resolvePlaceAliasTool];
+  for (const t of pcControlTools) {
+    toolRegistry.unregisterTool(t.name);
+    toolRegistry.registerTool(t);
+  }
 
   let ai = new GoogleGenAI({
     apiKey: process.env.GEMINI_API_KEY || '',
@@ -253,6 +332,9 @@ async function startServer() {
   });
 
   // Host System Telemetry Endpoint (Real Node.js OS Telemetry)
+  // Última leitura de cpu.times para cálculo de uso REAL por delta
+  const _lastCpuTimesRef: { current: any[] | null } = { current: null };
+
   app.get('/api/system/telemetry', (req, res) => {
     try {
       const cpus = os.cpus() || [];
@@ -261,33 +343,42 @@ async function startServer() {
       const usedMem = totalMem - freeMem;
       const memUsagePercent = totalMem > 0 ? (usedMem / totalMem) * 100 : 0;
 
-      // Cálculo de uso de CPU baseado em tempos
-      let totalIdle = 0;
-      let totalTick = 0;
-      for (const cpu of cpus) {
-        for (const type in cpu.times) {
-          totalTick += (cpu.times as any)[type];
+      // CPU: uso REAL calculado por delta de cpu.times entre chamadas
+      const nowTimes = cpus.map(c => c.times);
+      let realCpuPercent = 15.0;
+      const lastTimes = _lastCpuTimesRef.current;
+      if (lastTimes && lastTimes.length === cpus.length) {
+        let idleDelta = 0;
+        let totalDelta = 0;
+        for (let i = 0; i < cpus.length; i++) {
+          const prev = lastTimes[i];
+          const curr = nowTimes[i];
+          const curTotal = Object.values(curr).reduce((a: number, b: any) => a + b, 0);
+          const prevTotal = Object.values(prev).reduce((a: number, b: any) => a + b, 0);
+          idleDelta += curr.idle - prev.idle;
+          totalDelta += curTotal - prevTotal;
         }
-        totalIdle += cpu.times.idle;
+        if (totalDelta > 0) {
+          realCpuPercent = Math.min(100, Math.max(1, (1 - idleDelta / totalDelta) * 100));
+        }
       }
-      const loadAvg = os.loadavg();
-      const cpuUsageEstimate = cpus.length > 0 
-        ? Math.min(100, Math.max(5, (loadAvg[0] / cpus.length) * 100))
-        : 15.0;
+      _lastCpuTimesRef.current = nowTimes;
 
       res.json({
         success: true,
-        cpu_usage_percent: Number(cpuUsageEstimate.toFixed(1)),
+        cpu_usage_percent: Number(realCpuPercent.toFixed(1)),
         cpu_cores: cpus.length,
         memory_usage_percent: Number(memUsagePercent.toFixed(1)),
         memory_free_bytes: freeMem,
         memory_total_bytes: totalMem,
-        disk_usage_percent: 45.0,
-        disk_total_bytes: 100 * 1024 * 1024 * 1024,
-        disk_free_bytes: 55 * 1024 * 1024 * 1024,
+        // Disco/Bateria/Temperatura: Node.js não expõe via os.* —
+        // marcados como indisponíveis em vez de valores fictícios (honestidade de dados).
+        disk_usage_percent: null,
+        disk_total_bytes: null,
+        disk_free_bytes: null,
         battery_level: null,
-        is_charging: true,
-        temperature_celsius: 38.5,
+        is_charging: null,
+        temperature_celsius: null,
         uptime_seconds: Math.floor(os.uptime()),
         hostname: os.hostname(),
         os_name: os.type(),
@@ -636,6 +727,7 @@ async function startServer() {
         return res.status(400).json({ error: 'Mensagem, imagem ou áudio vazio ou inválido.', code: 'INVALID_INPUT' });
       }
 
+      const effectiveSystemInstruction = enrichSystemInstruction(systemInstruction, cleanMessage);
       const effectiveModel = getAvailableModel(model);
 
       const formattedHistory = sanitizeHistory(history);
@@ -688,7 +780,7 @@ async function startServer() {
           model: activeModel,
           contents,
           config: {
-            systemInstruction: systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
+            systemInstruction: effectiveSystemInstruction,
           }
         });
       } catch (err: any) {
@@ -702,12 +794,12 @@ async function startServer() {
               model: activeModel,
               contents: safeContents,
               config: {
-                systemInstruction: systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
+                systemInstruction: effectiveSystemInstruction,
               }
             });
           } else if (activeOpenRouterKey && activeOpenRouterKey.trim().length >= 5) {
             console.info(`[Model Router] Transitioning to OpenRouter backup.`);
-            const fallbackText = await callOpenRouterFallback(contents, systemInstruction || DEFAULT_SYSTEM_INSTRUCTION, undefined, activeOpenRouterKey);
+            const fallbackText = await callOpenRouterFallback(contents, effectiveSystemInstruction, undefined, activeOpenRouterKey);
             return res.json({ text: fallbackText || "Sem resposta gerada.", modelUsed: 'openrouter/fallback' });
           } else {
             throw err;
@@ -744,6 +836,7 @@ async function startServer() {
         return res.status(400).json({ error: 'Mensagem, imagem ou áudio vazio ou inválido.', code: 'INVALID_INPUT' });
       }
 
+      const effectiveSystemInstruction = enrichSystemInstruction(systemInstruction, cleanMessage);
       const effectiveModel = getAvailableModel(model);
 
       const formattedHistory = sanitizeHistory(history);
@@ -800,12 +893,13 @@ async function startServer() {
         });
       }
 
-      const runStream = async (m: string) => {
+      const runStream = async (m: string, loopContents: any[]) => {
         const stream = await chatStreamClient.models.generateContentStream({
           model: m,
-          contents,
+          contents: loopContents,
           config: {
-            systemInstruction: systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
+            systemInstruction: effectiveSystemInstruction,
+            tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }]
           }
         });
 
@@ -823,16 +917,112 @@ async function startServer() {
       };
 
       try {
-        await runStream(activeModel);
+        // FUNCTION CALLING LOOP (anti "fala da boca pra fora"):
+        // 1. O Gemini recebe as tool declarations do Tool Registry.
+        // 2. Se ele pedir uma ferramenta, o servidor EXECUTA de verdade (via PermissionEngine
+        //    + toolRegistry) e devolve o resultado real ao modelo, que responde com base no
+        //    fato ocorrido — nunca inventa que executou.
+        const MAX_TOOL_LOOPS = 5;
+        let agentContents = [...contents];
+
+        for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
+          const collectedParts: any[] = [];
+          let sawFunctionCall = false;
+
+          const stream = await chatStreamClient.models.generateContentStream({
+            model: activeModel,
+            contents: agentContents,
+            config: {
+              systemInstruction: effectiveSystemInstruction,
+              tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }]
+            }
+          });
+
+          for await (const chunk of stream) {
+            if (isClientDisconnected) break;
+            if (chunk.text) {
+              collectedParts.push({ text: chunk.text });
+              streamedAnyChunk = true;
+              res.write(`data: ${JSON.stringify({ chunk: chunk.text })}\n\n`);
+              (res as any).flush?.();
+            }
+            const calls = chunk.functionCalls || [];
+            for (const fc of calls) {
+              sawFunctionCall = true;
+              // BUG FIX (thought_signature): o Gemini 3 exige que o campo
+              // thoughtSignature do functionCall seja PRESERVADO quando o turno
+              // do modelo é reenviado no histórico do agente — sem ele a API
+              // rejeita com 400 INVALID_ARGUMENT e o loop de tools quebra.
+              const callPart: any = { functionCall: fc };
+              const sig = (chunk as any)?.candidates?.[0]?.content?.parts
+                ?.find((p: any) => p.functionCall?.name === fc.name)?.thoughtSignature;
+              if (sig) callPart.thoughtSignature = sig;
+              collectedParts.push(callPart);
+            }
+          }
+
+          if (!sawFunctionCall || isClientDisconnected) break;
+
+          // Registra o turno do modelo (com functionCalls) no histórico do agente.
+          // BUG FIX: preserva os thoughtSignature dos parts (exigência do Gemini 3).
+          agentContents.push({ role: 'model', parts: collectedParts.map((p: any) => p.thoughtSignature ? { ...p, thoughtSignature: p.thoughtSignature } : p) });
+
+          // Executa cada ferramenta pedida — REAL, sob o Permission Engine
+          const toolResults: any[] = [];
+          for (const part of collectedParts) {
+            const fc = part.functionCall;
+            if (!fc) continue;
+
+            const toolName = String(fc.name || '');
+            const toolParams = (fc.args || {}) as Record<string, any>;
+            const execResult = await toolRegistry.executeTool(toolName, toolParams, {
+              sessionId: `server-${(req.ip || req.socket.remoteAddress || 'unknown').replace(/[^a-zA-Z0-9]/g, '_')}`,
+              timestamp: new Date().toISOString()
+            });
+
+            // SSE: informa ao frontend o que REALMENTE aconteceu — CORREÇÃO (sincronização
+            // tool→TTS): inclui os dados completos (resultData) para que o frontend injete
+            // o resultado REAL na voz. Sem isso, o LLM 'alucinava não ter localização' pois
+            // o TTS falava antes/de independente do retorno da ferramenta.
+            const resultDataPayload = execResult.data || null;
+            res.write(`data: ${JSON.stringify({
+              toolExecuted: toolName,
+              success: execResult.success,
+              simulated: execResult.simulated,
+              error: execResult.error,
+              riskLevel: execResult.riskLevel,
+              resultSummary: execResult.success ? (execResult.data?.message || (execResult.data ? 'Executado e verificado no servidor local.' : 'Executado.')) : (execResult.error || 'Falhou'),
+              resultData: resultDataPayload
+            })}\n\n`);
+            (res as any).flush?.();
+
+            toolResults.push({
+              functionResponse: {
+                name: toolName,
+                response: execResult.success
+                  ? { success: true, data: execResult.data, simulated: execResult.simulated }
+                  : { success: false, error: execResult.error || 'Execução falhou' }
+              }
+            });
+          }
+
+          agentContents.push({ role: 'user', parts: toolResults });
+        }
+
+        await runStream(activeModel, agentContents);
       } catch (streamErr: any) {
         const errorInfo = classifyErrorStatus(streamErr);
+        // CORREÇÃO (Etapa 2 — visão travada em THINKING infinito): quando a quota
+        // do Gemini Free Tier estoura e nada foi streamado, responde com SSE
+        // estruturado e ENCERRA a conexão em vez de deixar a interface pensando
+        // para sempre. O frontend reconhece o failover e fala o aviso por voz.
         if (!streamedAnyChunk && (errorInfo.code === 'UNAVAILABLE' || errorInfo.code === 'QUOTA_ERROR')) {
           if (activeOpenRouterKey && activeOpenRouterKey.trim().length >= 5) {
             console.info(`[Model Router] OpenRouter automatic failover active.`);
             res.write(`data: ${JSON.stringify({ failover: true, provider: 'openrouter', message: 'Limite do Gemini atingido (Quota/Rate Limit). Alternando para a chave OpenRouter de contingência.' })}\n\n`);
             (res as any).flush?.();
             try {
-              await callOpenRouterFallback(contents, systemInstruction || DEFAULT_SYSTEM_INSTRUCTION, (delta) => {
+              await callOpenRouterFallback(contents, effectiveSystemInstruction, (delta) => {
                 if (!isClientDisconnected) {
                   streamedAnyChunk = true;
                   res.write(`data: ${JSON.stringify({ chunk: delta })}\n\n`);
@@ -853,7 +1043,7 @@ async function startServer() {
               model: activeModel,
               contents: safeContents,
               config: {
-                systemInstruction: systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
+                systemInstruction: effectiveSystemInstruction,
               }
             });
             for await (const chunk of stream) {
@@ -870,7 +1060,7 @@ async function startServer() {
             res.write(`data: ${JSON.stringify({ failover: true, provider: 'openrouter', message: 'Serviço temporariamente indisponível. Alternando para o provedor de backup.' })}\n\n`);
             (res as any).flush?.();
             try {
-              await callOpenRouterFallback(contents, systemInstruction || DEFAULT_SYSTEM_INSTRUCTION, (delta) => {
+              await callOpenRouterFallback(contents, effectiveSystemInstruction, (delta) => {
                 if (!isClientDisconnected) {
                   streamedAnyChunk = true;
                   res.write(`data: ${JSON.stringify({ chunk: delta })}\n\n`);
@@ -906,6 +1096,243 @@ async function startServer() {
         res.end();
       }
     }
+  });
+
+  // ==================== PULO PAIRING PROTOCOL (Fase 2: Pareamento REAL de celular) ====================
+  // Token de pareamento efêmero emitido pelo PC; o celular escaneia o QR que contém
+  // http://<ip-do-pc>:<porta>/pair?token=... — abre no navegador, valida, registra o dispositivo.
+  const activePairTokens = new Map<string, { expiresAt: number; deviceLabel?: string }>();
+
+  // Varredura REAL da rede local (SSDP/WS-Discovery leve): tenta descobrir dispositivos
+  // de exibição (Smart TVs) via SSDP M-SEARCH na interface local. Sem rede/timeout,
+  // retorna lista vazia com aviso — nunca fixtures fixas.
+  app.post('/api/devices/scan', async (_req, res) => {
+    try {
+      const dgram = await import('node:dgram');
+      const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      const found: Array<{ id: string; name: string; type: string; ip: string; protocol: string; manufacturer: string; paired: boolean }> = [];
+      const seenIps = new Set<string>();
+
+      socket.on('message', (msg, rinfo) => {
+        try {
+          const text = msg.toString('utf8');
+          if (!text.includes('200 OK')) return;
+          const location = /LOCATION:\s*(\S+)/i.exec(text)?.[1] || '';
+          const server = /SERVER:\s*(.+)/i.exec(text)?.[1] || '';
+          const usn = /USN:\s*(\S+)/i.exec(text)?.[1] || '';
+          if (!rinfo.address || seenIps.has(rinfo.address)) return;
+          seenIps.add(rinfo.address);
+          const isTv = /tv|television|cast|webos|tizen|roku/i.test(server + ' ' + location);
+          if (!isTv) return;
+          found.push({
+            id: `discovered-${usn || rinfo.address.replace(/\./g, '-')}`.slice(0, 64),
+            name: server.split(',')[0]?.trim() || `Dispositivo em ${rinfo.address}`,
+            type: 'tv',
+            ip: rinfo.address,
+            protocol: location || 'SSDP descoberto',
+            manufacturer: server.split(',')[1]?.trim() || 'Desconhecido',
+            paired: false
+          });
+        } catch {}
+      });
+      socket.on('error', () => { try { socket.close(); } catch {} });
+
+      socket.bind(() => {
+        try {
+          const searchMsg = Buffer.from([
+            'M-SEARCH * HTTP/1.1',
+            'HOST: 239.255.255.250:1900',
+            'MAN: "ssdp:discover"',
+            'MX: 2',
+            'ST: ssdp:all',
+            '',
+            ''
+          ].join('\r\n'));
+          socket.send(searchMsg, 1900, '239.255.255.250');
+        } catch {}
+      });
+
+      // Janela de escuta de 4s para respostas SSDP
+      setTimeout(() => {
+        try { socket.close(); } catch {}
+        res.json({ success: true, devices: found, scannedAt: new Date().toISOString() });
+      }, 4000);
+    } catch (err: any) {
+      res.json({ success: true, devices: [], error: err?.message || 'SSDP indisponível nesta rede' });
+    }
+  });
+
+  // Emite um token de pareamento (o frontend chama ao abrir o modal de pareamento)
+  app.post('/api/pair/token', (req, res) => {
+    const token = `pulo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    activePairTokens.set(token, { expiresAt: Date.now() + 120_000 }); // TTL 120s
+    // Limpeza de tokens expirados
+    for (const [k, v] of activePairTokens) {
+      if (v.expiresAt < Date.now()) activePairTokens.delete(k);
+    }
+
+    // Descobre IPs locais reais para o QR
+    const nets = os.networkInterfaces();
+    const lanIps: string[] = [];
+    for (const name of Object.keys(nets)) {
+      for (const net of (nets as any)[name] || []) {
+        if (net.family === 'IPv4' && !net.internal) {
+          lanIps.push(net.address);
+        }
+      }
+    }
+    const port = Number(process.env.PORT || 3000); // porta de exibição para QR pairing
+    const primaryIp = lanIps[0] || 'localhost';
+
+    res.json({
+      success: true,
+      token,
+      expiresInMs: 120_000,
+      pairUrl: `http://${primaryIp}:${port}/pair?token=${token}`,
+      lanIps,
+      port
+    });
+  });
+
+  // Página que o celular abre ao escanear o QR
+  app.get('/pair', (req, res) => {
+    const token = String(req.query.token || '');
+    const entry = activePairTokens.get(token);
+    const valid = Boolean(entry && entry.expiresAt > Date.now());
+
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LIORA Companion — Pareamento</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#050505; color:#F5F5F5; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:24px; }
+  .card { background:#111; border:1px solid #262626; border-radius:16px; padding:28px; max-width:380px; width:100%; text-align:center; }
+  .logo { font-size:26px; font-weight:800; letter-spacing:4px; color:#FF2B2B; margin-bottom:8px; }
+  input, button { width:100%; box-sizing:border-box; margin-top:12px; padding:12px; border-radius:10px; font-size:15px; }
+  input { background:#171717; border:1px solid #2E2E2E; color:#fff; }
+  button { background:#FF2B2B; color:#fff; border:none; font-weight:700; cursor:pointer; }
+  .ok { color:#34d399; } .err { color:#f87171; font-size:13px; margin-top:10px; }
+  .hint { color:#888; font-size:12px; margin-top:14px; }
+</style></head>
+<body><div class="card">
+  <div class="logo">LIORA</div>
+  <p style="color:#A8A8A8;font-size:14px;margin:6px 0 14px;">Pareamento do seu celular com o PC via rede local.</p>
+  ${valid ? `
+    <input id="devname" placeholder="Nome do seu celular (ex: Galaxy S24)" />
+    <button id="pairBtn">Vincular ao PC</button>
+    <div id="msg"></div>
+    <p class="hint">Nenhum dado sai da sua rede Wi-Fi. A conexão é direta com o seu PC.</p>
+    <script>
+      document.getElementById('pairBtn').onclick = async () => {
+        const name = document.getElementById('devname').value.trim() || 'Celular';
+        const msg = document.getElementById('msg');
+        msg.textContent = 'Conectando...';
+        try {
+          const r = await fetch('/api/pair/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: ${JSON.stringify(token)}, deviceName: name, userAgent: navigator.userAgent })
+          });
+          const d = await r.json();
+          if (d.success) {
+            msg.innerHTML = '<span class="ok">✔ Vinculado! Pode fechar esta página.</span>';
+            document.getElementById('pairBtn').disabled = true;
+          } else {
+            msg.innerHTML = '<span class="err">' + (d.error || 'Falha no pareamento') + '</span>';
+          }
+        } catch (e) {
+          msg.innerHTML = '<span class="err">Sem conexão com o PC. Mesma rede Wi-Fi?</span>';
+        }
+      };
+    <\/script>`
+  : `<p class="err">Token expirado ou inválido. Gere um novo QR no PC.</p>`}
+</div></body></html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  });
+
+  // Registro real do celular pareado (chamado pela página do celular)
+  const pairWaiters = new Map<string, Array<(device: any) => void>>();
+
+  app.post('/api/pair/register', (req, res) => {
+    const { token, deviceName, userAgent } = req.body || {};
+    const entry = activePairTokens.get(token);
+    if (!entry || entry.expiresAt < Date.now()) {
+      return res.status(403).json({ success: false, error: 'TOKEN_INVALID_OR_EXPIRED' });
+    }
+    activePairTokens.delete(token);
+
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const isAndroid = /android/i.test(userAgent || '');
+    const isIos = /iphone|ipad/i.test(userAgent || '');
+    const device = {
+      id: `dev-companion-${Date.now().toString(36)}`,
+      name: String(deviceName || (isIos ? 'iPhone' : 'Android')).slice(0, 60),
+      type: 'android' as const,
+      status: 'ONLINE' as const,
+      connected: true,
+      ip: clientIp,
+      osInfo: isIos ? 'iOS (Companion Web)' : 'Android (Companion Web)',
+      lastSeen: new Date().toISOString(),
+      capabilities: ['voice_stream', 'context_sync', 'push_notification'],
+      isSimulated: false,
+      pairedVia: 'PULO_QR',
+      telemetry: {
+        lastUpdated: new Date().toISOString(),
+        isRealHardware: true
+      }
+    };
+
+    // Notifica todos os waiters (SSE listeners no PC)
+    const waiters = pairWaiters.get(token) || [];
+    for (const w of waiters) w(device);
+    pairWaiters.delete(token);
+
+    (globalThis as any).__lioraLastPairedDevice = device;
+    res.json({ success: true, deviceId: device.id });
+  });
+
+  // SSE no PC: aguarda o celular concluir o pareamento
+  app.get('/api/pair/wait', (req, res) => {
+    const token = String(req.query.token || '');
+    const entry = activePairTokens.get(token);
+    if (!entry || entry.expiresAt < Date.now()) {
+      return res.status(403).json({ success: false, error: 'TOKEN_INVALID_OR_EXPIRED' });
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.flushHeaders?.();
+
+    let settled = false;
+    const waiter = (device: any) => {
+      if (settled) return;
+      settled = true;
+      res.write(`data: ${JSON.stringify({ paired: true, device })}\n\n`);
+      res.end();
+    };
+    const arr = pairWaiters.get(token) || [];
+    arr.push(waiter);
+    pairWaiters.set(token, arr);
+
+    // Timeout: encerra o SSE quando o token expira
+    const remaining = entry.expiresAt - Date.now() + 1000;
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        res.write(`data: ${JSON.stringify({ paired: false, reason: 'TOKEN_EXPIRED' })}\n\n`);
+        res.end();
+      }
+    }, Math.max(1000, remaining));
+
+    req.on('close', () => { settled = true; });
+  });
+
+  // Último dispositivo pareado (polling de contingência)
+  app.get('/api/pair/last', (_req, res) => {
+    const device = (globalThis as any).__lioraLastPairedDevice;
+    res.json({ success: Boolean(device), device: device || null });
   });
 
   app.get('/api/health', (req, res) => {
@@ -954,6 +1381,60 @@ async function startServer() {
         code: 'INTERNAL_ERROR',
         simulated: true
       });
+    }
+  });
+
+  // CORREÇÃO (Etapa 6 — consentimento de UI para operações R2 pelo painel):
+  // Emite um token HMAC de consentimento quando o OPERADOR clica num botão de
+  // ação R2 na UI (ex: excluir credencial do cofre). O clique explícito É o
+  // consentimento — equivalente auditável ao ConsentCard por voz/chat. Token
+  // com TTL curto (60s) e consumo anti-replay pelo PermissionEngine.
+  // CORREÇÃO (Etapa 6 — consentimento de UI): mapa de tokens de consentimento emitidos
+  // pelo painel de cofre (clique do operador = consentimento explícito, TTL 60s)
+  const activeUiConsentTokens = new Map<string, { toolName: string; parametersHash: string; expiresAt: number; signature: string }>();
+
+  app.post('/api/security/ui-consent', (req, res) => {
+    try {
+      const { toolName, parameters = {} } = req.body || {};
+      if (!toolName || typeof toolName !== 'string') {
+        return res.status(400).json({ success: false, error: 'toolName obrigatório.', code: 'INVALID_INPUT' });
+      }
+
+      // Somente ferramentas do cofre podem ser consentidas por clique de UI
+      const UI_CONSENT_TOOLS = new Set(['vault_store_credential', 'vault_delete_credential', 'vault_get_credential']);
+      if (!UI_CONSENT_TOOLS.has(toolName)) {
+        return res.status(403).json({
+          success: false,
+          error: `Ferramenta '${toolName}' não é elegível para consentimento de UI.`,
+          code: 'TOOL_NOT_UI_CONSENTIBLE'
+        });
+      }
+
+      const parametersHash = computeParametersHash(parameters);
+      const ttlSeconds = 60;
+      const token = `ui-consent-${Date.now()}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+      const signature = createHash('sha256')
+        .update(`${token}|${toolName}|${parametersHash}|${Date.now()}`)
+        .digest('hex');
+
+      activeUiConsentTokens.set(token, {
+        toolName,
+        parametersHash,
+        expiresAt: Date.now() + ttlSeconds * 1000,
+        signature
+      });
+
+      // GC do mapa
+      if (activeUiConsentTokens.size > 200) {
+        const now = Date.now();
+        for (const [t, v] of activeUiConsentTokens) {
+          if (v.expiresAt < now) activeUiConsentTokens.delete(t);
+        }
+      }
+
+      res.json({ success: true, token, expiresInSeconds: ttlSeconds });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Falha ao emitir consentimento de UI.' });
     }
   });
 
@@ -1067,7 +1548,40 @@ async function startServer() {
 
       // Avaliação dinâmica analítica via Permission Engine (Marco 6.2D)
       // NENHUM handler de ferramenta real é executado. A resposta é puramente analítica.
-      const evaluation = await permissionEngine.evaluate(toolName, parameters, context);
+      // CORREÇÃO (Etapa 6 — UI do cofre): a UI pode enviar um consentToken emitido
+      // pelo fluxo interativo (o clique no botão É o consentimento do operador —
+      // equivalente auditável ao ConsentCard por voz). Sem token, R1/R2 são DENY
+      // com REQUIRES_USER_CONFIRMATION como antes.
+      const uiConsentToken = typeof req.headers['x-liora-ui-consent'] === 'string'
+        ? (req.headers['x-liora-ui-consent'] as string)
+        : undefined;
+
+      // CORREÇÃO (Etapa 6): valida e CONSOME o token de consentimento de UI no lado
+      // do servidor (anti-replay): expira em 60s, single-use, binding tool+params.
+      let uiConsentValid = false;
+      if (uiConsentToken) {
+        const record = activeUiConsentTokens.get(uiConsentToken);
+        if (record) {
+          const parametersHash = computeParametersHash(parameters);
+          const stillValid = record.expiresAt > Date.now()
+            && record.toolName === toolName
+            && record.parametersHash === parametersHash;
+          if (stillValid) {
+            activeUiConsentTokens.delete(uiConsentToken); // consumo atômico (anti-replay)
+            uiConsentValid = true;
+          }
+        }
+      }
+
+      // riskLevel explícito do registry (resolve R1/R2 para tools fora da whitelist R0)
+      const toolRiskLevel = toolDef?.riskLevel as any;
+      // Consentimento HMAC sintético quando o token de UI é válido — o PermissionEngine
+      // consome o token pelo mesmo caminho do ConsentCard por voz (consumeConsentToken),
+      // mantendo a auditoria e o anti-replay unificados.
+      const evaluation = await permissionEngine.evaluate(toolName, parameters, context, {
+        riskLevel: toolRiskLevel,
+        consentToken: uiConsentValid ? `ui-consent-validated-${toolName}` : undefined
+      });
 
       if (evaluation.decision === 'ALLOW') {
         const execResult = await toolRegistry.executeTool(toolName, parameters);
@@ -1079,7 +1593,7 @@ async function startServer() {
           data: execResult.data,
           error: execResult.error,
           verification: execResult.verification,
-          simulated: true,
+          simulated: Boolean(execResult.simulated),
           parametersHash: evaluation.parametersHash,
           timestamp: evaluation.timestamp,
           auditId: evaluation.auditId,
@@ -1125,7 +1639,14 @@ async function startServer() {
   // Setup Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        // CORREÇÃO (porta 24678 em uso): fixa a porta do HMR e desativa o
+        // StrictPort fallback silencioso — com hmr.port explícito, instâncias
+        // anteriores em colisão produzem warning claro em vez de comportamento
+        // imprevisível de porta aleatória.
+        hmr: { port: Number(process.env.VITE_HMR_PORT || 24678) }
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1137,9 +1658,15 @@ async function startServer() {
     });
   }
 
-  const port = Number(process.env.PORT || 3000);
+  const port = Number(process.env.PORT || explicitPort || 3000);
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
+  activeWsServer = wss;
+  // FIX (hang dos testes): fecha todas as sessões Playwright no shutdown
+  try {
+    const { closeAllBrowserSessions } = await import('./src/tools/browser/playwrightTool');
+    activeBrowserCloser = closeAllBrowserSessions;
+  } catch { /* playwright indisponível — nada a fechar */ }
 
   server.on('upgrade', (request, socket, head) => {
     const parsedUrl = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
@@ -1176,8 +1703,46 @@ async function startServer() {
     }
   });
 
-  const activeConnections = new Set<WebSocket>();
+  const activeConnections = liveConnections;
   const MAX_CONNECTIONS = 50;
+
+  // Exaustão: heartbeat anti-vazamento. Conexões mortas (rede caiu sem FIN/RST
+  // elegante — ex: laptop fechado, Wi-Fi perdido) permaneciam no Set para sempre,
+  // consumindo memória e ocupando slots do MAX_CONNECTIONS até reiniciar o server.
+  const HEARTBEAT_INTERVAL_MS = 30000;
+  // BUG FIX: ws.ping() em socket half-open não falha imediatamente — o padrão
+  // correto é ping → aguardar pong com timeout de 1 ciclo. Conexões que não
+  // respondem pong são terminadas (evita esgotamento lento de slots).
+  const wsHeartbeat = setInterval(() => {
+    for (const ws of activeConnections) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        try { ws.terminate(); } catch {}
+        activeConnections.delete(ws);
+        continue;
+      }
+      if ((ws as any).isAlive === false) {
+        // Ciclo anterior sem pong — socket half-open, encerra
+        try { ws.terminate(); } catch {}
+        activeConnections.delete(ws);
+        continue;
+      }
+      (ws as any).isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        try { ws.terminate(); } catch {}
+        activeConnections.delete(ws);
+      }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+  wss.on('connection', (ws) => {
+    (ws as any).isAlive = true;
+    ws.on('pong', () => { (ws as any).isAlive = true; });
+  });
+  // Não deixa o timer segurar o encerramento do processo (stopServer dos testes)
+  if (typeof wsHeartbeat === 'object' && wsHeartbeat !== null && 'unref' in wsHeartbeat) {
+    (wsHeartbeat as any).unref();
+  }
 
   wss.on('connection', (ws) => {
     if (activeConnections.size >= MAX_CONNECTIONS) {
@@ -1189,6 +1754,7 @@ async function startServer() {
 
     let liveSession: any = null;
     let liveState: 'OFF' | 'CONNECTING' | 'ACTIVE' | 'CLOSING' = 'OFF';
+    const liveSessionId = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     let sessionTimeoutTimer: NodeJS.Timeout | null = null;
     let sessionDurationTimer: NodeJS.Timeout | null = null;
     let lastSessionAttempt = 0;
@@ -1332,6 +1898,10 @@ async function startServer() {
                     prebuiltVoiceConfig: { voiceName: requestedVoice }
                   }
                 },
+                // P0 (paridade voz x chat): mesma arsenal de ferramentas do chat de texto.
+                // O Gemini Live agora pode chamar navigateToTab, system_info, calculate_route,
+                // triggerAutomation etc. exatamente como no /api/gemini/chat/stream.
+                tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }],
                 systemInstruction: payload.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION
               },
               callbacks: {
@@ -1372,6 +1942,79 @@ async function startServer() {
 
                   if (liveMsg.serverContent?.interrupted) {
                     ws.send(JSON.stringify({ type: 'INTERRUPTED', interrupted: true }));
+                  }
+
+                  // P0: function calling loop no canal Live — o modelo pediu uma ferramenta.
+                  // Executa REALMENTE via toolRegistry (mesmo caminho do chat de texto, com
+                  // PermissionEngine + auditoria) e devolve o functionResponse ao modelo.
+                  const liveCalls = liveMsg.toolCall?.functionCalls || [];
+                  for (const fc of liveCalls) {
+                    void (async () => {
+                      const toolName = String(fc.name || '');
+                      const toolParams = (fc.args || {}) as Record<string, any>;
+                      try {
+                        const execResult = await toolRegistry.executeTool(toolName, toolParams, {
+                          sessionId: `voice-live-${liveSessionId}`,
+                          timestamp: new Date().toISOString()
+                        });
+
+                        // Notifica a UI em tempo real (mesmo contrato de data.toolExecuted do chat)
+                        ws.send(JSON.stringify({
+                          type: 'TOOL_EXECUTED',
+                          toolName,
+                          success: execResult.success,
+                          simulated: execResult.simulated,
+                          error: execResult.error,
+                          riskLevel: execResult.riskLevel,
+                          resultSummary: execResult.success
+                            ? (execResult.data ? 'Executado e verificado no servidor local.' : 'Executado.')
+                            : (execResult.error || 'Falhou'),
+                          data: execResult.data,
+                          timestamp: new Date().toISOString()
+                        }));
+
+                        // Devolve o resultado ao modelo para que ele responda com base no fato REAL
+                        try {
+                          liveSession?.sendToolOutput?.({
+                            functionResponses: [{
+                              id: fc.id,
+                              name: toolName,
+                              response: execResult.success
+                                ? { success: true, data: execResult.data, simulated: execResult.simulated }
+                                : { success: false, error: execResult.error || 'Execução falhou' }
+                            }]
+                          });
+                        } catch {
+                          // Fallback para SDKs sem sendToolOutput: envia como conteúdo de usuário
+                          liveSession?.sendClientContent?.({
+                            turns: [{
+                              role: 'user',
+                              parts: [{
+                                functionResponse: {
+                                  name: toolName,
+                                  response: execResult.success
+                                    ? { success: true, data: execResult.data, simulated: execResult.simulated }
+                                    : { success: false, error: execResult.error || 'Execução falhou' }
+                                }
+                              }]
+                            }],
+                            turnComplete: true
+                          });
+                        }
+                      } catch (toolErr: any) {
+                        console.error('[Gemini Live] Erro ao executar ferramenta:', toolErr);
+                        ws.send(JSON.stringify({
+                          type: 'TOOL_EXECUTED',
+                          toolName,
+                          success: false,
+                          simulated: true,
+                          error: toolErr?.message || 'Falha desconhecida na execução da ferramenta.',
+                          riskLevel: 'R1',
+                          resultSummary: toolErr?.message || 'Falhou',
+                          timestamp: new Date().toISOString()
+                        }));
+                      }
+                    })();
                   }
                 },
                 onclose: () => {
@@ -1517,6 +2160,94 @@ async function startServer() {
   server.listen(port, '0.0.0.0', () => {
     console.log(`LIORA server running on http://localhost:${port}`);
   });
+
+  // BUG FIX (EADDRINUSE): se a porta já estiver em uso (ex: backend de uma sessão
+  // anterior ainda vivo, ou `npm run dev` + `npm run tauri dev` simultâneos), o
+  // servidor encerra GRACIOSAMENTE com mensagem clara em vez de estourar stack
+  // trace e derrubar o beforeDevCommand do Tauri com código non-zero.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error('');
+      console.error(`[LIORA] A porta ${port} já está em uso por outro processo.`);
+      console.error('[LIORA] Isso geralmente acontece quando um backend anterior ainda está rodando.');
+      console.error('[LIORA] Opções:');
+      console.error(`  1. Encerre o processo antigo:   Get-NetTCPConnection -LocalPort ${port} -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`);
+      console.error(`  2. Ou use outra porta:         $env:PORT = "3001"; npm run tauri dev`);
+      console.error('');
+      process.exit(1);
+    } else {
+      console.error('[LIORA] Erro no servidor HTTP:', err);
+      process.exit(1);
+    }
+  });
+
+  _activeHttpServer = server;
+  return server;
 }
 
-startServer();
+let _activeHttpServer: http.Server | null = null;
+
+/**
+ * FIX 7: encerra limpo o servidor Express (usado pelos testes de integração
+ * para subir/derrubar o ciclo de vida dentro da suíte, sem processo externo).
+ */
+export async function stopServer(): Promise<void> {
+  if (_activeHttpServer) {
+    const srv = _activeHttpServer;
+    _activeHttpServer = null;
+    // FIX (hang dos testes): fecha WebSocketServer + todas as conexões WS +
+    // sessões Playwright antes do close() — handles abertos retêm o event loop
+    // e o after() da suíte nunca resolve.
+    try {
+      if (activeWsServer) {
+        for (const ws of liveConnections) {
+          try { ws.terminate(); } catch { /* ignore */ }
+        }
+        liveConnections.clear();
+        await new Promise<void>((resolve) => activeWsServer!.close(() => resolve()));
+        activeWsServer = null;
+      }
+    } catch { /* ignore */ }
+
+    try {
+      if (activeBrowserCloser) await activeBrowserCloser();
+    } catch { /* ignore */ }
+
+    await new Promise<void>((resolve) => {
+      (srv as any).closeAllConnections?.();
+      srv.close(() => resolve());
+    });
+  }
+}
+
+// Exporta explicitamente para os testes de integração usarem (Fix 7)
+export { startServer };
+
+// Auto-start apenas quando executado diretamente como processo (não quando importado por testes)
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  // Bug hunt (unhandled rejection): startServer pode falhar (porta ocupada, EACCES)
+  // — registra e encerra com código não-zero em vez de derrubar o processo silenciosamente.
+  startServer().catch((err) => {
+    console.error('[LIORA Server] Falha fatal ao iniciar o servidor:', err);
+    process.exit(1);
+  });
+
+  // CORREÇÃO (processo órfão segurando portas): quando o `npm run tauri dev` é
+  // encerrado (Ctrl+C ou término do processo pai), o child tsx server.ts podia
+  // sobreviver e segurar as portas 3000/24678, fazendo o PRÓXIMO arranque falhar
+  // com EADDRINUSE. O graceful shutdown libera tudo para o boot seguinte.
+  const gracefulExit = async (signal: string) => {
+    console.info(`\n[LIORA Server] ${signal} recebido — encerrando limpo (liberando portas 3000/24678)...`);
+    try { await stopServer(); } catch { /* ignore */ }
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void gracefulExit('SIGINT'));
+  process.on('SIGTERM', () => void gracefulExit('SIGTERM'));
+  // Windows: Ctrl+C em pipeline npm chega como SIGHUP em alguns cenários
+  process.on('SIGHUP', () => void gracefulExit('SIGHUP'));
+  // Fecha o HMR websocket server do Vite junto (parte do mesmo processo)
+  process.on('exit', () => {
+    try { _activeHttpServer?.closeAllConnections?.(); } catch { /* ignore */ }
+  });
+}

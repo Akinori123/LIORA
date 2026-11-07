@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLioraStore } from '../../store/lioraStore';
 import { LioraOrb } from '../LioraOrb';
+import { OrbErrorBoundary } from '../OrbErrorBoundary';
 import { devicesManager } from '../../services/devicesManager';
 import { integrationsVault } from '../../services/integrationsVault';
 import { speechService } from '../../services/speechService';
@@ -52,6 +53,7 @@ export const HomeView: React.FC = () => {
     toggleTelemetry, 
     closeTelemetry,
     clearMessages,
+    executeTool,
     addActivityLog
   } = useLioraStore();
 
@@ -84,6 +86,10 @@ export const HomeView: React.FC = () => {
   const [isLiveWsConnected, setIsLiveWsConnected] = useState<boolean>(true);
   const [activeIntegrationsCount, setActiveIntegrationsCount] = useState<number>(0);
   const [intentNotification, setIntentNotification] = useState<string | null>(null);
+  // Auditoria de mapeamento: estado do teste REAL do canal WebSocket /ws/voice
+  // (antes o card "Live WS" exibia 'Pronto' fixo com setTimeout fake — botão morto)
+  const [wsTestResult, setWsTestResult] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
+  const [wsEndpoint, setWsEndpoint] = useState<string>('/ws/voice');
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -147,6 +153,53 @@ export const HomeView: React.FC = () => {
       setActiveIntegrationsCount(integrations.filter((i) => i.status === 'CONNECTED').length);
     } catch {
       // Fallback
+    }
+  };
+
+  // Auditoria de mapeamento: teste REAL de conectividade do canal WebSocket /ws/voice.
+  // Abre conexão efêmera, aguarda TRANSPORT_CONNECTED e fecha — resultado honesto.
+  const handleTestLiveWs = () => {
+    if (wsTestResult === 'testing') return;
+    setWsTestResult('testing');
+    setIntentNotification('Testando canal de voz em tempo real (WebSocket /ws/voice)...');
+
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      setWsTestResult(ok ? 'ok' : 'fail');
+      setIntentNotification(ok
+        ? `Canal Live WS conectado e verificado (${wsEndpoint}).`
+        : `Canal Live WS indisponível (${wsEndpoint}). Verifique se o servidor LIORA está rodando.`);
+      setTimeout(() => {
+        setIntentNotification(null);
+        setWsTestResult('idle');
+      }, 4000);
+    };
+
+    let probe: WebSocket | null = null;
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host || 'localhost:3000';
+      const wsUrl = `${protocol}//${host}/ws/voice`;
+      setWsEndpoint(wsUrl);
+      probe = new WebSocket(wsUrl);
+      probe.binaryType = 'arraybuffer';
+
+      const timeoutId = setTimeout(() => finish(false), 5000);
+
+      probe.onopen = () => {
+        clearTimeout(timeoutId);
+        // Confirmado: conexão aberta — mensagem TRANSPORT_CONNECTED opcional
+        finish(true);
+        try { probe?.close(); } catch {}
+      };
+      probe.onerror = () => {
+        clearTimeout(timeoutId);
+        finish(false);
+      };
+    } catch {
+      finish(false);
     }
   };
 
@@ -234,25 +287,30 @@ export const HomeView: React.FC = () => {
       return;
     }
 
-    // 3. Prefix: /exec
+    // 3. Prefix: /exec — executa comando REAL via executeTool (system_exec_sandbox)
     if (clean.startsWith('/exec')) {
       const cmd = clean.replace('/exec', '').trim();
       setPromptInput('');
-      setOrbState('EXECUTING');
-      setIntentNotification(`Executando comando no sistema: "${cmd}"`);
-      addActivityLog({
-        category: 'system',
-        summary: 'Execução de Comando Intent Router',
-        details: `Comando: ${cmd}`,
-        riskLevel: 'R1',
-        status: 'success',
-        simulated: true
-      });
-      setTimeout(() => {
-        setOrbState('IDLE');
-        setIntentNotification('Comando processado sob governança local.');
+      if (!cmd) {
+        setIntentNotification('Uso: /exec <comando>. Ex: /exec git status');
         setTimeout(() => setIntentNotification(null), 3500);
-      }, 1400);
+        return;
+      }
+      setOrbState('EXECUTING');
+      setIntentNotification(`Executando comando real: "${cmd}"`);
+      try {
+        const result = await executeTool('system_exec_sandbox', { command: cmd });
+        setOrbState(result.success ? 'IDLE' : 'ERROR');
+        setIntentNotification(
+          result.success
+            ? `Saída:\n${String((result.data as any)?.stdout || '(sem saída)').slice(0, 400)}`
+            : `Falhou: ${result.error || 'erro desconhecido'}`
+        );
+      } catch (err: any) {
+        setOrbState('ERROR');
+        setIntentNotification(`Erro: ${err?.message || 'falha de execução'}`);
+      }
+      setTimeout(() => setIntentNotification(null), 6000);
       return;
     }
 
@@ -403,25 +461,30 @@ export const HomeView: React.FC = () => {
 
       {/* Main Center Stage: 3D Core Orb & Glassmorphic Workspace */}
       <div className="flex-1 relative flex flex-col items-center justify-center overflow-hidden w-full h-full min-w-0">
-        {/* Fullscreen 3D Core Canvas */}
-        <div className="absolute inset-0 w-full h-full z-0 pointer-events-auto overflow-hidden">
-          <LioraOrb 
-            state={orbState} 
-            size="100%" 
-            audioGain={audioGain}
-            isMinimized={isMinimized}
-            onSwipeDown={() => setIsMinimized(prev => !prev)}
-            onClick={() => {
-              if (isMinimized) setIsMinimized(false);
-            }}
-          />
-        </div>
-
-        {/* Ambient lighting gradient */}
+        {/* CORREÇÃO (Orbe sumido): o gradiente de luz ambiente era renderizado
+            DEPOIS do canvas (mesmo z-0), pintando por cima do Orbe no WebView2.
+            Movido para ATRÁS do canvas com -z-10 (não-interativo, apenas decoração). */}
         <div 
-          className="absolute inset-0 pointer-events-none z-0 transition-all duration-500" 
+          className="absolute inset-0 pointer-events-none -z-10 transition-all duration-500" 
           style={{ background: 'radial-gradient(circle at center, var(--accent-glow) 0%, transparent 70%)' }}
         />
+
+        {/* Fullscreen 3D Core Canvas — isolado por ErrorBoundary (Orbe nunca
+            derruba a árvore React nem fica em tela preta eterna) */}
+        <div className="absolute inset-0 w-full h-full z-0 pointer-events-auto overflow-hidden">
+          <OrbErrorBoundary state={orbState} audioGain={audioGain}>
+            <LioraOrb 
+              state={orbState} 
+              size="100%" 
+              audioGain={audioGain}
+              isMinimized={isMinimized}
+              onSwipeDown={() => setIsMinimized(prev => !prev)}
+              onClick={() => {
+                if (isMinimized) setIsMinimized(false);
+              }}
+            />
+          </OrbErrorBoundary>
+        </div>
 
         {/* Central Overlay Box (Responsive to Minimized state) */}
         {!isMinimized ? (
@@ -508,24 +571,22 @@ export const HomeView: React.FC = () => {
               {/* WebSocket Live Status Card */}
               <button
                 type="button"
-                onClick={() => {
-                  setIntentNotification('Testando canal de voz em tempo real (WebSocket)...');
-                  setTimeout(() => {
-                    setIntentNotification('Canal Live WS conectado e verificado.');
-                    setTimeout(() => setIntentNotification(null), 3000);
-                  }, 600);
-                }}
+                onClick={handleTestLiveWs}
                 className="flex items-center gap-2 p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg cursor-pointer"
-                title="Clique para testar conectividade WebSocket"
+                title="Clique para testar conectividade WebSocket real (/ws/voice)"
               >
-                <div className="p-1.5 rounded-lg bg-[#1A1A1A] text-emerald-400 group-hover:scale-105 transition-transform">
+                <div className={`p-1.5 rounded-lg bg-[#1A1A1A] transition-transform group-hover:scale-105 ${
+                  wsTestResult === 'ok' ? 'text-emerald-400' : wsTestResult === 'fail' ? 'text-[#FF2B2B]' : 'text-[#888888]'
+                }`}>
                   <Radio className="w-3.5 h-3.5" />
                 </div>
                 <div className="min-w-0">
                   <div className="text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono">Live WS</div>
                   <div className="text-xs font-semibold text-white flex items-center gap-1.5 font-mono">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Pronto</span>
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      wsTestResult === 'ok' ? 'bg-emerald-400 animate-pulse' : wsTestResult === 'fail' ? 'bg-[#FF2B2B]' : 'bg-[#888888]'
+                    }`} />
+                    <span>{wsTestResult === 'ok' ? 'Conectado' : wsTestResult === 'fail' ? 'Indisponível' : 'Verificar'}</span>
                   </div>
                 </div>
               </button>

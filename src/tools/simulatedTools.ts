@@ -466,7 +466,7 @@ export const navigateToTabTool: ToolDefinition<
   any
 > = {
   name: 'navigateToTab',
-  description: "Navega instantaneamente para qualquer aba da interface do LIORA. Abas válidas: 'home', 'conversation', 'activity', 'automations', 'integrations', 'devices', 'memory', 'developer', 'settings'.",
+  description: "Navega instantaneamente para qualquer aba da interface do LIORA. Abas válidas: 'home', 'conversation', 'activity', 'automations', 'integrations', 'devices', 'memory', 'developer', 'settings', 'cockpit'.",
   category: 'system',
   riskLevel: 'R0',
   isSimulated: true,
@@ -476,7 +476,7 @@ export const navigateToTabTool: ToolDefinition<
       tab: {
         type: 'string',
         description: "Aba para qual navegar.",
-        enum: ['home', 'conversation', 'activity', 'automations', 'integrations', 'devices', 'memory', 'developer', 'settings']
+        enum: ['home', 'conversation', 'activity', 'automations', 'integrations', 'devices', 'memory', 'developer', 'settings', 'cockpit']
       }
     },
     required: ['tab'],
@@ -532,16 +532,20 @@ export const openSettingsTool: ToolDefinition<
 
 /**
  * 9. triggerAutomation (R1: Execução de Automação)
+ * P3 (eliminação de stubs): agora delega ao motor REAL de automações
+ * (automationsEngine.triggerRule), que respeita o fluxo de consentimento
+ * HMAC anti-replay via PermissionEngine. Retornar success:true hardcoded
+ * fingia execução — violando a regra de honestidade de dados do AGENTS.md.
  */
 export const triggerAutomationTool: ToolDefinition<
   { ruleId: string },
   any
 > = {
   name: 'triggerAutomation',
-  description: 'Executa uma regra de automação no motor de automações do LIORA.',
+  description: 'Executa uma regra de automação no motor de automações do LIORA. Regras R1+ exigirão consentimento explícito do usuário antes da execução real.',
   category: 'automation',
   riskLevel: 'R1',
-  isSimulated: true,
+  isSimulated: false,
   parameters: {
     type: 'object',
     properties: {
@@ -558,10 +562,31 @@ export const triggerAutomationTool: ToolDefinition<
     requiredFields: ['success', 'ruleId']
   },
   execute: async (params) => {
+    const { automationsEngine } = await import('../services/automationsEngine');
+    const log = await automationsEngine.triggerRule(params.ruleId, { isManual: true });
+
+    if (!log) {
+      return {
+        success: false,
+        ruleId: params.ruleId,
+        error: `AUTOMATION_NOT_FOUND: Regra '${params.ruleId}' não existe no motor.`,
+        simulated: true
+      };
+    }
+
+    const success = log.status === 'SUCCESS';
     return {
-      success: true,
+      success,
       ruleId: params.ruleId,
-      message: `Automação '${params.ruleId}' disparada.`
+      status: log.status,
+      ruleName: log.ruleName,
+      durationMs: log.durationMs,
+      simulated: Boolean(log.simulated),
+      auditId: log.consentAuditId,
+      message: success
+        ? `Automação '${log.ruleName}' executada com sucesso (${log.durationMs}ms).`
+        : `Automação '${log.ruleName}' terminou com status ${log.status}${log.errorMessage ? `: ${log.errorMessage}` : ''}.`,
+      error: success ? undefined : log.errorMessage
     };
   }
 };

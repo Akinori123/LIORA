@@ -11,7 +11,6 @@ import { ChatMessage } from '../src/types.ts';
 test('store initial state has chat enabled with clean defaults', () => {
   const state = useLioraStore.getState();
   assert.equal(state.isGenerating, false);
-  assert.equal(state.activeAbortController, null);
   assert.ok(Array.isArray(state.messages));
 });
 

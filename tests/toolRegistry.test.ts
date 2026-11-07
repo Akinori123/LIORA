@@ -27,8 +27,27 @@ test('1. Tool Registry - Initial state and default simulated tools', async (t) =
   assert.ok(names.includes('system_exec_sandbox'), 'Deve conter system_exec_sandbox');
   assert.ok(names.includes('system_read_env_safe'), 'Deve conter system_read_env_safe');
 
+  // CORREÇÃO (auditoria): ferramentas nativas REAIS registradas ao longo do plano
+  // mestre (Fases 1-4) executam efeitos reais no SO/rede — isSimulated false é
+  // proposital. As simuladas herdadas do preview continuam true.
+  const REAL_TOOLS = new Set([
+    'open_gps_navigation', 'maps_search_places', 'resolve_place_alias',
+    'triggerAutomation', 'calculate_route', 'fetchNews',
+    'pc_take_screenshot', 'pc_manage_apps', 'pc_simulate_input',
+    'file_search_and_read', 'file_write_and_modify',
+    'web_browser_agent',
+    'email_fetch_and_read', 'email_send_or_reply',
+    'calendar_list_events', 'calendar_create_event',
+    'start_background_task', 'cancel_background_task',
+    'vault_store_credential', 'vault_get_credential', 'vault_delete_credential'
+  ]);
+
   for (const tool of tools) {
-    assert.strictEqual(tool.isSimulated, true, `A ferramenta ${tool.name} deve ter isSimulated: true`);
+    if (REAL_TOOLS.has(tool.name) || tool.name === 'triggerAutomation') {
+      assert.strictEqual(tool.isSimulated, false, `A ferramenta ${tool.name} é nativa real (isSimulated: false)`);
+    } else {
+      assert.strictEqual(tool.isSimulated, true, `A ferramenta ${tool.name} deve ter isSimulated: true`);
+    }
     assert.ok(tool.riskLevel === 'R0' || tool.riskLevel === 'R1', `Nível de risco de ${tool.name} deve ser R0 ou R1`);
     assert.ok(tool.parameters && typeof tool.parameters === 'object', `Parâmetros de ${tool.name} devem ser um esquema válido`);
   }

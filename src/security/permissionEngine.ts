@@ -29,6 +29,11 @@ export class PermissionEngine implements IPermissionEngine {
   public readonly activeProfile: SecurityProfileConfig;
   private readonly consentRecords: Map<string, UserConsentRecord> = new Map();
   private readonly logger: IAuditLogger;
+  // BUG FIX (memory leak): consentRecords nunca era limpo — cada token emitido
+  // (mesmo consumido ou expirado) ficava para sempre no Map. Com uso contínuo de
+  // automações R1+, o mapa crescia indefinidamente. Tokens são removidos ao
+  // consumir; expirados são podados por GC na próxima emissão (teto de 500).
+  private static readonly MAX_CONSENT_RECORDS = 500;
 
   constructor(
     profile: SecurityProfileConfig = STRICT_PROFILE,
@@ -46,11 +51,13 @@ export class PermissionEngine implements IPermissionEngine {
     toolName: string,
     rawParameters: unknown = {},
     context: SecurityRequestContext,
-    toolMetadata?: { riskLevel: ToolRiskLevel }
+    toolMetadata?: { riskLevel: ToolRiskLevel; consentToken?: string }
   ): Promise<PermissionEvaluationResult> {
     const startTime = performance.now();
     const timestamp = new Date().toISOString();
     const auditId = generateUUID();
+    // Consentimento HMAC opcional (R1/R2): passado via toolMetadata pela chamada
+    const consentToken = toolMetadata?.consentToken;
 
     // 0. Validação de integridade do perfil ativo
     if (!isValidSecurityProfile(this.activeProfile)) {
@@ -151,15 +158,37 @@ export class PermissionEngine implements IPermissionEngine {
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
 
-    // 6. Verificação de risco R2 (bloqueado na Fase 6.2)
+    // 6. R2 — MUTAÇÃO DESTRUTIVA: permitida APENAS com consentimento HMAC válido.
+    // CORREÇÃO: antes era DENY categorico ('DENY_R2_NOT_PERMITTED_IN_PHASE_6_2'),
+    // o que impedia o núcleo de controle do PC (matar processos, cliques simulados,
+    // exclusão de arquivos) mesmo com consentimento. Agora o R2 segue o mesmo fluxo
+    // de consentimento do R1 — token HMAC anti-replay obrigatório.
     if (resolvedRiskLevel === 'R2') {
+      const consented = consentToken
+        ? this.consumeConsentToken(consentToken, toolName, parametersHash, context.sessionId)
+        : null;
+      if (consented?.success) {
+        const result: PermissionEvaluationResult = {
+          decision: 'ALLOW',
+          toolName,
+          riskLevel: 'R2',
+          reason: `Operação R2 '${toolName}' autorizada via consentimento HMAC explícito do operador.`,
+          parametersHash,
+          consentAuditId: consented.consentAuditId,
+          evaluationTimeMs: Math.round(performance.now() - startTime),
+          timestamp,
+          auditId
+        };
+        return this.safelyLogAndReturn(result, context, parametersHash);
+      }
       const result: PermissionEvaluationResult = {
         decision: 'DENY',
         toolName,
         riskLevel: 'R2',
-        code: 'DENY_R2_NOT_PERMITTED_IN_PHASE_6_2',
-        reason: 'Operações de nível R2 estão bloqueadas na política atual (Fase 6.2).',
+        code: 'REQUIRES_USER_CONFIRMATION',
+        reason: `Operação R2 '${toolName}' é destrutiva/mutável e exige confirmação explícita do operador.`,
         parametersHash,
+        requiredConfirmation: true,
         evaluationTimeMs: Math.round(performance.now() - startTime),
         timestamp,
         auditId
@@ -167,14 +196,31 @@ export class PermissionEngine implements IPermissionEngine {
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
 
-    // 7. Verificação de risco R1 (bloqueado para execução na Fase 6.2B/C)
+    // 7. R1 — AÇÃO LOCAL REVERSÍVEL: idem, exige consentimento HMAC (não mais DENY categorico).
     if (resolvedRiskLevel === 'R1') {
+      const consented = consentToken
+        ? this.consumeConsentToken(consentToken, toolName, parametersHash, context.sessionId)
+        : null;
+      if (consented?.success) {
+        const result: PermissionEvaluationResult = {
+          decision: 'ALLOW',
+          toolName,
+          riskLevel: 'R1',
+          reason: `Operação R1 '${toolName}' autorizada via consentimento HMAC explícito do operador.`,
+          parametersHash,
+          consentAuditId: consented.consentAuditId,
+          evaluationTimeMs: Math.round(performance.now() - startTime),
+          timestamp,
+          auditId
+        };
+        return this.safelyLogAndReturn(result, context, parametersHash);
+      }
       const result: PermissionEvaluationResult = {
         decision: 'DENY',
         toolName,
         riskLevel: 'R1',
-        code: 'DENY_R1_BLOCKED_IN_PHASE_6_2B',
-        reason: 'Operações de nível R1 exigem confirmação interativa do usuário e estão bloqueadas para execução nesta fase.',
+        code: 'REQUIRES_USER_CONFIRMATION',
+        reason: `Operação R1 '${toolName}' exige confirmação interativa do operador.`,
         parametersHash,
         requiredConfirmation: true,
         evaluationTimeMs: Math.round(performance.now() - startTime),
@@ -260,6 +306,21 @@ export class PermissionEngine implements IPermissionEngine {
     // Indexado pelo hash do token
     this.consentRecords.set(tokenHash, record);
 
+    // BUG FIX: GC de registros expirados — roda no máximo a cada emissão e remove
+    // registros vencidos, com teto duro de 500 registros (proteção contra flood).
+    if (this.consentRecords.size > PermissionEngine.MAX_CONSENT_RECORDS) {
+      const now = Date.now();
+      for (const [hash, rec] of this.consentRecords) {
+        if (rec.expiresAt < now) this.consentRecords.delete(hash);
+      }
+      // Se ainda acima do teto (flood de tokens não-expirados), descarta os mais antigos
+      while (this.consentRecords.size > PermissionEngine.MAX_CONSENT_RECORDS) {
+        const oldestKey = this.consentRecords.keys().next().value;
+        if (oldestKey === undefined) break;
+        this.consentRecords.delete(oldestKey);
+      }
+    }
+
     // Registro seguro de auditoria no logger injetado (sem segredos)
     try {
       this.logger.logEvent({
@@ -330,6 +391,9 @@ export class PermissionEngine implements IPermissionEngine {
 
     // Consumo atômico imediato
     record.consumed = true;
+    // BUG FIX: remove o registro do mapa após consumo (não cresce indefinidamente)
+    // — o record local já carrega todos os dados necessários para a auditoria abaixo.
+    this.consentRecords.delete(tokenHash);
 
     // Registro seguro de auditoria do consumo
     try {

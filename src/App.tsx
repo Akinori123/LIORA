@@ -19,6 +19,7 @@ import { SettingsView } from './components/views/SettingsView';
 import { CockpitHUDView } from './components/views/CockpitHUDView';
 import { QuickOverlay } from './components/QuickOverlay';
 import { GlobalVoiceBar } from './components/GlobalVoiceBar';
+import { GlobalConsentOverlay } from './components/chat/GlobalConsentOverlay';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -131,6 +132,9 @@ export default function App() {
         onSubmitPrompt={handleQuickOverlaySubmit}
       />
       <GlobalVoiceBar />
+      {/* P1: overlay global de consentimento R1+ — visível em qualquer aba e
+          aceitável por voz ("confirmar"/"cancelar") quando o mic está ativo */}
+      <GlobalConsentOverlay />
     </div>
   );
 }

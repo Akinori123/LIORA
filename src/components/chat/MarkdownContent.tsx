@@ -5,7 +5,31 @@
 
 import React, { useState } from 'react';
 import { marked, Tokens } from 'marked';
+import DOMPurify from 'dompurify';
 import { Check, Copy, Code2 } from 'lucide-react';
+
+/**
+ * Sanitização XSS: toda saída HTML do marked passa pelo DOMPurify antes de
+ * entrar no DOM via dangerouslySetInnerHTML. Sem isso, markdown malicioso
+ * (de resposta do modelo ou de conteúdo colado pelo usuário) poderia injetar
+ * scripts/event handlers na webview do Tauri.
+ */
+const sanitizeHtml = (html: string): string => {
+  const clean = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['a', 'b', 'i', 'em', 'strong', 'code', 'br', 'span', 'sup', 'sub', 'del', 's', 'u', 'ol', 'ul', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+    ALLOWED_ATTR: ['href', 'title', 'target', 'rel'],
+    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|tel:|#|\/)/i // bloqueia javascript:, vbscript:, data: (exceto âncoras/relativos)
+  });
+  // BUG FIX (XSS/tabnabbing): DOMPurify não força rel nos <a> — link de resposta do
+  // modelo podia abrir na MESMA janela (navegando para fora da LIORA) ou sem
+  // noopener (a página aberta podia manipular window.opener). Reforço pós-sanitização.
+  const doc = new DOMParser().parseFromString(`<div>${clean}</div>`, 'text/html');
+  doc.querySelectorAll('a[href]').forEach((a) => {
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', 'noopener noreferrer nofollow');
+  });
+  return doc.body.firstElementChild?.innerHTML || '';
+};
 
 interface CodeBlockProps {
   language?: string;
@@ -106,7 +130,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
   }
 
   const renderHeading = (depth: number, text: string, key: number) => {
-    const html = marked.parseInline(text) as string;
+    const html = sanitizeHtml(marked.parseInline(text) as string);
     const baseClass = "font-bold text-white mt-3 mb-1.5 border-b border-[#222222] pb-1";
     if (depth <= 2) {
       return <h3 key={key} className={`text-sm ${baseClass}`} dangerouslySetInnerHTML={{ __html: html }} />;
@@ -141,7 +165,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
               <p
                 key={idx}
                 className="leading-relaxed whitespace-pre-wrap"
-                dangerouslySetInnerHTML={{ __html: marked.parseInline(pToken.text) as string }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parseInline(pToken.text) as string) }}
               />
             );
           }
@@ -160,7 +184,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
                   <li
                     key={itemIdx}
                     className="leading-relaxed"
-                    dangerouslySetInnerHTML={{ __html: marked.parseInline(item.text) as string }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parseInline(item.text) as string) }}
                   />
                 ))}
               </ListTag>
@@ -173,7 +197,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
               <blockquote
                 key={idx}
                 className="border-l-2 border-[var(--accent-primary)] pl-3 py-1 my-2 bg-[#121212] text-[#B0B0B0] italic rounded-r-lg"
-                dangerouslySetInnerHTML={{ __html: marked.parseInline(bToken.text) as string }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parseInline(bToken.text) as string) }}
               />
             );
           }
@@ -189,7 +213,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
                         <th
                           key={colIdx}
                           className="px-3 py-2 font-semibold"
-                          dangerouslySetInnerHTML={{ __html: marked.parseInline(col.text) as string }}
+                          dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parseInline(col.text) as string) }}
                         />
                       ))}
                     </tr>
@@ -201,7 +225,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
                           <td
                             key={cellIdx}
                             className="px-3 py-2 text-[#CCCCCC]"
-                            dangerouslySetInnerHTML={{ __html: marked.parseInline(cell.text) as string }}
+                            dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parseInline(cell.text) as string) }}
                           />
                         ))}
                       </tr>
@@ -219,7 +243,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
             return (
               <div
                 key={idx}
-                dangerouslySetInnerHTML={{ __html: marked.parse(token.raw) as string }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(marked.parse(token.raw) as string) }}
               />
             );
         }

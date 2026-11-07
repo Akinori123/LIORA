@@ -1,7 +1,12 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import {defineConfig} from 'vite';
+
+// CORREÇÃO (aviso do Vite configLoader 'native'): __dirname não existe em módulos
+// ESM — usar import.meta.dirname (suportado nativamente no Node 20.11+).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(() => {
   return {

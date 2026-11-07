@@ -12,7 +12,7 @@ import {
   IntegrationScope
 } from '../types/integrations';
 import { eventBus, EventBus } from '../utils/eventBus';
-import { computeHmacSha256Sync, sha256Sync } from '../utils/cryptoIsomorphic';
+import { computeHmacSha256Sync, sha256Sync, uint8ArrayToBase64, base64ToUtf8String } from '../utils/cryptoIsomorphic';
 import { writeKeychainSecret } from '../security/localBridge';
 
 /**
@@ -295,6 +295,40 @@ export const INITIAL_INTEGRATION_SERVICES: IntegrationServiceConfig[] = [
       { id: 'models:complete', name: 'Completions', description: 'Acesso a modelos agregados', granted: false, required: true }
     ],
     featuresSupported: ['Claude 3.5', 'GPT-4o', 'Llama 3'],
+    isSimulated: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  },
+  {
+    id: 'svc-email-imap',
+    provider: 'email' as const,
+    name: 'E-mail IMAP/SMTP — Leitura & Envio Seguro',
+    category: 'productivity' as const,
+    description: 'Ferramentas de leitura de caixa de entrada (R1) e envio/resposta de mensagens (R2) com credenciais locais no cofre.',
+    status: 'DISCONNECTED' as const,
+    endpointUrl: 'imap://localhost:993',
+    scopes: [
+      { id: 'email:read', name: 'Leitura de E-mails', description: 'Listar, buscar e ler mensagens da caixa de entrada', granted: false, required: true },
+      { id: 'email:send', name: 'Envio de E-mails', description: 'Enviar novas mensagens e respostas (exige consentimento R2)', granted: false, required: false }
+    ],
+    featuresSupported: ['IMAP SEARCH', 'SMTP STARTTLS', 'OAuth2 XOAUTH2', 'Fetch Attachments'],
+    isSimulated: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  },
+  {
+    id: 'svc-calendar-ics',
+    provider: 'calendar' as const,
+    name: 'Calendário Local/ICS — Consulta & Agendamento',
+    category: 'productivity' as const,
+    description: 'Listagem de eventos (R1) e criação de compromissos via ICS/API local (R2).',
+    status: 'DISCONNECTED' as const,
+    endpointUrl: 'calendar://local/ics',
+    scopes: [
+      { id: 'calendar:read', name: 'Leitura de Agenda', description: 'Consultar eventos por data ou intervalo', granted: false, required: true },
+      { id: 'calendar:write', name: 'Criação de Eventos', description: 'Agendar compromissos e reuniões (exige consentimento R2)', granted: false, required: false }
+    ],
+    featuresSupported: ['RFC 5545 ICS', 'Google Calendar REST', 'Local Notes Export'],
     isSimulated: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -1178,8 +1212,13 @@ export class IntegrationsVault {
       };
       const json = JSON.stringify(exportable);
       const signature = computeHmacSha256Sync('liora_os_keychain_secret_v1', json);
+      // CORREÇÃO (InvalidCharacterError no arranque): btoa() só aceita Latin1 —
+      // credenciais com ç/ã/é/emojis lançavam InvalidCharacterError e quebravam o
+      // arranque do Vault. Codificação UTF-8 segura via TextEncoder + base64
+      // manual (funciona idêntico no browser, no WebView do Tauri e no Node).
+      const ciphertext = uint8ArrayToBase64(new TextEncoder().encode(json));
       const payload = {
-        ciphertext: typeof btoa === 'function' ? btoa(json) : Buffer.from(json).toString('base64'),
+        ciphertext,
         signature,
         updatedAt: new Date().toISOString(),
         keychainFallbackActive: this.keychainFallbackActive
@@ -1201,7 +1240,7 @@ export class IntegrationsVault {
       const payload = JSON.parse(raw);
       if (!payload.ciphertext || !payload.signature) return false;
 
-      const decodedJson = typeof atob === 'function' ? atob(payload.ciphertext) : Buffer.from(payload.ciphertext, 'base64').toString('utf8');
+      const decodedJson = base64ToUtf8String(payload.ciphertext);
       const expectedSig = computeHmacSha256Sync('liora_os_keychain_secret_v1', decodedJson);
 
       if (expectedSig !== payload.signature) {

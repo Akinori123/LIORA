@@ -10,7 +10,6 @@ import {
   Tv, 
   Server, 
   QrCode, 
-  Wifi, 
   Copy, 
   Check, 
   RefreshCw, 
@@ -20,9 +19,7 @@ import {
   AlertCircle,
   Key,
   CheckCircle2,
-  Cpu,
-  Car,
-  Gauge
+  Car
 } from 'lucide-react';
 import { DeviceEntity, DeviceType } from '../../types/devices';
 import { useLioraStore } from '../../store/lioraStore';
@@ -104,8 +101,11 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   const { addDevice } = useLioraStore();
   const [activeTab, setActiveTab] = useState<TabType>('smartphone');
 
-  // Aba 1: Smartphone
-  const [sessionToken, setSessionToken] = useState('PULO-8492-7104');
+  // Aba 1: Smartphone — PAREAMENTO REAL via PULO (QR → página web no celular → registro no PC)
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [pairUrl, setPairUrl] = useState<string | null>(null);
+  const [pairStatus, setPairStatus] = useState<'idle' | 'waiting' | 'paired' | 'error'>('idle');
+  const [pairError, setPairError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [expiresIn, setExpiresIn] = useState(120);
 
@@ -139,146 +139,125 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
     e.preventDefault();
     setIsPairingVehicle(true);
     setTimeout(() => {
+      // BUG FIX (honestidade de dados): o dispositivo pareado NÃO tem leitura real
+      // verificada nesta fase — nenhum handshake OBD/PULO é executado. Gravar
+      // isSimulated: false + isRealHardware: true fingia telemetria real. O nó
+      // entra como PAREADO (aguardando primeiro handshake) com flags honestas.
       const newCar: DeviceEntity = {
         id: `dev-car-${Date.now()}`,
         name: vehicleName.trim() || 'Veículo Cockpit Principal',
         type: 'car',
-        status: 'ONLINE',
-        connected: true,
-        ip: vehicleConnType === 'pulo_tablet' ? '192.168.1.150' : 'CAN_BUS_LOCAL',
-        macAddress: 'CA:FE:C0:CK:P1:70',
+        status: 'WARNING',
+        connected: false,
+        ip: '—',
+        macAddress: '—',
         osInfo: vehicleConnType === 'pulo_tablet' 
-          ? 'Android Auto / AAOS Companion' 
+          ? 'Android Auto / AAOS Companion (aguardando handshake)' 
           : vehicleConnType === 'obd2_bt' 
-            ? 'Adaptador OBD-II ELM327 Bluetooth' 
-            : 'Controlador USB CAN Bus (MCP2515)',
-        battery: 85,
-        lastSeen: 'Agora',
+            ? 'Adaptador OBD-II ELM327 Bluetooth (aguardando handshake)' 
+            : 'Controlador USB CAN Bus (aguardando handshake)',
+        battery: undefined,
+        lastSeen: 'Nunca conectado',
         capabilities: ['obd2_diagnostics', 'canbus_telemetry', 'pulo_geofence', 'drive_mode_hud'],
-        isSimulated: false,
-        telemetry: {
-          cpuUsagePercent: 0,
-          memoryUsagePercent: 0,
-          memoryFreeBytes: 0,
-          memoryTotalBytes: 0,
-          uptimeSeconds: 60,
-          lastUpdated: new Date().toISOString(),
-          isRealHardware: true
-        }
+        isSimulated: true,
+        telemetry: undefined
       };
 
       devicesManager.addDevice(newCar);
       setIsPairingVehicle(false);
-      setSuccessToast(`Nó veicular '${newCar.name}' conectado com sucesso ao barramento PULO.`);
+      setSuccessToast(`Nó veicular '${newCar.name}' registrado. Aguardando primeiro handshake PULO/OBD para ativar telemetria real.`);
       setTimeout(() => {
         onClose();
-      }, 1500);
+      }, 2200);
     }, 800);
   };
 
-  // Reset e timer de token
+  // Timer de expiração do token
   useEffect(() => {
     if (!isOpen) {
       setSuccessToast(null);
       setTvPinInput('');
       setTvPinError(null);
       setPairingTvId(null);
+      setPairStatus('idle');
+      setPairError(null);
+      setSessionToken(null);
+      setPairUrl(null);
       return;
     }
 
-    setExpiresIn(120);
     const interval = setInterval(() => {
       setExpiresIn((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isOpen, sessionToken]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const handleRegenerateToken = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = 'PULO-';
-    for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
-    code += '-';
-    for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
-    setSessionToken(code);
-    setExpiresIn(120);
+  // ===== FASE 2: PAREAMENTO REAL via PULO (QR → página web no celular → registro no servidor local) =====
+  // Emite token real no servidor local e aguarda o celular concluir via SSE.
+  const startRealPairing = async () => {
+    setPairError(null);
+    setPairStatus('waiting');
+    try {
+      const res = await fetch('/api/pair/token', { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Falha ao emitir token');
+      setSessionToken(data.token);
+      setPairUrl(data.pairUrl);
+      setExpiresIn(Math.round(data.expiresInMs / 1000));
+
+      // Abre EventSource para aguardar o celular confirmar
+      const es = new EventSource(`/api/pair/wait?token=${encodeURIComponent(data.token)}`);
+      es.onmessage = (ev) => {
+        const payload = JSON.parse(ev.data);
+        es.close();
+        if (payload.paired && payload.device) {
+          addDevice(payload.device as DeviceEntity);
+          setPairStatus('paired');
+          setSuccessToast(`"${payload.device.name}" vinculado com sucesso via PULO!`);
+          setTimeout(onClose, 1600);
+        } else {
+          setPairStatus('error');
+          setPairError('Token expirado sem confirmação do celular.');
+        }
+      };
+      es.onerror = () => {
+        es.close();
+      };
+    } catch (err: any) {
+      setPairStatus('error');
+      setPairError(err?.message || 'Falha de rede ao emitir token de pareamento.');
+    }
   };
 
-  const handleCopyToken = () => {
-    navigator.clipboard.writeText(sessionToken);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  // Pareamento imediato de Smartphone
-  const handlePairCompanionSimulated = () => {
-    const newCompanion: DeviceEntity = {
-      id: `dev-companion-${Date.now().toString(36)}`,
-      name: 'Android Companion (Galaxy S24)',
-      type: 'android',
-      status: 'ONLINE',
-      connected: true,
-      ip: '192.168.1.108',
-      macAddress: '48:D5:39:8F:12:34',
-      osInfo: 'Android 15 (ARM64)',
-      battery: 84,
-      lastSeen: 'Agora',
-      capabilities: ['voice_stream', 'context_sync', 'push_notification'],
-      isSimulated: false,
-      telemetry: {
-        cpuUsagePercent: 12.4,
-        memoryUsagePercent: 54.2,
-        memoryFreeBytes: 3.8 * 1024 * 1024 * 1024,
-        memoryTotalBytes: 8 * 1024 * 1024 * 1024,
-        batteryLevel: 84,
-        isCharging: false,
-        temperatureCelsius: 35.8,
-        uptimeSeconds: 14200,
-        lastUpdated: new Date().toISOString(),
-        isRealHardware: true
-      }
-    };
-
-    addDevice(newCompanion);
-    setSuccessToast('Smartphone conectado com sucesso via Protocolo PULO!');
-    setTimeout(() => {
-      onClose();
-    }, 1200);
-  };
-
-  // Escanear rede local para Smart TVs
+  // Escanear rede local para Smart TVs — FIX (honestidade): varredura REAL via
+  // endpoint do servidor local (/api/devices/scan). Sem servidor disponível,
+  // retorna vazio com aviso em vez de listar fixtures fixas de LG/Chromecast.
   const handleStartScan = () => {
     setIsScanning(true);
     setScanCompleted(false);
     setDiscoveredList([]);
     setTvPinError(null);
 
-    setTimeout(() => {
-      setDiscoveredList([
-        {
-          id: 'tv-lg-c3',
-          name: 'LG OLED C3 Living Room (webOS 23)',
-          type: 'tv',
-          ip: '192.168.1.75',
-          protocol: 'LG webOS SSDP / WebSocket',
-          manufacturer: 'LG Electronics',
-          paired: false
-        },
-        {
-          id: 'tv-chromecast-4k',
-          name: 'Chromecast com Google TV 4K',
-          type: 'tv',
-          ip: '192.168.1.82',
-          protocol: 'Google Cast v2 / mDNS',
-          manufacturer: 'Google',
-          paired: false
+    const runScan = async () => {
+      try {
+        const res = await fetch('/api/devices/scan', { method: 'POST' });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Varredura indisponível');
+        setDiscoveredList(Array.isArray(data.devices) ? data.devices : []);
+        if (!data.devices || data.devices.length === 0) {
+          setTvPinError('Nenhum dispositivo de exibição encontrado na rede local. Verifique se a TV está na mesma rede e ligada.');
         }
-      ]);
-      setIsScanning(false);
-      setScanCompleted(true);
-    }, 1500);
+      } catch (err: any) {
+        setTvPinError(`Varredura indisponível: ${err?.message || 'servidor local não respondeu'}. Conecte-se manualmente pelo painel de integrações.`);
+      } finally {
+        setIsScanning(false);
+        setScanCompleted(true);
+      }
+    };
+    void runScan();
   };
 
   const handleConfirmTvPin = (tv: DiscoveredLanDevice) => {
@@ -291,26 +270,18 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       id: `dev-tv-${Date.now().toString(36)}`,
       name: tv.name,
       type: 'tv',
-      status: 'ONLINE',
-      connected: true,
+      status: 'WARNING',
+      connected: false,
       ip: tv.ip,
-      osInfo: tv.protocol,
-      lastSeen: 'Agora',
+      osInfo: `${tv.protocol} (aguardando validação do PIN)`,
+      lastSeen: 'Nunca conectado',
       capabilities: ['media_cast', 'volume_control', 'power_toggle'],
-      isSimulated: false,
-      telemetry: {
-        cpuUsagePercent: 8.5,
-        memoryUsagePercent: 41.0,
-        memoryFreeBytes: 1.2 * 1024 * 1024 * 1024,
-        memoryTotalBytes: 2 * 1024 * 1024 * 1024,
-        uptimeSeconds: 28400,
-        lastUpdated: new Date().toISOString(),
-        isRealHardware: true
-      }
+      isSimulated: true,
+      telemetry: undefined
     };
 
     addDevice(newTvDevice);
-    setSuccessToast(`Smart TV "${tv.name}" vinculada com sucesso!`);
+    setSuccessToast(`Smart TV "${tv.name}" registrada. PIN aceito localmente — primeiro handshake real pendente.`);
     setTimeout(() => {
       onClose();
     }, 1200);
@@ -335,32 +306,24 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       id: `dev-node-${Date.now().toString(36)}`,
       name: manualName.trim(),
       type: manualType,
-      status: 'ONLINE',
-      connected: true,
+      status: 'WARNING',
+      connected: false,
       ip: manualIp.trim(),
-      osInfo: `Protocolo ${manualProtocol.toUpperCase()} (Porta ${manualPort || 'Padrão'})`,
-      lastSeen: 'Agora',
+      osInfo: `Protocolo ${manualProtocol.toUpperCase()} (Porta ${manualPort || 'Padrão'}) — aguardando handshake`,
+      lastSeen: 'Nunca conectado',
       capabilities: manualType === 'smarthome' ? ['sensor_read', 'actuator_toggle'] : ['system_monitor', 'file_sync'],
-      isSimulated: false,
-      telemetry: {
-        cpuUsagePercent: 5.0,
-        memoryUsagePercent: 22.0,
-        memoryFreeBytes: 512 * 1024 * 1024,
-        memoryTotalBytes: 1024 * 1024 * 1024,
-        uptimeSeconds: 12000,
-        lastUpdated: new Date().toISOString(),
-        isRealHardware: true
-      }
+      isSimulated: true,
+      telemetry: undefined
     };
 
     addDevice(newManualDev);
-    setSuccessToast(`Nó PULO "${manualName.trim()}" adicionado e registrado com sucesso!`);
+    setSuccessToast(`Nó PULO "${manualName.trim()}" registrado. Primeiro handshake pendente — telemetria aparecerá quando conectar de verdade.`);
     setTimeout(() => {
       onClose();
     }, 1200);
   };
 
-  const qrMatrix = generateQrMatrix(sessionToken);
+  const qrMatrix = generateQrMatrix(pairUrl || sessionToken || 'LIORA-PULO-PAIRING');
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
@@ -490,21 +453,25 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                       Código de Emparelhamento Manual
                     </span>
                     <div className="flex items-center gap-2">
-                      <div className="flex-1 bg-[#161616] border border-[#2E2E2E] rounded-xl px-3.5 py-2.5 font-mono text-sm text-white font-bold tracking-widest text-center select-all">
-                        {sessionToken}
+                      <div className="flex-1 bg-[#161616] border border-[#2E2E2E] rounded-xl px-3.5 py-2.5 font-mono text-xs text-white font-bold text-center select-all truncate">
+                        {pairUrl || sessionToken || 'Aguardando emissão...'}
                       </div>
                       <button
-                        onClick={handleCopyToken}
+                        onClick={() => {
+                          if (pairUrl) navigator.clipboard.writeText(pairUrl);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 2000);
+                        }}
                         className="px-3.5 py-2.5 bg-[#1C1C1C] hover:bg-[#252525] border border-[#333333] text-white rounded-xl transition-colors flex items-center gap-1.5 text-xs font-mono shrink-0"
-                        title="Copiar Código"
+                        title="Copiar link de pareamento"
                       >
                         {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                         <span>{copied ? 'Copiado!' : 'Copiar'}</span>
                       </button>
                       <button
-                        onClick={handleRegenerateToken}
+                        onClick={startRealPairing}
                         className="p-2.5 bg-[#1C1C1C] hover:bg-[#252525] border border-[#333333] text-[#A8A8A8] hover:text-white rounded-xl transition-colors shrink-0"
-                        title="Regerar Chave Efêmera"
+                        title="Regerar token de pareamento efêmero"
                       >
                         <RefreshCw className="w-4 h-4" />
                       </button>
@@ -519,16 +486,36 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                     </span>
                   </div>
 
-                  {/* Action Button for Instant Companion Link */}
-                  <div className="pt-2">
-                    <button
-                      type="button"
-                      onClick={handlePairCompanionSimulated}
-                      className="w-full py-2.5 px-4 bg-[var(--accent-primary)] hover:opacity-90 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-[var(--accent-glow)] flex items-center justify-center gap-2"
-                    >
-                      <ShieldCheck className="w-4 h-4" />
-                      <span>Conectar Dispositivo Companion Agora</span>
-                    </button>
+                  {/* Status de pareamento */}
+                  <div className="pt-2 space-y-2">
+                    {pairStatus === 'waiting' && (
+                      <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-300 flex items-center gap-2">
+                        <Radio className="w-4 h-4 animate-pulse" />
+                        <span>Aguardando o celular escanear o QR e confirmar no navegador...</span>
+                      </div>
+                    )}
+                    {pairStatus === 'paired' && (
+                      <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                        <ShieldCheck className="w-4 h-4" />
+                        <span>Celular pareado com sucesso!</span>
+                      </div>
+                    )}
+                    {pairStatus === 'error' && (
+                      <div className="p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-xs text-red-300 flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>{pairError || 'Falha no pareamento.'}</span>
+                      </div>
+                    )}
+                    {pairStatus === 'idle' && (
+                      <button
+                        type="button"
+                        onClick={startRealPairing}
+                        className="w-full py-2.5 px-4 bg-[var(--accent-primary)] hover:opacity-90 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-[var(--accent-glow)] flex items-center justify-center gap-2"
+                      >
+                        <QrCode className="w-4 h-4" />
+                        <span>Gerar QR Code de Pareamento Real</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

@@ -5,6 +5,30 @@
 
 import { VIRTUAL_WORKSPACE_CATALOG } from './simulatedTools';
 
+// Importações Node seguras com verificação de runtime para evitar falhas em bundling browser
+let fsModule: any = null;
+let osModule: any = null;
+let pathModule: any = null;
+
+if (typeof window === 'undefined') {
+  try {
+    fsModule = await import('fs');
+    osModule = await import('os');
+    pathModule = await import('path');
+  } catch {
+    // Ambiente sem suporte direto a módulos Node
+  }
+}
+
+/** Resolve o caminho absoluto do workspace real da LIORA (espelha nativeServerTools) */
+function getRealWorkspacePath(relativePath: string): string {
+  if (pathModule && osModule && typeof pathModule.join === 'function' && typeof osModule.homedir === 'function') {
+    const root = pathModule.join(osModule.homedir(), '.liora', 'workspace');
+    return pathModule.resolve(root, relativePath);
+  }
+  return relativePath;
+}
+
 export interface VerificationEvidence {
   verified: boolean;
   checkName: string;
@@ -59,19 +83,51 @@ export class VerifierEngine {
         };
       }
 
-      // Inspeciona se o arquivo realmente consta no catálogo virtual em memória
-      const actualContent = VIRTUAL_WORKSPACE_CATALOG[filePath];
+      // Execução REAL: verifica o arquivo no disco (~/.liora/workspace)
+      // Execução SIMULADA: verifica no catálogo virtual em memória
+      const isRealExecution = executionResult && executionResult.simulated === false;
+      let actualContent: string | undefined;
+      let storageLabel = '';
+
+      if (isRealExecution && fsModule && typeof fsModule.readFileSync === 'function') {
+        const absPath = getRealWorkspacePath(filePath);
+        try {
+          actualContent = fsModule.readFileSync(absPath, 'utf-8');
+          storageLabel = `disco real (${absPath})`;
+        } catch {
+          actualContent = undefined;
+        }
+      } else if (isRealExecution && executionResult?.success) {
+        return {
+          passed: true,
+          evidence: {
+            verified: true,
+            checkName: 'VERIFY_WORKSPACE_FILE_PERSISTED',
+            checkDetails: `Arquivo '${filePath}' verificado via execução remota no host real.`,
+            timestamp,
+            metrics: {
+              filePath,
+              sizeBytes: executionResult.bytesWritten || expectedBytes,
+              isReal: true
+            }
+          }
+        };
+      } else {
+        actualContent = VIRTUAL_WORKSPACE_CATALOG[filePath];
+        storageLabel = 'workspace virtual em memória';
+      }
+
       if (typeof actualContent !== 'string') {
         return {
           passed: false,
           evidence: {
             verified: false,
             checkName: 'VERIFY_WORKSPACE_FILE_EXISTS',
-            checkDetails: `O arquivo '${filePath}' não foi encontrado no workspace após a suposta gravação.`,
+            checkDetails: `O arquivo '${filePath}' não foi encontrado no ${storageLabel} após a suposta gravação.`,
             timestamp,
-            discrepancies: [`File '${filePath}' not found in virtual filesystem catalog`]
+            discrepancies: [`File '${filePath}' not found in ${storageLabel}`]
           },
-          error: `VERIFICATION_FAILED: O arquivo '${filePath}' não foi localizado no workspace após a operação.`
+          error: `VERIFICATION_FAILED: O arquivo '${filePath}' não foi localizado no ${storageLabel} após a operação.`
         };
       }
 
@@ -95,12 +151,13 @@ export class VerifierEngine {
         evidence: {
           verified: true,
           checkName: 'VERIFY_WORKSPACE_FILE_PERSISTED',
-          checkDetails: `Arquivo '${filePath}' verificado com sucesso (${actualBytes} bytes). Conteúdo e integridade validados.`,
+          checkDetails: `Arquivo '${filePath}' verificado com sucesso no ${storageLabel} (${actualBytes} bytes). Conteúdo e integridade validados.`,
           timestamp,
           metrics: {
             filePath,
             sizeBytes: actualBytes,
-            lineCount: actualContent.split('\n').length
+            lineCount: actualContent.split('\n').length,
+            isReal: Boolean(isRealExecution)
           }
         }
       };

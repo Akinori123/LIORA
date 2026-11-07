@@ -1,0 +1,40 @@
+﻿
+> react-example@0.0.0 test
+> tsx --test tests/cockpitNavigation.test.ts tests/codingAgentAndIot.test.ts tests/semanticMemory.test.ts tests/pcControlTools.test.ts tests/webAgent.test.ts tests/productivityTools.test.ts tests/backgroundWorkers.test.ts tests/vaultManager.test.ts tests/toolDuplication.test.ts tests/navigationParser.test.ts src/utils/chatContext.test.ts tests/transcriptionDynamic.test.ts tests/persistenceAudit.test.ts tests/chatStoreLogic.test.ts tests/chatApiIntegration.test.ts tests/websocketInternal.test.ts tests/websocketLive.test.ts tests/websocketLiveAudio.test.ts tests/nativeDevicesTelemetry.test.ts tests/nativeWorkspaceIO.test.ts tests/nativeTauriBridge.test.ts tests/nativeIntegrationsApi.test.ts tests/toolRegistry.test.ts tests/audioSettings.test.ts tests/automationsAndDevicesAudit.test.ts tests/productivityAndAnalytics.test.ts tests/storageAdapterAndPhase4.test.ts
+
+✔ sanitizeInput trims whitespace and enforces length limit (1.9445ms)
+✔ formatGeminiHistory maps user and assistant to user and model roles (0.5888ms)
+✔ formatGeminiHistory filters out error messages and empty texts (0.5587ms)
+✔ formatGeminiHistory respects maxTurns sliding window (0.7236ms)
+✔ classifyChatError correctly classifies various failure modes (0.6325ms)
+Falha ao salvar estado do Vault cifrado: DOMException [InvalidCharacterError]: Invalid character
+    at btoa (node:buffer:1315:11)
+    at IntegrationsVault.saveVaultToStorage (D:\liora\src\services\integrationsVault.ts:1216:50)
+    at <anonymous> (D:\liora\src\services\integrationsVault.ts:614:12)
+    at async ProviderMutex.acquire (D:\liora\src\services\integrationsVault.ts:405:14)
+    at async TestContext.<anonymous> (D:\liora\tests\audioSettings.test.ts:39:5)
+    at async Test.run (node:internal/test_runner/test:1125:7)
+    at async startSubtestAfterBootstrap (node:internal/test_runner/harness:358:3)
+✔ AUD-SET-01: Voice test sends correct HTTP request to Gemini TTS API with Vault key (21.6077ms)
+✔ AUD-SET-02: Missing or invalid Gemini API key in Vault rejects TTS request with 401 error (1.1653ms)
+✔ AUT-DEV-01: AutomationsEngine executes EventBus-triggered rules without blocking and logs errors to auditLogger (64.7178ms)
+✔ AUT-DEV-02: Device disconnection triggers EventBus event and records forensic log in auditLogger (1.2475ms)
+✔ AUT-DEV-03: DevicesManager refreshTelemetry consumes hardware telemetry cleanly without Math.random() (57.5793ms)
+✔ BG-01: ferramentas declaradas com níveis de risco corretos (3.776ms)
+✔ BG-02: whitelist de comandos bloqueia binários não autorizados (4.1854ms)
+✔ BG-03: bloqueia injeção de shell (0.5371ms)
+✔ BG-04: comando obrigatório para kind=shell (0.3931ms)
+✔ BG-05: tarefa wait_test executa real com progresso e completa (1218.0491ms)
+✔ BG-06: tarefa shell real executa e captura stdout nos logs (107.6127ms)
+✔ BG-07: cancelamento seguro de tarefa longa (110.8687ms)
+✔ BG-08: cancelar tarefa inexistente ou concluída falha graciosamente (0.3972ms)
+✔ BG-09: status de tarefa inexistente falha graciosamente (0.3149ms)
+✔ BG-10: list_background_tasks retorna histórico com tarefas criadas (0.8279ms)
+✔ BG-11: file_scan valida diretório inexistente (118.9098ms)
+[31mWebSocket server error: Port 24678 is already in use[39m
+LIORA server running on http://localhost:3000
+✔ POST /api/gemini/chat/stream rejects empty message with 400 INVALID_INPUT (615.5138ms)
+✔ POST /api/gemini/chat/stream streams response chunks and ends with done: true (17420.4773ms)
+there are non-text parts functionCall in the response, returning concatenation of all text parts. Please refer to the non text parts for a full response from model.
+✔ POST /api/gemini/chat/stream handles multi-turn conversation history correctly (8129.7933ms)
+✔ POST /api/gemini/chat/stream responds cleanly when aborted midway (1587.6276ms)

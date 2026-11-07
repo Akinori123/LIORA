@@ -46,7 +46,7 @@ export const Header: React.FC = () => {
       <div className="hidden md:flex items-center gap-4 text-xs text-[#A8A8A8] shrink-0">
         <div className="flex items-center gap-2 px-3 py-1 bg-[#141414] border border-[#222222] rounded-full">
           <Server className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
-          <span>Gemini 3.8 Flash (Server-Side)</span>
+          <span>Gemini 3.1 Flash Lite (Server-Side)</span>
         </div>
         <div className="flex items-center gap-2 px-3 py-1 bg-[#141414] border border-[#222222] rounded-full">
           <Shield className="w-3.5 h-3.5 text-[#10b981]" />

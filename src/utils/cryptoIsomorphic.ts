@@ -197,3 +197,38 @@ export function computeHmacSha256Sync(secret: string, message: string): string {
   return sha256Sync(outerStr);
 }
 
+
+/**
+ * FASE 4 (correção de arranque): codificação base64 segura para bytes binários
+ * (AES ciphertext). Substitui o btoa() nativo, que lança InvalidCharacterError
+ * em caracteres fora da faixa Latin1 — e um payload criptografado é binário.
+ *
+ * Implementação isomórfica: usa Buffer no Node e chunked fromCharCode no
+ * browser/WebView (evita stack overflow em payloads grandes).
+ */
+export function uint8ArrayToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  // Browser: chunks de 8KB para não estourar o call stack de String.fromCharCode
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)) as unknown as number[]);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Decodifica base64 de volta para string UTF-8 (isomórfico).
+ * Complemento seguro do btoa/atob — preserva ç/ã/é/emojis e bytes arbitrários.
+ */
+export function base64ToUtf8String(b64: string): string {
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+    return Buffer.from(b64, 'base64').toString('utf8');
+  }
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}

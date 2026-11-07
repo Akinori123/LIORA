@@ -28,6 +28,9 @@ import {
   triggerAutomationTool,
   getSystemStatusTool
 } from './simulatedTools';
+// CORREÇÃO 2: tools de navegação/mapas existiam mas NUNCA foram registradas —
+// o modelo (chat e Live) nunca as recebia, e pedia "mercado mais próximo" falhava.
+import { openGpsNavigationTool, mapsSearchPlacesTool } from './navigation/navigationActionTool';
 
 export const DEFAULT_TOOL_TIMEOUT_MS = 5000;
 
@@ -52,6 +55,9 @@ export class ToolRegistry {
     this.registerTool(openSettingsTool);
     this.registerTool(triggerAutomationTool);
     this.registerTool(getSystemStatusTool);
+    // CORREÇÃO 2: navegação e busca de locais agora declaradas ao modelo
+    this.registerTool(openGpsNavigationTool);
+    this.registerTool(mapsSearchPlacesTool);
   }
 
   /**
@@ -216,7 +222,7 @@ export class ToolRegistry {
         toolName,
         success: true,
         data,
-        simulated: true,
+        simulated: Boolean(data?.simulated ?? tool.isSimulated),
         riskLevel: tool.riskLevel,
         executionTimeMs,
         timestamp,
@@ -241,17 +247,43 @@ export class ToolRegistry {
   /**
    * Converte ferramentas registradas para o formato FunctionDeclaration do Gemini API (apenas metadados)
    */
+  /**
+   * Converte uma propriedade do schema para o formato aceito pela API do Gemini.
+   * IMPORTANTE: o Gemini EXIGE que toda propriedade do tipo ARRAY declare o campo
+   * `items` (com o schema do elemento). Sem isso, a API retorna INVALID_ARGUMENT
+   * ("...properties[keys].items: missing field").
+   */
+  private static toGeminiProperty(prop: any): Record<string, any> {
+    const out: Record<string, any> = {
+      type: prop.type.toUpperCase(),
+      description: prop.description,
+      ...(prop.enum ? { enum: prop.enum } : {})
+    };
+
+    if (prop.type === 'array' && prop.items) {
+      // Preserva os items do array, convertendo recursivamente (arrays de arrays, etc.)
+      const items = { ...prop.items } as any;
+      if (items.type) items.type = String(items.type).toUpperCase();
+      if (items.type === 'ARRAY' && Array.isArray(items.items)) {
+        items.items = items.items.map((sub: any) => ToolRegistry.toGeminiProperty(sub));
+      } else if (items.type === 'OBJECT' && items.properties) {
+        items.properties = Object.fromEntries(
+          Object.entries(items.properties).map(([k, v]) => [k, ToolRegistry.toGeminiProperty(v)])
+        );
+      }
+      out.items = items;
+    }
+
+    return out;
+  }
+
   public toGeminiDeclarations(): Array<{ name: string; description: string; parameters: any }> {
     return Array.from(this.tools.values()).map(tool => {
       const geminiProps: Record<string, any> = {};
       const requiredProps: string[] = tool.parameters.required || [];
 
       for (const [key, prop] of Object.entries(tool.parameters.properties)) {
-        geminiProps[key] = {
-          type: prop.type.toUpperCase(),
-          description: prop.description,
-          ...(prop.enum ? { enum: prop.enum } : {})
-        };
+        geminiProps[key] = ToolRegistry.toGeminiProperty(prop);
       }
 
       return {

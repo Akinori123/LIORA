@@ -21,6 +21,7 @@ pub enum CanonicalizationError {
     #[error("Nome de arquivo vazio ou inválido")]
     InvalidFilename,
 
+    #[allow(dead_code)]
     #[error("Erro de serialização JSON: {0}")]
     Serialization(String),
 }

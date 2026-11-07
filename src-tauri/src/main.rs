@@ -1,6 +1,11 @@
 //! Ponto de Entrada Principal do Aplicativo Tauri - LIORA Desktop Nativo
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// CORREÇÃO DEFINITIVA (terminal/console junto com o app): subsistema GUI
+// INCONDICIONAL — vale para build de release E de debug. A janela preta de
+// console não abre mais em nenhuma execução do liora.exe.
+// Nota: em dev, os logs do backend Node continuam visíveis no terminal onde
+// `npm run dev` foi iniciado (fora do exe) — nada é perdido.
+#![windows_subsystem = "windows"]
 
 mod commands;
 mod security;
@@ -18,9 +23,16 @@ use commands::{
     capture_screen,
     get_vehicle_telemetry,
     read_obd2_diagnostics,
+    issue_consent_token,
+    open_application,
     save_sqlite_record,
     load_sqlite_records,
-    delete_sqlite_record
+    delete_sqlite_record,
+    list_processes,
+    kill_process,
+    get_volume,
+    set_volume,
+    lock_session,
 };
 
 fn main() {
@@ -38,9 +50,16 @@ fn main() {
             capture_screen,
             get_vehicle_telemetry,
             read_obd2_diagnostics,
+            issue_consent_token,
+            open_application,
             save_sqlite_record,
             load_sqlite_records,
-            delete_sqlite_record
+            delete_sqlite_record,
+            list_processes,
+            kill_process,
+            get_volume,
+            set_volume,
+            lock_session
         ])
         .run(tauri::generate_context!())
         .expect("Erro fatal no runtime Tauri da LIORA");

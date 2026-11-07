@@ -190,7 +190,9 @@ export function validateToolOutput(
   if (typeof data !== 'object') {
     return { valid: false, error: 'A ferramenta deve retornar um objeto estruturado.' };
   }
-  if (outputSchema?.mustBeSimulated !== false && data.simulated !== true) {
+  // Exige simulated:true SOMENTE quando o contrato declara explicitamente mustBeSimulated.
+  // Ferramentas nativas reais (simulated:false) não devem ser rejeitadas aqui.
+  if (outputSchema?.mustBeSimulated === true && data.simulated !== true) {
     return { valid: false, error: 'A ferramenta simulada violou o contrato de simulação (simulated deve ser true).' };
   }
   if (outputSchema?.requiredFields) {

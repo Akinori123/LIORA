@@ -32,6 +32,7 @@ export type PermissionDenialCode =
   | 'CONSENT_SESSION_MISMATCH'
   | 'CANONICALIZATION_FAILED'
   | 'SECURITY_CONSTRAINT_VIOLATION'
+  | 'ACTUATOR_UNREACHABLE'
   | 'DENY_R1_BLOCKED_IN_PHASE_6_2B'
   | 'DENY_R2_NOT_PERMITTED_IN_PHASE_6_2'
   | 'DENY_CRITICAL_BLOCKED';
@@ -63,6 +64,8 @@ export interface PermissionEvaluationResult {
   readonly reason: string;
   readonly parametersHash?: string;
   readonly requiredConfirmation?: boolean;
+  /** ID de auditoria do consentimento HMAC consumido (presente quando R1/R2 autorizados por consentimento) */
+  readonly consentAuditId?: string;
   readonly evaluationTimeMs: number;
   readonly timestamp: string;
   readonly auditId: string;
@@ -130,7 +133,7 @@ export interface IPermissionEngine {
     toolName: string,
     rawParameters: unknown,
     context: SecurityRequestContext,
-    toolMetadata?: { riskLevel: ToolRiskLevel }
+    toolMetadata?: { riskLevel: ToolRiskLevel; consentToken?: string }
   ): Promise<PermissionEvaluationResult>;
 
   issueConsentToken(

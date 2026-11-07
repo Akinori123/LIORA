@@ -10,6 +10,18 @@ export const PRIMARY_STORAGE_KEY = 'liora-conversation-history-v1';
 export const LEGACY_STORAGE_KEY = 'liora-history';
 export const CURRENT_SCHEMA_VERSION = 1;
 
+/**
+ * Otimizações de exaustão (sessões longas):
+ * - MAX_SESSIONS: teto de sessões retidas (mais antigas são podadas, mantendo a ativa);
+ * - MAX_MESSAGES_PER_SESSION: teto de mensagens por sessão (mais antigas descartadas);
+ * - MAX_SERIALIZED_BYTES: se o payload serializado exceder o teto (~4MB de 5MB de cota
+ *   típica), as sessões mais antigas são descartadas até caber — evita QuotaExceededError
+ *   catastrófico que antes abortava o save inteiro e perdia o estado do usuário.
+ */
+export const MAX_SESSIONS = 40;
+export const MAX_MESSAGES_PER_SESSION = 200;
+export const MAX_SERIALIZED_BYTES = 4 * 1024 * 1024;
+
 export interface StoredHistoryPayload {
   version: number;
   sessions: ConversationSession[];
@@ -167,7 +179,56 @@ export function saveHistory(
   }
 
   try {
-    const validSessions = sessions.map(s => sanitizeSession(s)).filter((s): s is ConversationSession => s !== null);
+    let validSessions = sessions.map(s => sanitizeSession(s)).filter((s): s is ConversationSession => s !== null);
+
+    // Otimização de exaustão: capping de mensagens por sessão (mais antigas descartadas)
+    validSessions = validSessions.map(s => ({
+      ...s,
+      messages: s.messages.length > MAX_MESSAGES_PER_SESSION
+        ? s.messages.slice(-MAX_MESSAGES_PER_SESSION)
+        : s.messages
+    }));
+
+    // Capping de número de sessões (mais antigas podadas; a ativa é sempre preservada)
+    if (validSessions.length > MAX_SESSIONS) {
+      const activeFirst = validSessions.find(s => s.id === activeSessionId);
+      const others = validSessions.filter(s => s.id !== activeSessionId);
+      // Ordena por updatedAt desc e mantém as mais recentes até caber no teto
+      others.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      const kept = others.slice(0, MAX_SESSIONS - (activeFirst ? 1 : 0));
+      validSessions = activeFirst ? [activeFirst, ...kept] : kept;
+    }
+
+    // Capping por bytes serializados: descarta sessões mais antigas até caber na cota
+    const serialize = (list: ConversationSession[]): string => JSON.stringify({
+      version: CURRENT_SCHEMA_VERSION,
+      sessions: list,
+      activeSessionId,
+      lastSavedAt: new Date().toISOString()
+    });
+
+    let serialized = serialize(validSessions);
+    if (serialized.length > MAX_SERIALIZED_BYTES) {
+      // Ordena por updatedAt desc, preserva a ativa, descarta mais antigas até caber
+      const activeSession = validSessions.find(s => s.id === activeSessionId) || null;
+      const sortedByNewest = [...validSessions].sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      );
+      const pruned: ConversationSession[] = activeSession ? [activeSession] : [];
+      for (const s of sortedByNewest) {
+        if (pruned.length >= MAX_SESSIONS) break;
+        if (activeSession && s.id === activeSession.id) continue;
+        const candidate = [...pruned, s];
+        const candidateSerialized = serialize(candidate);
+        if (candidateSerialized.length > MAX_SERIALIZED_BYTES) break;
+        pruned.push(s);
+      }
+      serialized = serialize(pruned);
+      validSessions = pruned;
+      console.warn(
+        `[LioraStorage] Histórico excedeu ${MAX_SERIALIZED_BYTES} bytes — ${validSessions.length} sessões mais recentes retidas após pruning.`
+      );
+    }
 
     const payload: StoredHistoryPayload = {
       version: CURRENT_SCHEMA_VERSION,
@@ -176,7 +237,6 @@ export function saveHistory(
       lastSavedAt: new Date().toISOString()
     };
 
-    const serialized = JSON.stringify(payload);
     storage.setItem(PRIMARY_STORAGE_KEY, serialized);
 
     // Espelhamento transacional via storageAdapter (Desktop SQLite / Backups)

@@ -5,7 +5,7 @@
 
 export type ToolRiskLevel = 'R0' | 'R1' | 'R2' | 'R3';
 
-export type ToolCategory = 'system' | 'workspace' | 'utility' | 'network' | 'automation' | 'mcp';
+export type ToolCategory = 'system' | 'workspace' | 'utility' | 'network' | 'automation' | 'mcp' | 'browser';
 
 export interface ToolParameterProperty {
   type: 'string' | 'number' | 'boolean' | 'array' | 'object';
@@ -13,7 +13,7 @@ export interface ToolParameterProperty {
   enum?: string[];
   required?: boolean;
   default?: any;
-  items?: { type: string };
+  items?: { type: string; properties?: Record<string, any>; required?: string[] };
   properties?: Record<string, any>;
   minimum?: number;
   maximum?: number;
@@ -42,7 +42,7 @@ export interface ToolExecutionResult<TData = any> {
   success: boolean;
   data?: TData;
   error?: string;
-  simulated: true;
+  simulated: boolean;
   riskLevel: ToolRiskLevel;
   executionTimeMs: number;
   timestamp: string;
@@ -60,7 +60,7 @@ export interface ToolDefinition<TParams = any, TResult = any> {
   description: string;
   category: ToolCategory;
   riskLevel: ToolRiskLevel;
-  isSimulated: true;
+  isSimulated: boolean;
   parameters: ToolParametersSchema;
   outputSchema?: ToolOutputSchema;
   execute: (params: TParams, context?: ToolExecutionContext) => Promise<TResult>;
@@ -71,6 +71,6 @@ export interface ToolSummary {
   description: string;
   category: ToolCategory;
   riskLevel: ToolRiskLevel;
-  isSimulated: true;
+  isSimulated: boolean;
   parameters: ToolParametersSchema;
 }

@@ -90,6 +90,9 @@ export const DeveloperView: React.FC = () => {
   const selectedReaTarget = SAMPLE_REA_TARGETS[selectedReaIdx] || SAMPLE_REA_TARGETS[0];
 
   const handleRunReaAnalysis = () => {
+    // Auditoria de mapeamento: esta análise é DEMONSTRATIVA (fixtures em codeDiffHelper.ts),
+    // NÃO é engenharia reversa real de binário. O selo abaixo informa isso ao usuário
+    // em vez de fingir uma varredura real de 1.2s.
     setReaRunning(true);
     setReaAnalysisDone(false);
     setTimeout(() => {
@@ -232,7 +235,9 @@ export const DeveloperView: React.FC = () => {
     if (activeToolDef.name === 'system_info') {
       paramsToSend = { detailLevel: paramInputs.detailLevel || 'standard' };
     } else if (activeToolDef.name === 'system_read_env_safe') {
-      paramsToSend = { key: 'NODE_ENV' };
+      // BUG FIX: antes enviava { key: 'NODE_ENV' } mas o schema da ferramenta
+      // espera 'variableName' (ou 'keys'). O backend ignorava a chave recebida.
+      paramsToSend = { variableName: paramInputs.variableName || 'NODE_ENV' };
     } else if (activeToolDef.name === 'workspace_read_file') {
       paramsToSend = { filePath: paramInputs.filePath || 'docs/ROADMAP.md', maxLines: 50 };
     } else if (activeToolDef.name === 'system_exec_simulated') {
@@ -973,8 +978,12 @@ export const DeveloperView: React.FC = () => {
                   <div className="flex items-center gap-2 text-purple-300 font-bold">
                     <CheckCircle2 className="w-4 h-4 text-purple-400" />
                     <span>Relatório de Auditoria Estática Concluído</span>
+                    <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-mono">SIMULADO · FIXTURES DEMONSTRATIVAS</span>
                   </div>
                   <p className="text-[#CCCCCC] leading-relaxed">{selectedReaTarget.analysisNotes}</p>
+                  <p className="text-[#888888] text-[10px]">
+                    ⚠️ Este relatório é gerado de fixtures demonstrativas locais (codeDiffHelper.ts) — não executa engenharia reversa real de binários nesta fase.
+                  </p>
                 </div>
               )}
             </div>

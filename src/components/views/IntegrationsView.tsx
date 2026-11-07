@@ -28,6 +28,9 @@ import {
   EyeOff
 } from 'lucide-react';
 import { IntegrationCategory, IntegrationProviderId, IntegrationServiceConfig } from '../../types/integrations';
+// CORREÇÃO (Etapa A — modal guiado IMAP/SMTP): formulário com campos separados
+// (Servidor IMAP, Porta, SMTP, Porta, E-mail, Senha) em vez de "cole o token" opaco.
+import { EmailSetupModal } from '../integrations/EmailSetupModal';
 
 export const IntegrationsView: React.FC = () => {
   const { 
@@ -59,6 +62,9 @@ export const IntegrationsView: React.FC = () => {
   const [isSimulating, setIsSimulating] = useState(false);
   const [webhookFeedback, setWebhookFeedback] = useState<string | null>(null);
 
+  // CORREÇÃO (Etapa A): modal guiado para serviços de E-mail (IMAP/SMTP)
+  const [isEmailSetupOpen, setIsEmailSetupOpen] = useState(false);
+
   const filteredServices = selectedCategory === 'all' 
     ? services 
     : services.filter(s => s.category === selectedCategory);
@@ -69,6 +75,14 @@ export const IntegrationsView: React.FC = () => {
     setShowKey(false);
     setCustomEndpoint(service.endpointUrl || '');
     setConnectError(null);
+
+    // CORREÇÃO (Etapa A): serviços de E-mail abrem o modal GUIADO com campos
+    // separados (IMAP/SMTP/E-mail/Senha) em vez do campo genérico "cole o token".
+    if (service.provider === 'email' || service.id === 'svc-email-imap') {
+      setIsEmailSetupOpen(true);
+      return;
+    }
+
     setIsConnectModalOpen(true);
   };
 
@@ -567,6 +581,18 @@ export const IntegrationsView: React.FC = () => {
             </form>
           </div>
         </div>
+      )}
+
+      {/* CORREÇÃO (Etapa A): Modal guiado de configuração IMAP/SMTP — grava no cofre
+          via connectService (status muda para CONNECTED em tempo real) */}
+      {activeService && (
+        <EmailSetupModal
+          isOpen={isEmailSetupOpen}
+          onClose={() => setIsEmailSetupOpen(false)}
+          serviceId={activeService.id}
+          serviceName={activeService.name}
+          onConnect={async (rawKey) => connectService(activeService.id, rawKey)}
+        />
       )}
     </div>
   );

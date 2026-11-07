@@ -358,9 +358,13 @@ export class DevicesManager {
     const dev = this.devices.get(deviceId);
     const deviceName = dev?.name || 'Dispositivo Desconhecido';
 
-    // 1. Avaliação prévia analítica via PermissionEngine usando 'system_info' para passar na whitelist R0
+    // 1. Avaliação prévia via PermissionEngine usando o NOME REAL do comando
+    // de dispositivo. BUG CRÍTICO CORRIGIDO: avaliava como 'system_info' (R0 da
+    // whitelist) para "passar na whitelist" — mascarando comandos REBOOT/TOGGLE
+    // (R2 destrutivos) como leitura. Agora avalia a tool virtual
+    // 'device_command' com o riskLevel real informado, e a decisão DENY bloqueia.
     const evaluation = await this.permissionEngine.evaluate(
-      'system_info',
+      'device_command',
       { deviceId, commandType, ...payload },
       {
         sessionId: 'devices-session',

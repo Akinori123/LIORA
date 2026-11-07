@@ -6,6 +6,10 @@
 import { integrationsVault } from './integrationsVault';
 import { toolRegistry } from '../tools/registry';
 import { speechService } from './speechService';
+import { eventBus } from '../utils/eventBus';
+import { rankMemories, formatMemoryContextBlock } from '../utils/memoryRanker';
+import type { MemoryEntry } from '../types';
+import { useLioraStore, LIORA_SYSTEM_INSTRUCTION } from '../store/lioraStore';
 
 export type VoiceLiveStatus = 'IDLE' | 'CONNECTING' | 'LISTENING' | 'SPEAKING' | 'ERROR';
 
@@ -62,14 +66,41 @@ export class VoiceLiveClient {
   private mediaStream: MediaStream | null = null;
   private scriptProcessor: ScriptProcessorNode | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
+  private zeroGain: GainNode | null = null; // BUG FIX: nó de grafo rastreado para disconnect
 
   private status: VoiceLiveStatus = 'IDLE';
   private callbacks: VoiceLiveCallbacks = {};
   private config: VoiceLiveConfig = {};
   private nextStartTime = 0;
   private activeSources: AudioBufferSourceNode[] = [];
+  private lastUserTranscript = '';
   private isSimulatedMode = false;
   private lastLogTime = 0;
+
+  // R3 (resiliência): estado de reconexão do canal Live. Quedas breves de rede
+  // reconectam automaticamente com backoff exponencial (máx 3 tentativas,
+  // 1s→2s→4s), reenviando o payload START_LIVE higienizado (chave e contexto de
+  // memória recalculados do store atual) sem duplicar listeners no eventBus.
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private intentionalStop = false;
+  private maxReconnectAttempts = 3;
+
+  /**
+   * P2: extrai memórias e último transcript do store global para montar o
+   * systemInstruction contextual do canal Live — mesma estratégia do chat.
+   */
+  private getContextFromStore(): { memoryEntries: MemoryEntry[]; lastUserTranscript: string } {
+    try {
+      const state = useLioraStore.getState();
+      return {
+        memoryEntries: state.memoryEntries || [],
+        lastUserTranscript: this.lastUserTranscript
+      };
+    } catch {
+      return { memoryEntries: [], lastUserTranscript: '' };
+    }
+  }
 
   constructor(config: VoiceLiveConfig = {}, callbacks: VoiceLiveCallbacks = {}) {
     this.config = config;
@@ -129,6 +160,14 @@ export class VoiceLiveClient {
       return true;
     }
 
+    // R3: início limpo sempre zera o estado de reconexão
+    this.intentionalStop = false;
+    this.reconnectAttempts = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     this.setStatus('CONNECTING');
     this.isSimulatedMode = false;
 
@@ -137,6 +176,19 @@ export class VoiceLiveClient {
       const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = typeof window !== 'undefined' && window.location.host ? window.location.host : 'localhost:3000';
       const wsUrl = `${protocol}//${host}/ws/voice`;
+
+      // R3: fecha qualquer WebSocket remanescente antes de criar um novo (evita vazamento)
+      if (this.ws) {
+        try {
+          this.ws.onclose = null;
+          this.ws.onerror = null;
+          this.ws.onmessage = null;
+          if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+            this.ws.close();
+          }
+        } catch {}
+        this.ws = null;
+      }
 
       this.ws = new WebSocket(wsUrl);
       this.ws.binaryType = 'arraybuffer';
@@ -163,16 +215,9 @@ export class VoiceLiveClient {
 
       this.setupWebSocketListeners();
 
-      // 2. Enviar solicitação START_LIVE com token e voz neural oficial
-      const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
-      this.ws.send(JSON.stringify({
-        type: 'START_LIVE',
-        model: this.config.model || 'gemini-3.8-live',
-        voice: this.config.voice || 'Aoede',
-        apiKey: geminiKey || undefined,
-        systemInstruction: this.config.systemInstruction,
-        tools: toolRegistry.listTools()
-      }));
+      // 2. Enviar solicitação START_LIVE (payload higienizado montado por método
+      // dedicado — reutilizado na reconexão automática R3)
+      this.sendStartLive();
 
       // 3. Inicializar saída de áudio (AudioContext 24kHz)
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -195,6 +240,85 @@ export class VoiceLiveClient {
       this.setStatus('ERROR');
       return false;
     }
+  }
+
+  /**
+   * R3: monta e envia o payload START_LIVE sempre HIGIENIZADO — recalcula a
+   * chave do cofre e o bloco de memória semântica do store ATUAL (não usa cache
+   * de sessão anterior), garantindo que reconexões nunca corrompam o contexto.
+   */
+  private sendStartLive(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    // P2 (paridade voz x chat): o canal Live recebe a MESMA systemInstruction
+    // contextual do chat de texto — memórias semânticas rankeadas são injetadas
+    // para que a voz tenha o mesmo cofre de contexto.
+    const { memoryEntries, lastUserTranscript } = this.getContextFromStore();
+    const rankedMemories = rankMemories(lastUserTranscript || 'conversa livre', memoryEntries, {
+      minScoreThreshold: 0.35,
+      maxInjectedMemories: 4,
+      maxCharacterBudget: 400
+    });
+    const memoryContextBlock = formatMemoryContextBlock(rankedMemories, 400);
+    const baseInstruction = this.config.systemInstruction || LIORA_SYSTEM_INSTRUCTION;
+    const liveSystemInstruction = memoryContextBlock
+      ? `${baseInstruction}${memoryContextBlock}`
+      : baseInstruction;
+
+    // R3: chave SEMPRE re-resolvida do cofre (nunca cacheada entre sessões —
+    // o usuário pode ter rotacionado a chave enquanto a sessão estava aberta)
+    const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
+
+    this.ws.send(JSON.stringify({
+      type: 'START_LIVE',
+      model: this.config.model || 'gemini-3.8-live',
+      voice: this.config.voice || 'Aoede',
+      apiKey: geminiKey || undefined,
+      systemInstruction: liveSystemInstruction,
+      tools: toolRegistry.listTools()
+    }));
+  }
+
+  /**
+   * R3: agenda reconexão automática com backoff exponencial (1s→2s→4s).
+   * Só reconecta se o stop foi NÃO intencional (queda de rede) e o modo de voz
+   * do usuário continua ativo (verificado via store). Não duplica listeners:
+   * a reconexão reutiliza o fluxo start() completo, que fecha o WS anterior.
+   */
+  private scheduleReconnect(): void {
+    if (this.intentionalStop) return;
+    // Bug hunt (race condition): onerror E onclose podem disparar para a mesma
+    // queda de rede — sem este guard, duas cadeias de reconexão paralelas seriam
+    // agendadas e o start() rodaria duas vezes (duplicando o microfone/WS).
+    if (this.reconnectTimer) return;
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.warn('[VoiceLiveClient] Máximo de tentativas de reconexão atingido. Sessão encerrada.');
+      this.callbacks.onError?.('Canal de voz indisponível após 3 tentativas de reconexão. Verifique a conexão e reative a voz.');
+      this.setStatus('ERROR');
+      return;
+    }
+
+    // Só reconecta se o usuário ainda quer voz ativa (não reconecta após pause)
+    try {
+      const storeState = useLioraStore.getState();
+      if (!storeState.isVoiceActive) {
+        this.setStatus('IDLE');
+        return;
+      }
+    } catch {}
+
+    const delayMs = Math.min(4000, 1000 * Math.pow(2, this.reconnectAttempts));
+    this.reconnectAttempts += 1;
+    console.info(`[VoiceLiveClient] Reconectando em ${delayMs}ms (tentativa ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.setStatus('IDLE'); // permite start() rodar novamente
+      void this.start();
+    }, delayMs);
   }
 
   /**
@@ -230,8 +354,36 @@ export class VoiceLiveClient {
 
             case 'TRANSCRIPTION':
               if (payload.text) {
+                if (payload.role === 'user') {
+                  // P2: mantém o último dito pelo usuário para rankear memórias na próxima sessão
+                  this.lastUserTranscript = String(payload.text).slice(0, 200);
+                }
                 this.callbacks.onTranscription?.(payload.text, payload.role || 'model');
               }
+              break;
+
+            case 'TOOL_EXECUTED':
+              // P0 (paridade voz x chat): ferramentas executadas no canal Live
+              // são publicadas no eventBus para o lioraStore registrar no log de
+              // atividade igual ao data.toolExecuted do chat de texto.
+              eventBus.publish('liora:voice_tool_executed', {
+                toolName: payload.toolName,
+                parameters: payload.parameters,
+                data: payload.data,
+                success: Boolean(payload.success),
+                simulated: Boolean(payload.simulated),
+                riskLevel: payload.riskLevel || 'R1',
+                resultSummary: payload.resultSummary,
+                error: payload.error
+              });
+              // Sincronização tool→TTS: publica o resultado real para a LIORA
+              // FALAR o que a ferramenta retornou (maps, rotas, notícias, etc).
+              eventBus.publish('liora:tool_result', {
+                toolName: payload.toolName,
+                success: Boolean(payload.success),
+                resultSummary: payload.resultSummary,
+                resultData: payload.data?.resultData || payload.data
+              });
               break;
 
             case 'GEMINI_LIVE_ERROR':
@@ -242,7 +394,9 @@ export class VoiceLiveClient {
               break;
 
             case 'GEMINI_LIVE_CLOSED':
-              this.stop();
+              // R3: servidor encerrou a sessão Gemini (timeout de 15min ou failover).
+              // Se o usuário ainda tem voz ativa, tenta reconectar em vez de abandonar.
+              this.scheduleReconnect();
               break;
           }
         }
@@ -252,16 +406,21 @@ export class VoiceLiveClient {
     };
 
     this.ws.onclose = () => {
-      if (this.status !== 'IDLE' && this.status !== 'ERROR') {
+      this.cleanupAudio();
+      // R3: queda de rede — reconecta automaticamente se o stop não foi intencional
+      if (!this.intentionalStop) {
+        this.scheduleReconnect();
+      } else if (this.status !== 'IDLE' && this.status !== 'ERROR') {
         this.setStatus('IDLE');
       }
-      this.cleanupAudio();
     };
 
     this.ws.onerror = (err) => {
       console.error('[VoiceLiveClient] Erro no WebSocket:', err);
       this.callbacks.onError?.('Conexão com o servidor de voz perdida.');
-      this.setStatus('ERROR');
+      // R3: erro de rede também agenda reconexão (o onclose subsequente não duplica
+      // porque o scheduleReconnect é idempotente via reconnectTimer guard)
+      this.scheduleReconnect();
     };
   }
 
@@ -298,7 +457,10 @@ export class VoiceLiveClient {
       }
 
       this.micSource = this.inputAudioCtx.createMediaStreamSource(this.mediaStream);
-      // Buffer de 2048 amostras ~ 128ms por chunk em 16kHz
+      // FIX W3 (preparação para AudioWorklet): buffer de 2048 amostras ~ 128ms por chunk em 16kHz.
+      // O AudioWorklet migraria o processamento para um thread de áudio dedicado, eliminando o jank
+      // da thread principal. Manteremos a estrutura do onaudioprocess intocada até uma migração
+      // segura (precisa de public/wasm/worklet module e refatoração de pipeline de envio).
       this.scriptProcessor = this.inputAudioCtx.createScriptProcessor(2048, 1, 1);
 
       this.scriptProcessor.onaudioprocess = (e) => {
@@ -349,11 +511,14 @@ export class VoiceLiveClient {
       };
 
       this.micSource.connect(this.scriptProcessor);
-      // Blindagem absoluta contra microfonia e loop de áudio: nó de ganho zerado
-      const zeroGain = this.inputAudioCtx.createGain();
-      zeroGain.gain.value = 0;
-      this.scriptProcessor.connect(zeroGain);
-      zeroGain.connect(this.inputAudioCtx.destination);
+      // Blindagem absoluta contra microfonia e loop de áudio: nó de ganho zerado.
+      // BUG FIX (leak de grafo): guardamos o zeroGain para disconnect no cleanup —
+      // sem isso o nó permanecia conectado ao destination a cada sessão,
+      // acumulando nós no grafo de áudio do WebView (degradação progressiva).
+      this.zeroGain = this.inputAudioCtx.createGain();
+      this.zeroGain.gain.value = 0;
+      this.scriptProcessor.connect(this.zeroGain);
+      this.zeroGain.connect(this.inputAudioCtx.destination);
 
     } catch (micErr: any) {
       console.warn('[VoiceLiveClient] Permissão de microfone negada ou indisponível:', micErr);
@@ -415,6 +580,22 @@ export class VoiceLiveClient {
   }
 
   /**
+   * Interrompe ativamente a reprodução e notifica o servidor WebSocket Live
+   * para resetar o turno e parar geração de áudio no backend.
+   */
+  public interrupt() {
+    this.stopAudioPlayback();
+    if (this.status === 'SPEAKING') {
+      this.setStatus('LISTENING');
+    }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'CLIENT_INTERRUPTED', timestamp: new Date().toISOString() }));
+      } catch {}
+    }
+  }
+
+  /**
    * Libera recursos de microfone e nós de áudio.
    */
   private cleanupAudio() {
@@ -436,6 +617,16 @@ export class VoiceLiveClient {
         // ignore
       }
       this.micSource = null;
+    }
+
+    // BUG FIX: desconecta o nó de ganho zerado (rastreado) do destination
+    if (this.zeroGain) {
+      try {
+        this.zeroGain.disconnect();
+      } catch (e) {
+        // ignore
+      }
+      this.zeroGain = null;
     }
 
     if (this.mediaStream) {
@@ -470,10 +661,23 @@ export class VoiceLiveClient {
    * Encerra a sessão de voz e fecha as conexões.
    */
   public stop() {
+    // R3: marca como stop INTENCIONAL para o onclose não disparar reconexão
+    this.intentionalStop = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.ws) {
       try {
+        // R3: remove handlers antes de fechar para evitar callbacks pós-stop
+        this.ws.onclose = null;
+        this.ws.onerror = null;
+        this.ws.onmessage = null;
         if (this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ type: 'STOP_LIVE' }));
+          this.ws.close();
+        } else if (this.ws.readyState === WebSocket.CONNECTING) {
           this.ws.close();
         }
       } catch (e) {

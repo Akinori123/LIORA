@@ -18,6 +18,9 @@ import {
   Activity
 } from 'lucide-react';
 import { AudioDiagnosticPanel } from './voice/AudioDiagnosticPanel';
+import { eventBus } from '../utils/eventBus';
+import { parseNavigationIntent, parseRouteIntent, parsePlacesSearchIntent, NavigationMatch, RouteIntent, PlacesSearchIntent } from '../utils/navigationParser';
+import { launchGpsNavigation, launchPlacesSearch } from '../tools/navigation/navigationActionTool';
 
 export const GlobalVoiceBar: React.FC = () => {
   const { 
@@ -44,6 +47,12 @@ export const GlobalVoiceBar: React.FC = () => {
   const [windowWidth, setWindowWidth] = useState<number>(typeof window !== 'undefined' ? window.innerWidth : 1280);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // FIX C2: espelho do orbState em ref para o ciclo de vida da voz NÃO depender
+  // de estados que mudam durante a sessão (orbState). Sem isso, o effect de voz
+  // reinicializava o voiceLiveClient/microfone a cada transição do Orbe.
+  const orbStateRef = useRef(orbState);
+  useEffect(() => { orbStateRef.current = orbState; }, [orbState]);
+
   useEffect(() => {
     runVaultDiagnostics();
   }, [isVoiceActive, runVaultDiagnostics]);
@@ -53,6 +62,137 @@ export const GlobalVoiceBar: React.FC = () => {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  // Interceptação determinística e imediata de comandos de navegação de voz (Live e VAD)
+  const handleDeterministicNavigation = (navMatch: NavigationMatch) => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    vadSpeakingRef.current = false;
+    isDispatchingRef.current = false;
+
+    // 1. Troca imediata de aba na UI
+    setActiveTab(navMatch.tab);
+    setTranscript('');
+    setErrorMessage(null);
+
+    // 2. Interrompe modelo Live e escuta anterior para liberar o ciclo
+    voiceLiveClient.interrupt();
+    speechService.stopListening();
+
+    // 3. Feedback falado curto e elegante
+    setOrbState('SPEAKING');
+    speechService.unlockAudio();
+    speechService.speak(navMatch.spokenFeedback);
+
+    // 4. Retorno limpo para estado de escuta, impedindo travamento em THINKING/EXECUTING
+    setTimeout(() => {
+      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
+      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
+    }, 1200);
+
+    // 5. Registro forense de auditoria
+    useLioraStore.getState().addActivityLog({
+      category: 'system',
+      summary: `Navegação de Voz: ${navMatch.label}`,
+      details: `Comando "${navMatch.rawInput}" reconhecido determinísticamente pelo canal de voz.`,
+      riskLevel: 'R0',
+      status: 'success',
+      simulated: false
+    });
+  };
+
+  // Interceptação determinística e imediata de rotas veiculares (Google Maps / Waze)
+  const handleDeterministicRoute = async (routeIntent: RouteIntent) => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    vadSpeakingRef.current = false;
+    isDispatchingRef.current = false;
+
+    setTranscript('');
+    setErrorMessage(null);
+
+    // 1. Interrompe modelo Live e escuta anterior para liberar o ciclo
+    voiceLiveClient.interrupt();
+    speechService.stopListening();
+
+    // 2. Feedback falado veicular imediato
+    setOrbState('SPEAKING');
+    speechService.unlockAudio();
+    speechService.speak(routeIntent.spokenFeedback);
+
+    // 3. Abertura do Google Maps ou Waze
+    try {
+      await launchGpsNavigation(routeIntent.destination, routeIntent.provider, routeIntent.origin);
+    } catch (err) {
+      console.warn('[GlobalVoiceBar] Falha ao acionar rota de GPS:', err);
+    }
+
+    // 4. Retorno limpo para estado de escuta
+    setTimeout(() => {
+      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
+      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
+    }, 1500);
+
+    // 5. Registro forense de auditoria sem alterar a aba ativa
+    const appName = routeIntent.provider === 'waze' ? 'Waze' : 'Google Maps';
+    useLioraStore.getState().addActivityLog({
+      category: 'tool',
+      summary: `Navegação GPS Ativa (${appName})`,
+      details: `Comando "${routeIntent.rawInput}" executado. Destino: "${routeIntent.destination}"${routeIntent.origin ? ` | Origem: "${routeIntent.origin}"` : ' | Origem: GPS Atual'}.`,
+      riskLevel: 'R0',
+      status: 'success',
+      simulated: false
+    });
+  };
+
+  // Interceptação determinística e imediata de busca de locais (Google Maps Places)
+  const handleDeterministicPlacesSearch = async (placesIntent: PlacesSearchIntent) => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    vadSpeakingRef.current = false;
+    isDispatchingRef.current = false;
+
+    setTranscript('');
+    setErrorMessage(null);
+
+    // 1. Interrompe modelo Live e escuta anterior para liberar o ciclo
+    voiceLiveClient.interrupt();
+    speechService.stopListening();
+
+    // 2. Feedback falado veicular/assistente imediato
+    setOrbState('SPEAKING');
+    speechService.unlockAudio();
+    speechService.speak(placesIntent.spokenFeedback);
+
+    // 3. Abertura do Google Maps Places nativamente
+    try {
+      await launchPlacesSearch(placesIntent.query, placesIntent.nearLocation);
+    } catch (err) {
+      console.warn('[GlobalVoiceBar] Falha ao acionar busca de locais:', err);
+    }
+
+    // 4. Retorno limpo para estado de escuta
+    setTimeout(() => {
+      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
+      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
+    }, 1500);
+
+    // 5. Registro forense de auditoria
+    useLioraStore.getState().addActivityLog({
+      category: 'tool',
+      summary: 'Busca de Locais (Google Maps)',
+      details: `Comando "${placesIntent.rawInput}" executado. Termo: "${placesIntent.query}"${placesIntent.nearLocation ? ` | Referência: "${placesIntent.nearLocation}"` : ' | Perto da localização atual'}.`,
+      riskLevel: 'R0',
+      status: 'success',
+      simulated: false
+    });
+  };
 
   useEffect(() => {
     voiceLiveClient.setCallbacks({
@@ -64,11 +204,40 @@ export const GlobalVoiceBar: React.FC = () => {
       onTranscription: (text, role) => {
         if (role === 'user') {
           setTranscript(text);
+          // P1: publica a fala do usuário no eventBus — o GlobalConsentOverlay
+          // escuta por "confirmar"/"cancelar" enquanto há consentimento pendente.
+          eventBus.publish('liora:voice_transcript', { text, role });
+
+          // Interceptação determinística IMEDIATA no modo Live antes de qualquer chamada do LLM
+          const navMatch = parseNavigationIntent(text);
+          if (navMatch) {
+            handleDeterministicNavigation(navMatch);
+            return;
+          }
+
+          const routeIntent = parseRouteIntent(text);
+          if (routeIntent) {
+            handleDeterministicRoute(routeIntent);
+            return;
+          }
+
+          const placesIntent = parsePlacesSearchIntent(text);
+          if (placesIntent) {
+            handleDeterministicPlacesSearch(placesIntent);
+            return;
+          }
         }
       },
       onError: (err) => {
         setErrorMessage(err);
       }
+    });
+  }, []);
+
+  useEffect(() => {
+    // ETAPA D (anti-silêncio): banner visual para avisos de voz/quota/microfone
+    return eventBus.subscribe('liora:voice_warning', (payload: any) => {
+      if (payload?.message) setErrorMessage(String(payload.message));
     });
   }, []);
 
@@ -86,6 +255,34 @@ export const GlobalVoiceBar: React.FC = () => {
     if (isDispatchingRef.current) return;
     const store = useLioraStore.getState();
     if (store.isGenerating) return;
+
+    // Bug hunt (race condition): durante o consentimento pendente, a fala do usuário
+    // ("confirmar"/"cancelar") deve ir APENAS ao GlobalConsentOverlay — se também
+    // fosse despachada como nova mensagem de chat, geraria resposta duplicada e
+    //consumiria o turno. Aqui o VAD cede a palavra ao overlay.
+    if (store.pendingConsent?.status === 'PENDING') {
+      eventBus.publish('liora:voice_transcript', { text, role: 'user' });
+      return;
+    }
+
+    // Interceptação determinística de navegação ANTES de invocar o LLM
+    const navMatch = parseNavigationIntent(text);
+    if (navMatch) {
+      handleDeterministicNavigation(navMatch);
+      return;
+    }
+
+    const routeIntent = parseRouteIntent(text);
+    if (routeIntent) {
+      handleDeterministicRoute(routeIntent);
+      return;
+    }
+
+    const placesIntent = parsePlacesSearchIntent(text);
+    if (placesIntent) {
+      handleDeterministicPlacesSearch(placesIntent);
+      return;
+    }
 
     isDispatchingRef.current = true;
     if (silenceTimerRef.current) {
@@ -126,7 +323,10 @@ export const GlobalVoiceBar: React.FC = () => {
       setAudioLevel(lvl);
 
       const store = useLioraStore.getState();
-      if (store.isGenerating || store.orbState === 'THINKING' || store.orbState === 'SPEAKING' || isDispatchingRef.current) {
+      // R1: não descarta a fala se há consentimento pendente — é uma janela de
+      // "escuta de decisão priorizada". "Confirmar" dito durante SPEAKING deve ser capturado.
+      const hasPendingConsent = store.pendingConsent?.status === 'PENDING';
+      if (!hasPendingConsent && (store.isGenerating || store.orbState === 'THINKING' || store.orbState === 'SPEAKING' || isDispatchingRef.current)) {
         vadSpeakingRef.current = false;
         return;
       }
@@ -189,28 +389,46 @@ export const GlobalVoiceBar: React.FC = () => {
   // Iniciar ou pausar reconhecimento de voz quando isVoiceActive ou orbState mudar
   useEffect(() => {
     if (!isVoiceActive) {
-      speechService.stopListening();
-      voiceLiveClient.stop();
+      // BUG CRÍTICO CORRIGIDO (A — troca de modo): ao desativar a voz, a fila de
+      // streaming TTS e o áudio do Live continuavam tocando frases antigas sobre-
+      // postas ao novo comando escrito. Cancelamento explícito de tudo:
+      speechService.stopSpeaking();      // esvazia fila de streaming + cancela utterance/atual
+      speechService.resetStreamingQueue(); // zera buffer parcial + isStreamDone
+      voiceLiveClient.interrupt();       // corta áudio recebido do Gemini
+      voiceLiveClient.stop();            // fecha WS duplex
       setTranscript('');
       setErrorMessage(null);
       return;
     }
 
     // Se a LIORA estiver processando raciocínio ou falando em voz alta, pausa a escuta do mic
-    if (orbState === 'THINKING' || orbState === 'SPEAKING') {
+    // FIX C2: leitura de estado via ref — o effect só reinicia quando isVoiceActive muda de verdade
+    // R1: EXCETO se há consentimento pendente — escuta de decisão priorizada
+    // permanece com o mic aberto para capturar "confirmar/cancelar" na primeira sílaba.
+    const storeState = useLioraStore.getState();
+    const hasPendingConsent = storeState.pendingConsent?.status === 'PENDING';
+    if (!hasPendingConsent && (orbStateRef.current === 'THINKING' || orbStateRef.current === 'SPEAKING')) {
       speechService.stopListening();
       return;
     }
 
     setErrorMessage(null);
 
-    // Iniciar imediatamente o cliente WebSocket Gemini Live para duplex em tempo real
-    voiceLiveClient.start();
+    // Exaustão: inicia o Live de forma fire-and-forget mas CONTIDA — start() é
+    // idempotente internamente (retorna true se já ativo) e a reconexão R3
+    // reusa o mesmo fluxo, sem duplicar microfone/WS.
+    void voiceLiveClient.start().catch((startErr) => {
+      console.warn('[GlobalVoiceBar] start() do Live falhou:', startErr);
+    });
 
     // Tentar inicializar o Web Speech API para transcrição complementar
     const started = speechService.startListening(
       (text, isFinal) => {
         setTranscript(text);
+        // P1: publica também a transcrição do Web Speech API para o overlay de consentimento
+        if (isFinal) {
+          eventBus.publish('liora:voice_transcript', { text, role: 'user' });
+        }
         if (useLioraStore.getState().orbState !== 'THINKING') {
           setOrbState('LISTENING');
         }
@@ -224,6 +442,37 @@ export const GlobalVoiceBar: React.FC = () => {
         // Reconhece palavras curtas como "oi", mas permite continuidade natural da fala sem corte prematuro
         const clean = text.trim();
         if (clean.length >= 2) {
+          // Interceptação determinística imediata de navegação no STT antes do timer de silêncio
+          const navMatch = parseNavigationIntent(clean);
+          if (navMatch) {
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+              silenceTimerRef.current = null;
+            }
+            handleDeterministicNavigation(navMatch);
+            return;
+          }
+
+          const routeIntent = parseRouteIntent(clean);
+          if (routeIntent) {
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+              silenceTimerRef.current = null;
+            }
+            handleDeterministicRoute(routeIntent);
+            return;
+          }
+
+          const placesIntent = parsePlacesSearchIntent(clean);
+          if (placesIntent) {
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+              silenceTimerRef.current = null;
+            }
+            handleDeterministicPlacesSearch(placesIntent);
+            return;
+          }
+
           // Limiar calibrado de 750ms para resultado final ou 1200ms para texto parcial
           const delayMs = isFinal ? 750 : 1200;
           silenceTimerRef.current = setTimeout(async () => {
@@ -254,7 +503,7 @@ export const GlobalVoiceBar: React.FC = () => {
       }
       speechService.stopListening();
     };
-  }, [isVoiceActive, orbState, sendMessage, setOrbState]);
+  }, [isVoiceActive, sendMessage, setOrbState]);
 
   if (!isVoiceActive) {
     return null;
@@ -344,6 +593,23 @@ export const GlobalVoiceBar: React.FC = () => {
           >
             <span>Configurar no Cofre</span>
             <ExternalLink className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* ETAPA D (anti-silêncio): banner de erro de voz/microfone/quota — o usuário
+          nunca fica às cegas sem saber se a LIORA travou ou está respondendo. */}
+      {!isVaultKeyMissing && errorMessage && (
+        <div className="mb-3.5 p-3 rounded-xl bg-amber-950/70 border border-amber-600/50 text-amber-200 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 animate-pulse" />
+            <p className="text-xs font-semibold leading-tight truncate">{errorMessage}</p>
+          </div>
+          <button
+            onClick={() => setErrorMessage(null)}
+            className="shrink-0 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold rounded-lg"
+          >
+            Entendi
           </button>
         </div>
       )}

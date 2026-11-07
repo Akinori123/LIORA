@@ -146,6 +146,11 @@ class StorageAdapter {
     return memoryExisted;
   }
 
+  /** Alias para remove */
+  public async delete(table: string, id: string): Promise<boolean> {
+    return this.remove(table, id);
+  }
+
   /**
    * Exporta um backup transacional completo de todas as tabelas em formato JSON unificado
    */
