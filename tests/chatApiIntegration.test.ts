@@ -16,8 +16,22 @@ const BASE_URL = 'http://localhost:3000';
 const __filename = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(__filename), '..');
 
+let serverStartedByTest = false;
+
 test.before(async () => {
-  await startServer(3000);
+  try {
+    const check = await fetch(`${BASE_URL}/api/system/bridge-status`);
+    if (check.status > 0) return;
+  } catch {
+    // Servidor ainda não está rodando, inicializa
+  }
+
+  try {
+    await startServer(3000);
+    serverStartedByTest = true;
+  } catch (err: any) {
+    if (err?.code === 'EADDRINUSE') return;
+  }
 
   // Aguarda o servidor responder (até 15s)
   const deadline = Date.now() + 15000;
@@ -32,7 +46,9 @@ test.before(async () => {
 }, { timeout: 30000 });
 
 test.after(async () => {
-  await stopServer();
+  if (serverStartedByTest) {
+    await stopServer();
+  }
 });
 
 test('POST /api/gemini/chat/stream rejects empty message with 400 INVALID_INPUT', async () => {

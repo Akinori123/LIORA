@@ -16,7 +16,6 @@
  */
 
 import { ToolDefinition } from '../types';
-import { useLioraStore } from '../../store/lioraStore';
 
 /** Apelidos comuns e suas chaves canônicas na memória */
 const ALIAS_PATTERNS: Array<{ pattern: RegExp; canonical: string[] }> = [
@@ -55,6 +54,7 @@ export const resolvePlaceAliasTool: ToolDefinition<{
     let matchedKey: string | null = null;
 
     try {
+      const { useLioraStore } = await import('../../store/lioraStore');
       const { memoryEntries } = useLioraStore.getState();
       const norm = clean.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
@@ -74,15 +74,31 @@ export const resolvePlaceAliasTool: ToolDefinition<{
         if (resolvedAddress) break;
       }
 
-      // 2. Fallback: busca direta pelo apelido na chave ou valor
+      // 2. Busca abrangente para locais personalizados ilimitados (amigos, família, favoritos)
       if (!resolvedAddress) {
+        // Tenta encontrar por chaves prefixadas como local_*, endereco_* ou chave direta
         const direct = memoryEntries.find(m => {
-          const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          return k === norm || k.includes(norm);
+          const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^local_|^endereco_/, '');
+          return k === norm || norm.includes(k) || k.includes(norm);
         });
-        if (direct?.value && /\d|rua|avenida|av\.|travessa|estrada|rodovia/i.test(direct.value)) {
-          resolvedAddress = direct.value;
+        if (direct?.value && direct.value.trim().length > 3) {
+          resolvedAddress = direct.value.trim();
           matchedKey = direct.key;
+        }
+      }
+
+      // 3. Busca por correspondência de palavras no conteúdo ou chave da memória
+      if (!resolvedAddress) {
+        const words = norm.split(/\s+/).filter(w => w.length > 2 && !['para', 'onde', 'minha', 'meu', 'casa', 'fica', 'rua', 'vou'].includes(w));
+        if (words.length > 0) {
+          const fuzzy = memoryEntries.find(m => {
+            const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            return words.some(w => k.includes(w));
+          });
+          if (fuzzy?.value && /\d|rua|avenida|av\.|travessa|estrada|rodovia/i.test(fuzzy.value)) {
+            resolvedAddress = fuzzy.value.trim();
+            matchedKey = fuzzy.key;
+          }
         }
       }
     } catch {
@@ -107,10 +123,79 @@ export const resolvePlaceAliasTool: ToolDefinition<{
       success: true,
       resolved: false,
       alias: clean,
-      instruction: `PERGUNTE ao usuário: "Qual é o endereço completo do seu ${clean}?" — depois de obter a resposta, grave na memória com addMemory (key: '${clean.toLowerCase()}', value: endereço completo) para que as próximas navegações funcionem automaticamente.`,
-      message: `Ainda não sei onde fica o seu '${clean}'. Peça o endereço ao usuário e ensine a LIORA — na próxima vez a navegação será automática.`,
+      instruction: `PERGUNTE ao usuário: "Qual é o endereço completo do seu ${clean}?" — depois de obter a resposta, grave na memória chamando save_place_alias(alias: '${clean}', address: '...') para que as próximas navegações funcionem automaticamente.`,
+      message: `Ainda não sei onde fica o seu '${clean}'. Peça o endereço ao usuário e salve com save_place_alias — na próxima vez a navegação será automática.`,
       simulated: false,
       timestamp: new Date().toISOString()
     };
   }
 };
+
+/**
+ * Ferramenta oficial para cadastrar/salvar locais favoritos personalizados (R1)
+ */
+export const savePlaceAliasTool: ToolDefinition<{
+  alias: string;
+  address: string;
+}, any> = {
+  name: 'save_place_alias',
+  description: 'Salva um local favorito ou apelido geográfico na memória permanente da LIORA (ex: "Casa do Amigo", "Minha Mãe", "Clube", "Escritório Novo"). Chame quando o usuário pedir para salvar, memorizar ou cadastrar um endereço ou local.',
+  category: 'system',
+  riskLevel: 'R1',
+  isSimulated: false,
+  parameters: {
+    type: 'object',
+    properties: {
+      alias: { type: 'string', description: 'Nome ou apelido do local (ex: "Casa do Amigo", "Trabalho", "Faculdade").' },
+      address: { type: 'string', description: 'Endereço completo do local (ex: "Rua Quaresmeira 418, Ponta Grossa").' }
+    },
+    required: ['alias', 'address'],
+    additionalProperties: false
+  },
+  outputSchema: { type: 'object', requiredFields: ['success', 'alias', 'address', 'simulated'] },
+  execute: async ({ alias, address }) => {
+    const cleanAlias = String(alias || '').trim();
+    const cleanAddress = String(address || '').trim();
+
+    if (!cleanAlias || !cleanAddress) {
+      return {
+        success: false,
+        error: 'MISSING_PARAMS: informe tanto o apelido (alias) quanto o endereço completo (address).',
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    try {
+      const { useLioraStore } = await import('../../store/lioraStore');
+      const store = useLioraStore.getState();
+      const normKey = cleanAlias.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]/g, '_');
+      const memoryKey = `local_${normKey}`;
+
+      store.addMemory({
+        key: memoryKey,
+        value: cleanAddress,
+        category: 'preference',
+        confidence: 1.0
+      });
+
+      return {
+        success: true,
+        alias: cleanAlias,
+        address: cleanAddress,
+        memoryKey,
+        message: `Local favorito '${cleanAlias}' cadastrado com sucesso no endereço: ${cleanAddress}. Agora você pode dizer 'LIORA, navegue para ${cleanAlias}'.`,
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: `Falha ao salvar local na memória: ${err?.message || 'erro desconhecido'}`,
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+};
+

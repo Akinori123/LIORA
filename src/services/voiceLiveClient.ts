@@ -196,18 +196,45 @@ export class VoiceLiveClient {
       const connectionPromise = new Promise<void>((resolve, reject) => {
         if (!this.ws) return reject(new Error('WebSocket não inicializado.'));
 
+        let settled = false;
+        const cleanupListeners = () => {
+          if (this.ws) {
+            this.ws.onopen = null;
+            this.ws.onerror = null;
+            this.ws.onclose = null;
+          }
+        };
+
         const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanupListeners();
+          try { this.ws?.close(); } catch {}
           reject(new Error('Tempo limite de conexão ao canal de voz excedido.'));
         }, 10000);
 
         this.ws.onopen = () => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          cleanupListeners();
           resolve();
         };
 
-        this.ws.onerror = (e) => {
+        this.ws.onerror = () => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          cleanupListeners();
           reject(new Error('Falha ao conectar no WebSocket de voz (/ws/voice).'));
+        };
+
+        this.ws.onclose = (ev) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          cleanupListeners();
+          reject(new Error(`WebSocket fechado antes de abrir (código: ${ev.code || 'desconhecido'}).`));
         };
       });
 
@@ -222,6 +249,10 @@ export class VoiceLiveClient {
       // 3. Inicializar saída de áudio (AudioContext 24kHz)
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtxClass) {
+        if (this.outputAudioCtx) {
+          try { this.outputAudioCtx.close(); } catch {}
+          this.outputAudioCtx = null;
+        }
         this.outputAudioCtx = new AudioCtxClass({ sampleRate: 24000 });
         if (this.outputAudioCtx.state === 'suspended') {
           await this.outputAudioCtx.resume();
@@ -451,6 +482,10 @@ export class VoiceLiveClient {
       }
 
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (this.inputAudioCtx) {
+        try { this.inputAudioCtx.close(); } catch {}
+        this.inputAudioCtx = null;
+      }
       this.inputAudioCtx = new AudioCtxClass({ sampleRate: 16000 });
       if (this.inputAudioCtx.state === 'suspended') {
         await this.inputAudioCtx.resume();
@@ -503,7 +538,11 @@ export class VoiceLiveClient {
         // Despachar chunk de áudio binário respeitando o limite seguro (< 64KB)
         if (binaryChunk.byteLength <= 64 * 1024) {
           try {
-            this.ws.send(binaryChunk.buffer as ArrayBuffer);
+            const chunkBuffer = binaryChunk.buffer.slice(
+              binaryChunk.byteOffset,
+              binaryChunk.byteOffset + binaryChunk.byteLength
+            ) as ArrayBuffer;
+            this.ws.send(chunkBuffer);
           } catch (sendErr) {
             console.error('[VoiceLiveClient] Falha ao enviar chunk binário de áudio:', sendErr);
           }

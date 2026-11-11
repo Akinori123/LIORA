@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { AutomationRule, AutomationTriggerType, SYSTEM_EVENTS } from '../../types/automations';
 import { ToolRiskLevel } from '../../types';
+import { notificationSystem } from '../../notifications/notificationSystem';
 
 export const AutomationsView: React.FC = () => {
   const { 
@@ -48,6 +49,16 @@ export const AutomationsView: React.FC = () => {
   const [importStatus, setImportStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const importStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      if (importStatusTimerRef.current) clearTimeout(importStatusTimerRef.current);
+    };
+  }, []);
 
   // Form state para nova automação
   const [name, setName] = useState('');
@@ -103,7 +114,8 @@ export const AutomationsView: React.FC = () => {
       });
     } finally {
       setExecutingRuleId(null);
-      setTimeout(() => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = setTimeout(() => {
         setFeedbackMessage(null);
       }, 6000);
     }
@@ -137,7 +149,8 @@ export const AutomationsView: React.FC = () => {
       });
     } finally {
       setApprovingRuleId(null);
-      setTimeout(() => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = setTimeout(() => {
         setFeedbackMessage(null);
       }, 6000);
     }
@@ -156,7 +169,7 @@ export const AutomationsView: React.FC = () => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(`Falha ao exportar regras: ${err?.message}`);
+      notificationSystem.notify('Erro na Exportação', `Falha ao exportar regras: ${err?.message}`, 'error');
     }
   };
 
@@ -178,7 +191,8 @@ export const AutomationsView: React.FC = () => {
         setImportStatus({ text: err?.message || 'Arquivo JSON inválido.', type: 'error' });
       } finally {
         if (fileInputRef.current) fileInputRef.current.value = '';
-        setTimeout(() => setImportStatus(null), 5000);
+        if (importStatusTimerRef.current) clearTimeout(importStatusTimerRef.current);
+        importStatusTimerRef.current = setTimeout(() => setImportStatus(null), 5000);
       }
     };
     reader.readAsText(file);

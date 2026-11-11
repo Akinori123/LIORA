@@ -46,6 +46,13 @@ export const GlobalVoiceBar: React.FC = () => {
   const [showDiagnosticModal, setShowDiagnosticModal] = useState(false);
   const [windowWidth, setWindowWidth] = useState<number>(typeof window !== 'undefined' ? window.innerWidth : 1280);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const vadSpeakingRef = useRef<boolean>(false);
+  const vadStartTimeRef = useRef<number>(0);
+  const isDispatchingRef = useRef<boolean>(false);
+  const transcriptRef = useRef(transcript);
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
 
   // FIX C2: espelho do orbState em ref para o ciclo de vida da voz NÃO depender
   // de estados que mudam durante a sessão (orbState). Sem isso, o effect de voz
@@ -57,10 +64,28 @@ export const GlobalVoiceBar: React.FC = () => {
     runVaultDiagnostics();
   }, [isVoiceActive, runVaultDiagnostics]);
 
+  const voiceTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const scheduleVoiceTimer = (cb: () => void, ms: number) => {
+    const id = setTimeout(() => {
+      voiceTimersRef.current.delete(id);
+      cb();
+    }, ms);
+    voiceTimersRef.current.add(id);
+    return id;
+  };
+
   useEffect(() => {
     const handleResize = () => setWindowWidth(window.innerWidth);
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      voiceTimersRef.current.forEach(t => clearTimeout(t));
+      voiceTimersRef.current.clear();
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+    };
   }, []);
 
   // Interceptação determinística e imediata de comandos de navegação de voz (Live e VAD)
@@ -87,7 +112,7 @@ export const GlobalVoiceBar: React.FC = () => {
     speechService.speak(navMatch.spokenFeedback);
 
     // 4. Retorno limpo para estado de escuta, impedindo travamento em THINKING/EXECUTING
-    setTimeout(() => {
+    scheduleVoiceTimer(() => {
       const currentVoiceActive = useLioraStore.getState().isVoiceActive;
       setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
     }, 1200);
@@ -132,7 +157,7 @@ export const GlobalVoiceBar: React.FC = () => {
     }
 
     // 4. Retorno limpo para estado de escuta
-    setTimeout(() => {
+    scheduleVoiceTimer(() => {
       const currentVoiceActive = useLioraStore.getState().isVoiceActive;
       setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
     }, 1500);
@@ -178,7 +203,7 @@ export const GlobalVoiceBar: React.FC = () => {
     }
 
     // 4. Retorno limpo para estado de escuta
-    setTimeout(() => {
+    scheduleVoiceTimer(() => {
       const currentVoiceActive = useLioraStore.getState().isVoiceActive;
       setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
     }, 1500);
@@ -241,14 +266,7 @@ export const GlobalVoiceBar: React.FC = () => {
     });
   }, []);
 
-  const vadSpeakingRef = useRef<boolean>(false);
-  const vadStartTimeRef = useRef<number>(0);
-  const isDispatchingRef = useRef<boolean>(false);
 
-  const transcriptRef = useRef(transcript);
-  useEffect(() => {
-    transcriptRef.current = transcript;
-  }, [transcript]);
 
   // Envio consolidado e atômico com trava contra duplicidade de voz
   const dispatchVoiceCommand = async (text: string, audioBlob?: { data: string; mimeType: string }) => {
@@ -304,7 +322,7 @@ export const GlobalVoiceBar: React.FC = () => {
       console.error('[GlobalVoiceBar] Erro ao enviar comando de voz:', err);
       setOrbState('LISTENING');
     } finally {
-      setTimeout(() => {
+      scheduleVoiceTimer(() => {
         isDispatchingRef.current = false;
       }, 800);
     }

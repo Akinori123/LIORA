@@ -35,6 +35,7 @@ import { semanticMemoryService } from '../services/memory/semanticMemoryService'
 import { allCodingTools } from './coding/codingTools';
 import { allIotTools } from './iot/iotTools';
 import { openGpsNavigationTool, mapsSearchPlacesTool, launchGpsNavigation } from './navigation/navigationActionTool';
+import { resolvePlaceAliasTool, savePlaceAliasTool } from './navigation/placeAliasTool';
 
 /**
  * Resolve a raiz do workspace respeitando a configuração do usuário
@@ -482,7 +483,6 @@ export const nativeCalculateRouteTool: ToolDefinition<
 
     try {
       const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
       if (!res.ok) {
         throw new Error(`OSRM_HTTP_${res.status}: Falha ao consultar o serviço de rotas.`);
       }
@@ -508,7 +508,6 @@ export const nativeCalculateRouteTool: ToolDefinition<
         timestamp: new Date().toISOString()
       };
     } catch (err: any) {
-      clearTimeout(timeout);
       if (err?.name === 'AbortError') {
         return {
           success: false,
@@ -531,6 +530,8 @@ export const nativeCalculateRouteTool: ToolDefinition<
         };
       }
       throw err;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 };
@@ -1303,6 +1304,8 @@ export function installNativeServerTools(registry: {
     nativeMemoryListContextTool,
     openGpsNavigationTool,
     mapsSearchPlacesTool,
+    resolvePlaceAliasTool,
+    savePlaceAliasTool,
     // NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3)
     pcTakeScreenshotTool,
     pcManageAppsTool,

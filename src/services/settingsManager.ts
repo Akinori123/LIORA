@@ -5,6 +5,7 @@
 
 import { GlobalSettings, ThemeProfile, SettingsValidationResult } from '../types/settings';
 import { getThemeColors } from '../utils/themeColors';
+import { storageAdapter } from './storageAdapter';
 
 export const STORAGE_KEY_SETTINGS = 'liora_global_settings_v1';
 
@@ -169,6 +170,8 @@ export const settingsManager = {
       const validation = this.validateAndSanitize(settings);
       storage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(validation.sanitizedSettings));
       this.applyTheme(validation.sanitizedSettings.theme);
+      // Sincroniza com o storageAdapter soberano (tabela 'settings')
+      storageAdapter.save('settings', 'global_preferences', validation.sanitizedSettings).catch(() => {});
     } catch (e) {
       console.error('[SettingsManager] Failed to save settings:', e);
     }

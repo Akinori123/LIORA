@@ -12,6 +12,7 @@ import { THEME_PALETTES } from '../../utils/themeColors';
 import { storageAdapter } from '../../services/storageAdapter';
 import { isTauriEnvironment } from '../../security/localBridge';
 
+import { speechService } from '../../services/speechService';
 import { integrationsVault } from '../../services/integrationsVault';
 import { VaultManagerPanel } from '../security/VaultManagerPanel';
 import { AudioDiagnosticPanel } from '../voice/AudioDiagnosticPanel';
@@ -32,9 +33,35 @@ export const SettingsView: React.FC = () => {
   });
   const [isSavingOpenRouterKey, setIsSavingOpenRouterKey] = React.useState(false);
 
+  const [isEditingWorkspace, setIsEditingWorkspace] = React.useState(false);
+  const [workspaceInput, setWorkspaceInput] = React.useState('');
+
+  const toastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = React.useRef(true);
+  const testAudioRef = React.useRef<HTMLAudioElement | null>(null);
+
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (testAudioRef.current) {
+        try {
+          testAudioRef.current.pause();
+          testAudioRef.current.src = '';
+        } catch {}
+        testAudioRef.current = null;
+      }
+    };
+  }, []);
+
   const notifyChange = (msg: string) => {
+    if (!isMountedRef.current) return;
     setSuccessToast(msg);
-    setTimeout(() => setSuccessToast(null), 3000);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) setSuccessToast(null);
+    }, 3000);
   };
 
   const activeGeminiKey = integrationsVault.getApiKeyByProvider('gemini') || 
@@ -120,6 +147,7 @@ export const SettingsView: React.FC = () => {
   const handleTestVoice = async () => {
     if (isTestingVoice) return;
     setIsTestingVoice(true);
+    speechService.unlockAudio();
 
     try {
       let keyToUse = geminiKeyInput.trim() || activeGeminiKey;
@@ -158,22 +186,27 @@ export const SettingsView: React.FC = () => {
 
       const audioUrl = `data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`;
       const audio = new Audio(audioUrl);
+      testAudioRef.current = audio;
       await audio.play();
       notifyChange(`Amostra da voz ${settings.ttsVoice} (${settings.ttsModel}) reproduzida via API do Gemini.`);
     } catch (err: any) {
       notifyChange(err?.message || 'Chave de API do Gemini ausente ou inválida no Cofre para teste de áudio');
     } finally {
-      setIsTestingVoice(false);
+      if (isMountedRef.current) setIsTestingVoice(false);
     }
   };
 
   const handleSelectWorkspace = () => {
-    // Simulando seleção de workspace nativo / Tauri dialog
-    const newPath = prompt('Insira o caminho absoluto ou relativo do novo diretório de workspace:', settings.workspacePath);
-    if (newPath && newPath.trim()) {
-      updateSettings({ workspacePath: newPath.trim() });
+    setWorkspaceInput(settings.workspacePath);
+    setIsEditingWorkspace(true);
+  };
+
+  const handleSaveWorkspace = () => {
+    if (workspaceInput && workspaceInput.trim()) {
+      updateSettings({ workspacePath: workspaceInput.trim() });
       notifyChange('Caminho do workspace atualizado com sucesso.');
     }
+    setIsEditingWorkspace(false);
   };
 
   const handleNotificationToggle = async (checked: boolean) => {
@@ -529,12 +562,42 @@ export const SettingsView: React.FC = () => {
               <span className="truncate">Workspace: <code className="text-white font-mono">{settings.workspacePath}</code></span>
               <button
                 onClick={handleSelectWorkspace}
-                className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#262626] border border-[#333333] rounded text-[11px] text-white transition-colors shrink-0"
+                className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#262626] border border-[#333333] rounded text-[11px] text-white transition-colors shrink-0 cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
                 Alterar...
               </button>
             </div>
+
+            {/* Modal Inline para Alterar Workspace (Elimina window.prompt) */}
+            {isEditingWorkspace && (
+              <div className="p-3 bg-[#0E0E0E] border border-[#333333] rounded-lg space-y-2 mt-2">
+                <label className="text-[11px] text-[#CCCCCC] block font-medium">Novo Caminho do Workspace:</label>
+                <input
+                  type="text"
+                  value={workspaceInput}
+                  onChange={e => setWorkspaceInput(e.target.value)}
+                  placeholder="./workspace ou C:\projetos"
+                  className="w-full bg-[#181818] border border-[#444444] rounded px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[var(--accent-primary)]"
+                />
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingWorkspace(false)}
+                    className="px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#252525] border border-[#333333] text-xs text-[#888888] rounded cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveWorkspace}
+                    className="px-3 py-1 bg-[var(--accent-primary)] hover:opacity-90 text-xs font-semibold text-white rounded shadow cursor-pointer"
+                  >
+                    Salvar
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -441,6 +441,75 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
                 Err(e) => (false, None, Some(format!("[SIMULADO/INDISPONÍVEL] {}", e)), "R1"),
             }
         }
+        "open_application" | "pc_manage_apps" => {
+            let target = params.get("target")
+                .or_else(|| params.get("appName"))
+                .or_else(|| params.get("command"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            match open_application(target).await {
+                Ok(_) => (true, Some(serde_json::json!({ "opened": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "list_processes" => {
+            match list_processes().await {
+                Ok(procs) => (true, Some(serde_json::to_value(procs).unwrap_or(serde_json::Value::Null)), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
+            }
+        }
+        "kill_process" => {
+            let pid = params.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let token = consent_token.unwrap_or("").to_string();
+            match kill_process(pid, token).await {
+                Ok(_) => (true, Some(serde_json::json!({ "killed": true, "pid": pid })), None, "R2"),
+                Err(e) => (false, None, Some(e), "R2"),
+            }
+        }
+        "system_set_volume" | "set_volume" => {
+            let level = params.get("level").and_then(|v| v.as_u64()).unwrap_or(50) as u8;
+            match set_volume(level).await {
+                Ok(v) => (true, Some(v), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "get_volume" => {
+            match get_volume().await {
+                Ok(v) => (true, Some(v), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
+            }
+        }
+        "system_lock_session" | "lock_session" => {
+            match lock_session().await {
+                Ok(_) => (true, Some(serde_json::json!({ "locked": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "save_sqlite_record" => {
+            let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let payload_json = params.get("payloadJson").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+            match save_sqlite_record(table, id, payload_json).await {
+                Ok(_) => (true, Some(serde_json::json!({ "saved": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "load_sqlite_records" => {
+            let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            match load_sqlite_records(table).await {
+                Ok(records) => (true, Some(serde_json::to_value(records).unwrap_or(serde_json::Value::Null)), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
+            }
+        }
+        "delete_sqlite_record" => {
+            let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            match delete_sqlite_record(table, id).await {
+                Ok(_) => (true, Some(serde_json::json!({ "deleted": true })), None, "R2"),
+                Err(e) => (false, None, Some(e), "R2"),
+            }
+        }
         _ => (false, None, Some(format!("Ferramenta desconhecida ou não suportada no Tauri: {}", tool_name)), "R0"),
     };
 

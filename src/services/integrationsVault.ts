@@ -968,12 +968,15 @@ export class IntegrationsVault {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetchFn(url, {
-        ...options,
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+      let response: Response;
+      try {
+        response = await fetchFn(url, {
+          ...options,
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       const latency = Math.max(1, Date.now() - startTime);
 

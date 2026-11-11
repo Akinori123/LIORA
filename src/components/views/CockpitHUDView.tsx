@@ -69,6 +69,10 @@ export const CockpitHUDView: React.FC = () => {
   // CORREÇÃO (Etapa C): locais frequentes editáveis gravados na memória semântica
   const [editingAlias, setEditingAlias] = useState<string | null>(null);
   const [aliasDraft, setAliasDraft] = useState('');
+  const [isAddingNewPlace, setIsAddingNewPlace] = useState(false);
+  const [newPlaceAlias, setNewPlaceAlias] = useState('');
+  const [newPlaceAddress, setNewPlaceAddress] = useState('');
+
   const memoryEntries = useLioraStore((s) => s.memoryEntries);
   const addMemory = useLioraStore((s) => s.addMemory);
 
@@ -83,15 +87,49 @@ export const CockpitHUDView: React.FC = () => {
     });
     setEditingAlias(null);
     setAliasDraft('');
-    setRouteStatus(`Local '${key}' salvo na memória. Agora "${key === 'casa' ? 'minha casa' : 'trabalho'}" navega automaticamente.`);
-    setTimeout(() => setRouteStatus(null), 5000);
+    setRouteStatus(`Local '${key}' salvo na memória. Agora o destino navega automaticamente.`);
+    registerTimer(setTimeout(() => setRouteStatus(null), 5000));
   };
 
-  // Navegação Híbrida GPS (Google Maps / Waze)
+  const customPlaces = React.useMemo(() => {
+    const list: Array<{ alias: string; key: string; address: string }> = [
+      { alias: 'Casa', key: 'casa', address: memoryEntries.find(m => ['casa', 'endereco_casa', 'local_casa'].includes(m.key.toLowerCase()))?.value || '' },
+      { alias: 'Trabalho', key: 'trabalho', address: memoryEntries.find(m => ['trabalho', 'endereco_trabalho', 'local_trabalho'].includes(m.key.toLowerCase()))?.value || '' }
+    ];
+
+    memoryEntries.forEach(m => {
+      const k = m.key.toLowerCase();
+      if (k.startsWith('local_') || k.startsWith('endereco_')) {
+        const raw = k.replace(/^local_|^endereco_/, '').replace(/_/g, ' ');
+        if (!raw) return;
+        const alias = raw.charAt(0).toUpperCase() + raw.slice(1);
+        if (!list.some(item => item.alias.toLowerCase() === alias.toLowerCase())) {
+          list.push({ alias, key: k, address: m.value });
+        }
+      }
+    });
+
+    return list;
+  }, [memoryEntries]);
+
   const [destinationInput, setDestinationInput] = useState<string>('Casa');
   const [gpsProvider, setGpsProvider] = useState<GpsNavigationProvider>('google_maps');
   const [isRouting, setIsRouting] = useState<boolean>(false);
   const [routeStatus, setRouteStatus] = useState<string | null>(null);
+
+  // Armazena identificadores de timers para limpeza ao desmontar o componente
+  const timersRef = useRef<NodeJS.Timeout[]>([]);
+  const registerTimer = (id: NodeJS.Timeout) => {
+    timersRef.current.push(id);
+    return id;
+  };
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach(t => clearTimeout(t));
+      timersRef.current = [];
+    };
+  }, []);
 
   // 1. Rastreamento Real de GPS e Velocidade via Geolocation API
   useEffect(() => {
@@ -188,7 +226,7 @@ export const CockpitHUDView: React.FC = () => {
         : `Falha na varredura: ${reason.slice(0, 160)}`);
     } finally {
       setIsScanningObd(false);
-      setTimeout(() => setScanMessage(null), 8000);
+      registerTimer(setTimeout(() => setScanMessage(null), 8000));
     }
   };
 
@@ -197,7 +235,7 @@ export const CockpitHUDView: React.FC = () => {
     setPuloHomeSignalSent(true);
     // Envia comando para a IA executar a automação
     sendMessage('Protocolo PULO Veicular: Operador em aproximação ao perímetro residencial. Executar automação de abertura de portão R2.');
-    setTimeout(() => setPuloHomeSignalSent(false), 6000);
+    registerTimer(setTimeout(() => setPuloHomeSignalSent(false), 6000));
   };
 
   // Disparo de Rota Inteligente Híbrida (Voz Live/TTS + Abertura GPS nativa, SEM redirecionamento de aba)
@@ -215,7 +253,7 @@ export const CockpitHUDView: React.FC = () => {
         speechService.speak('Para onde você deseja ir?', () => {}, () => {});
       } catch {}
       destinationInputRef.current?.focus();
-      setTimeout(() => setRouteStatus(null), 5000);
+      registerTimer(setTimeout(() => setRouteStatus(null), 5000));
       return;
     }
 
@@ -260,7 +298,7 @@ export const CockpitHUDView: React.FC = () => {
       ? `Navegação ativa no ${appName}: "${targetDest}".`
       : `Falha: ${openError}`);
     setIsRouting(false);
-    setTimeout(() => setRouteStatus(null), opened ? 10000 : 6000);
+    registerTimer(setTimeout(() => setRouteStatus(null), opened ? 10000 : 6000));
   };
 
   // Interlock de Segurança: Velocidade acima de 0 km/h ou modo SAFE_DRIVE bloqueia telas densas
@@ -552,28 +590,20 @@ export const CockpitHUDView: React.FC = () => {
                 />
               </div>
 
-              {/* CORREÇÃO (Etapa C): Locais Frequentes REAIS da memória semântica.
-                  Antes eram chips fixos 'Casa/Trabalho/Centro' que falhavam se o
-                  usuário nunca ensinou o endereço. Agora lê da memória, permite
-                  editar com um clique (+) e grava para navegação automática. */}
+              {/* CORREÇÃO (Etapa B): Locais Frequentes REAIS da memória semântica + Ilimitados */}
               <div className="flex items-center gap-1.5 flex-wrap">
-                {['Casa', 'Trabalho'].map((alias) => {
-                  const memoryKey = alias.toLowerCase();
-                  const mem = memoryEntries.find(m =>
-                    m.key.toLowerCase() === memoryKey ||
-                    m.key.toLowerCase() === `endereco_${memoryKey}`
-                  );
+                {customPlaces.map(({ alias, key: memoryKey, address }) => {
+                  const saved = Boolean(address.trim());
                   const isEditing = editingAlias === memoryKey;
-                  const saved = Boolean(mem?.value);
 
                   return isEditing ? (
-                    <div key={alias} className="flex items-center gap-1 flex-1 min-w-[180px]">
+                    <div key={memoryKey} className="flex items-center gap-1 flex-1 min-w-[180px]">
                       <input
                         autoFocus
                         type="text"
                         value={aliasDraft}
                         onChange={(e) => setAliasDraft(e.target.value)}
-                        placeholder={`Endereço do seu ${alias.toLowerCase()}...`}
+                        placeholder={`Endereço de ${alias}...`}
                         className="flex-1 bg-[#161616] border border-[#FF2B2B] rounded text-[10px] font-mono text-white px-2 py-1 focus:outline-none"
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') void saveAlias(memoryKey, aliasDraft);
@@ -595,17 +625,15 @@ export const CockpitHUDView: React.FC = () => {
                       </button>
                     </div>
                   ) : (
-                    <div key={alias} className="flex items-center gap-1">
+                    <div key={memoryKey} className="flex items-center gap-1">
                       <button
                         onClick={() => {
-                          if (saved && mem) {
-                            // Endereço conhecido: navega DIRETO (resolve_place_alias encontra na memória)
-                            setDestinationInput(mem.value);
-                            void handleRequestRoute(mem.value);
+                          if (saved) {
+                            setDestinationInput(address);
+                            void handleRequestRoute(address);
                           } else {
-                            // Sem endereço: abre o editor inline para o usuário definir
                             setEditingAlias(memoryKey);
-                            setAliasDraft(mem?.value || '');
+                            setAliasDraft(address || '');
                           }
                         }}
                         className={`px-2 py-0.5 border rounded text-[10px] font-mono transition-all flex items-center gap-1 ${
@@ -613,14 +641,14 @@ export const CockpitHUDView: React.FC = () => {
                             ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300 hover:bg-emerald-900/50'
                             : 'bg-[#1C1C1C] border-[#2A2A2A] text-[#888888] hover:text-white hover:bg-[#252525]'
                         }`}
-                        title={saved ? `Navegar para ${alias} (${mem?.value.slice(0, 40)})` : `Definir endereço do seu ${alias.toLowerCase()}`}
+                        title={saved ? `Navegar para ${alias} (${address.slice(0, 40)})` : `Definir endereço de ${alias}`}
                       >
                         {saved ? '●' : '○'} {alias}
                       </button>
                       <button
                         onClick={() => {
                           setEditingAlias(memoryKey);
-                          setAliasDraft(mem?.value || '');
+                          setAliasDraft(address || '');
                         }}
                         className="p-0.5 rounded text-[#555555] hover:text-[#FF2B2B] transition-colors"
                         title={`Editar endereço de ${alias}`}
@@ -630,7 +658,57 @@ export const CockpitHUDView: React.FC = () => {
                     </div>
                   );
                 })}
+
+                {/* Inline creator para Novo Local Favorito Ilimitado */}
+                {isAddingNewPlace ? (
+                  <div className="flex items-center gap-1 flex-1 min-w-[240px] bg-[#161616] p-1 border border-[#FF2B2B] rounded">
+                    <input
+                      type="text"
+                      placeholder="Nome (ex: Amigo)..."
+                      value={newPlaceAlias}
+                      onChange={(e) => setNewPlaceAlias(e.target.value)}
+                      className="w-24 bg-[#0F0F0F] border border-[#333] rounded text-[10px] font-mono text-white px-1.5 py-0.5 focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Endereço..."
+                      value={newPlaceAddress}
+                      onChange={(e) => setNewPlaceAddress(e.target.value)}
+                      className="flex-1 bg-[#0F0F0F] border border-[#333] rounded text-[10px] font-mono text-white px-1.5 py-0.5 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        if (newPlaceAlias.trim() && newPlaceAddress.trim()) {
+                          const norm = `local_${newPlaceAlias.trim().toLowerCase().replace(/\s+/g, '_')}`;
+                          void saveAlias(norm, newPlaceAddress.trim());
+                          setIsAddingNewPlace(false);
+                          setNewPlaceAlias('');
+                          setNewPlaceAddress('');
+                        }
+                      }}
+                      className="px-1.5 py-0.5 bg-[#FF2B2B] text-white text-[10px] font-bold rounded"
+                    >
+                      ✓
+                    </button>
+                    <button
+                      onClick={() => setIsAddingNewPlace(false)}
+                      className="text-[#888] text-[10px] px-1"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setIsAddingNewPlace(true)}
+                    className="px-2 py-0.5 border border-dashed border-[#444] hover:border-[#FF2B2B] rounded text-[10px] font-mono text-[#888888] hover:text-white transition-colors flex items-center gap-1"
+                    title="Adicionar novo local favorito ilimitado"
+                  >
+                    <Plus className="w-3 h-3 text-[#FF2B2B]" />
+                    <span>Novo Local</span>
+                  </button>
+                )}
               </div>
+
 
               {/* Botão de Disparo */}
               <button

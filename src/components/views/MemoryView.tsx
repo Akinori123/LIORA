@@ -12,6 +12,7 @@ import {
   SearchMode, 
   SemanticSearchResult 
 } from '../../services/semanticMemoryEngine';
+import { notificationSystem } from '../../notifications/notificationSystem';
 import { 
   Database, 
   Plus, 
@@ -165,11 +166,12 @@ export const MemoryView: React.FC = () => {
         const parsed = JSON.parse(event.target?.result as string);
         if (Array.isArray(parsed)) {
           importMemories(parsed, 'merge');
+          notificationSystem.notify('Cofre de Memórias', `${parsed.length} memórias importadas com sucesso.`, 'success');
         } else {
-          alert('O arquivo JSON importado deve conter uma lista válida de memórias.');
+          notificationSystem.notify('Erro na Importação', 'O arquivo JSON deve conter uma lista válida de memórias.', 'warning');
         }
       } catch {
-        alert('Falha ao ler o arquivo JSON. Verifique a formatação do arquivo.');
+        notificationSystem.notify('Falha na Importação', 'Falha ao processar arquivo JSON. Verifique a sintaxe.', 'error');
       }
     };
     reader.readAsText(file);
@@ -180,6 +182,7 @@ export const MemoryView: React.FC = () => {
   const handleExtractSuggestions = () => {
     const suggestions: Array<{ category: 'preference' | 'project' | 'fact' | 'routine'; key: string; value: string }> = [];
     const existingKeys = new Set(memoryEntries.map(m => m.key.toLowerCase().trim()));
+    const addedKeys = new Set<string>();
 
     sessions.forEach(sess => {
       sess.messages.forEach(msg => {
@@ -190,7 +193,8 @@ export const MemoryView: React.FC = () => {
             const match = text.match(/meu nome [eé]\s+([a-zA-ZÀ-ÿ\s]+)/i);
             if (match && match[1]) {
               const val = match[1].trim();
-              if (!existingKeys.has('nome_usuario')) {
+              if (!existingKeys.has('nome_usuario') && !addedKeys.has('nome_usuario')) {
+                addedKeys.add('nome_usuario');
                 suggestions.push({ category: 'fact', key: 'nome_usuario', value: val });
               }
             }
@@ -200,8 +204,10 @@ export const MemoryView: React.FC = () => {
             const match = text.match(/prefiro\s+(.+)/i);
             if (match && match[1]) {
               const val = match[1].slice(0, 40).trim();
-              if (!existingKeys.has('preferencia_detectada')) {
-                suggestions.push({ category: 'preference', key: 'preferencia_detectada', value: val });
+              const key = `preferencia_${suggestions.length + 1}`;
+              if (!existingKeys.has(key) && !addedKeys.has(key)) {
+                addedKeys.add(key);
+                suggestions.push({ category: 'preference', key, value: val });
               }
             }
           }
@@ -210,8 +216,10 @@ export const MemoryView: React.FC = () => {
             const match = text.match(/(trabalhando em|projeto)\s+(.+)/i);
             if (match && match[2]) {
               const val = match[2].slice(0, 40).trim();
-              if (!existingKeys.has('projeto_ativo')) {
-                suggestions.push({ category: 'project', key: 'projeto_ativo', value: val });
+              const key = `projeto_${suggestions.length + 1}`;
+              if (!existingKeys.has(key) && !addedKeys.has(key)) {
+                addedKeys.add(key);
+                suggestions.push({ category: 'project', key, value: val });
               }
             }
           }
@@ -220,17 +228,23 @@ export const MemoryView: React.FC = () => {
     });
 
     if (suggestions.length === 0) {
-      suggestions.push({ category: 'preference', key: 'modo_respostas', value: 'Respostas diretas e focadas em código' });
-      suggestions.push({ category: 'project', key: 'ambiente_desenvolvimento', value: 'React + TypeScript + Express' });
+      if (!existingKeys.has('modo_respostas')) {
+        suggestions.push({ category: 'preference', key: 'modo_respostas', value: 'Respostas diretas e focadas em código' });
+      }
+      if (!existingKeys.has('ambiente_desenvolvimento')) {
+        suggestions.push({ category: 'project', key: 'ambiente_desenvolvimento', value: 'React + TypeScript + Express' });
+      }
     }
 
     setSuggestedFacts(suggestions);
     setIsAutoExtractOpen(true);
   };
 
-  const handleApproveSuggestion = (sug: { category: 'preference' | 'project' | 'fact' | 'routine'; key: string; value: string }) => {
+  const handleApproveSuggestion = (targetIdx: number) => {
+    const sug = suggestedFacts[targetIdx];
+    if (!sug) return;
     addMemory({ ...sug, confidence: 1.0 });
-    setSuggestedFacts(prev => prev.filter(item => item.key !== sug.key));
+    setSuggestedFacts(prev => prev.filter((_, idx) => idx !== targetIdx));
   };
 
   const handleOpenVectorInspector = (entry: MemoryEntry, cluster: string, similarity?: number) => {
@@ -830,7 +844,7 @@ export const MemoryView: React.FC = () => {
             </div>
 
             <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">
-              {suggestedFacts.map((sug) => (
+              {suggestedFacts.map((sug, idx) => (
                 <div key={sug.key} className="bg-[#161616] border border-[#262626] rounded-xl p-3 flex items-center justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <span className="text-[10px] font-mono text-[var(--accent-primary)] uppercase font-bold">{sug.category}</span>
@@ -838,7 +852,7 @@ export const MemoryView: React.FC = () => {
                     <p className="text-xs text-[#A8A8A8] truncate">{sug.value}</p>
                   </div>
                   <button
-                    onClick={() => handleApproveSuggestion(sug)}
+                    onClick={() => handleApproveSuggestion(idx)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-primary)] hover:opacity-90 text-white text-xs font-semibold rounded-lg shrink-0 shadow-md shadow-[var(--accent-glow)] transition-all"
                   >
                     <Check className="w-3.5 h-3.5" />

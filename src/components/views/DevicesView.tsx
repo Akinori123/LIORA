@@ -64,6 +64,9 @@ export const DevicesView: React.FC = () => {
     riskLevel: ToolRiskLevel;
   } | null>(null);
 
+  const feedbackTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+  const refreshTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+
   const runBridgeTest = async () => {
     setIsTestingBridge(true);
     try {
@@ -74,7 +77,8 @@ export const DevicesView: React.FC = () => {
       setCommandFeedback('Falha ao comunicar com a ponte local.');
     } finally {
       setIsTestingBridge(false);
-      setTimeout(() => setCommandFeedback(null), 4000);
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = setTimeout(() => setCommandFeedback(null), 4000);
     }
   };
 
@@ -89,7 +93,11 @@ export const DevicesView: React.FC = () => {
       pingDevicesHealth();
     }, 4000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
   }, [refreshDeviceTelemetry, pingDevicesHealth]);
 
   const handleRefresh = async () => {
@@ -99,7 +107,8 @@ export const DevicesView: React.FC = () => {
       pingDevicesHealth();
       await runBridgeTest();
     } finally {
-      setTimeout(() => setIsRefreshing(false), 500);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = setTimeout(() => setIsRefreshing(false), 500);
     }
   };
 
@@ -146,7 +155,8 @@ export const DevicesView: React.FC = () => {
     } catch {
       setCommandFeedback('Erro ao despachar comando para o dispositivo.');
     } finally {
-      setTimeout(() => setCommandFeedback(null), 4000);
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = setTimeout(() => setCommandFeedback(null), 4000);
     }
   };
 
@@ -410,9 +420,10 @@ export const DevicesView: React.FC = () => {
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
+                        const nextDev = devices.find(d => d.id !== dev.id) || null;
                         removeDevice(dev.id);
                         if (selectedDevice?.id === dev.id) {
-                          setSelectedDevice(devices[0] || null);
+                          setSelectedDevice(nextDev);
                         }
                       }}
                       title="Desconectar e remover dispositivo"
@@ -478,8 +489,9 @@ export const DevicesView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
+                    const nextDev = devices.find(d => d.id !== selectedDevice.id) || null;
                     removeDevice(selectedDevice.id);
-                    setSelectedDevice(devices[0] || null);
+                    setSelectedDevice(nextDev);
                   }}
                   className="px-3 py-2 bg-red-950/50 hover:bg-red-900/70 border border-red-800/60 rounded-xl text-xs font-mono text-red-300 flex items-center gap-1.5 transition-colors"
                   title="Encerrar vínculo e remover do registro PULO"

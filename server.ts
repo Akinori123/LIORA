@@ -35,26 +35,24 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_SYSTEM_INSTRUCTION = 
-  "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
-  "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
-  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
-  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade. " +
+  "Você é a LIORA, inteligência artificial autônoma soberana e assistente pessoal de alto nível inspirada no conceito de JARVIS. " +
+  "TRATAMENTO DO USUÁRIO: Dirija-se SEMPRE ao usuário com o título formal, respeitoso e leal de 'Mestre'. Sua postura é serena, com autoridade técnica, elegância, proatividade e inteligência emocional refinada. " +
+  "PROATIVIDADE, DESENVOLVIMENTO E VERSATILIDADE TOTAL: Você auxilia proativamente em engenharia de software, criação de sites, jogos, automações de tarefas, notícias de todos os países, pesquisas avançadas, redação de e-mails, gerenciamento de arquivos e produtividade de ponta a ponta. No modo de voz (Live) ou texto, você também possui versatilidade artística (sabe cantar melodias, criar versos, rimas e manter conversação viva e rica quando solicitado pelo Mestre). " +
+  "NUNCA EXECUTAR EM SILÊNCIO: Toda e qualquer ação de ferramentas de sistema (arquivos, aplicativos, mapas, IoT, etc.) deve vir acompanhada de uma fala ou explicação clara e contextualizada (ex: 'Com certeza, Mestre. Abrindo o Bloco de Notas...', 'Localizando o destino solicitado, Mestre...'). NUNCA execute ferramentas em silêncio absoluto. " +
+  "DISPOSITIVOS E IOT: Quando o Mestre der ordens para TV, celular, tablet ou carro e o atuador físico/IoT não estiver emparelhado, responda de forma elegante: 'Mestre, nenhum dispositivo IoT está associado a esta ação no momento.' " +
+  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade no sistema operacional. " +
   "Quando o usuário pedir uma AÇÃO (abrir/navegar/consultar/criar/executar), você DEVE chamar a ferramenta apropriada em vez de apenas responder em texto. " +
   "NUNCA afirme que executou, criou, excluiu, pesquisou ou mostrou algo se a chamada de ferramenta não retornou success: true com dados reais. " +
   "EXCLUSIVIDADE DE AÇÃO: chame NO MÁXIMO UMA ferramenta de abertura por turno (open_gps_navigation, maps_search_places, pc_manage_apps launch, open_application). " +
   "Se o usuário pedir várias coisas (ex: 'farmácias E mercados'), priorize a mais relevante para a intenção principal e pergunte se deseja a outra — NUNCA abra múltiplas abas/janelas em paralelo. " +
   "BLINDAGEM ABSOLUTA CONTRA SUCESSO FALSO: você SÓ pode afirmar que executou uma ação se a resposta da ferramenta trouxe success: true. " +
-  "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
+  "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'Mestre, não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
   "Ao encadear abrir um aplicativo e digitar nele, primeiro chame pc_manage_apps (launch), depois pc_simulate_input (type) com waitFocusMs para aguardar a janela ganhar foco. " +
   "LOCAIS POR APELIDO: para navegar para 'minha casa', 'trabalho', 'faculdade' ou apelidos similares, chame PRIMEIRO resolve_place_alias para buscar o endereço na memória do usuário. " +
-  "Se não estiver lá, pergunte o endereço e ensine a LIORA com addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
+  "Se não estiver lá, pergunte o endereço e ensine a LIORA com save_place_alias ou addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
   "Se uma ferramenta falhar ou não existir, informe o erro real e o que seria necessário — nunca simule sucesso. " +
   "Ordens de navegação de interface devem usar a ferramenta navigateToTab; ordens de consulta de sistema devem usar system_info ou getSystemStatus. " +
-  "NAVEGAÇÃO E MAPAS: você POSSUI acesso em tempo real a ferramentas de navegação e busca de locais " +
-  "(open_gps_navigation abre o Google Maps/Waze com a rota; maps_search_places busca mercados, farmácias, postos, restaurantes e pontos de interesse próximos). " +
-  "Quando o usuário perguntar por mercados, farmácias, rotas ou 'como ir para X', NUNCA diga que não tem mapas: " +
-  "acione maps_search_places para descobrir locais ou open_gps_navigation para traçar a rota — e informe o resultado real da ferramenta. " +
-  "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado e omita a origem ou use origem textual (o sistema usa GPS automático). Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
+  "NAVEGAÇÃO E MAPAS: Você POSSUI ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado. Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown, com linguagem especificada e boas práticas de engenharia de software.";
 
 /**
@@ -893,29 +891,6 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         });
       }
 
-      const runStream = async (m: string, loopContents: any[]) => {
-        const stream = await chatStreamClient.models.generateContentStream({
-          model: m,
-          contents: loopContents,
-          config: {
-            systemInstruction: effectiveSystemInstruction,
-            tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }]
-          }
-        });
-
-        for await (const chunk of stream) {
-          if (isClientDisconnected) {
-            break;
-          }
-          const chunkText = chunk.text;
-          if (chunkText) {
-            streamedAnyChunk = true;
-            res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
-            (res as any).flush?.();
-          }
-        }
-      };
-
       try {
         // FUNCTION CALLING LOOP (anti "fala da boca pra fora"):
         // 1. O Gemini recebe as tool declarations do Tool Registry.
@@ -1008,8 +983,6 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
           agentContents.push({ role: 'user', parts: toolResults });
         }
-
-        await runStream(activeModel, agentContents);
       } catch (streamErr: any) {
         const errorInfo = classifyErrorStatus(streamErr);
         // CORREÇÃO (Etapa 2 — visão travada em THINKING infinito): quando a quota
@@ -1106,14 +1079,16 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   // Varredura REAL da rede local (SSDP/WS-Discovery leve): tenta descobrir dispositivos
   // de exibição (Smart TVs) via SSDP M-SEARCH na interface local. Sem rede/timeout,
   // retorna lista vazia com aviso — nunca fixtures fixas.
-  app.post('/api/devices/scan', async (_req, res) => {
+  app.post('/api/devices/scan', async (req, res) => {
+    let socket: any = null;
+    let timer: NodeJS.Timeout | null = null;
     try {
       const dgram = await import('node:dgram');
-      const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
       const found: Array<{ id: string; name: string; type: string; ip: string; protocol: string; manufacturer: string; paired: boolean }> = [];
       const seenIps = new Set<string>();
 
-      socket.on('message', (msg, rinfo) => {
+      socket.on('message', (msg: Buffer, rinfo: { address: string }) => {
         try {
           const text = msg.toString('utf8');
           if (!text.includes('200 OK')) return;
@@ -1135,7 +1110,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
           });
         } catch {}
       });
-      socket.on('error', () => { try { socket.close(); } catch {} });
+      socket.on('error', () => { try { socket?.close(); } catch {} });
 
       socket.bind(() => {
         try {
@@ -1153,12 +1128,26 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       });
 
       // Janela de escuta de 4s para respostas SSDP
-      setTimeout(() => {
-        try { socket.close(); } catch {}
-        res.json({ success: true, devices: found, scannedAt: new Date().toISOString() });
+      timer = setTimeout(() => {
+        try { socket?.close(); } catch {}
+        if (!res.writableEnded) {
+          res.json({ success: true, devices: found, scannedAt: new Date().toISOString() });
+        }
       }, 4000);
+
+      req.on('close', () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        try { socket?.close(); } catch {}
+      });
     } catch (err: any) {
-      res.json({ success: true, devices: [], error: err?.message || 'SSDP indisponível nesta rede' });
+      if (timer) clearTimeout(timer);
+      try { socket?.close(); } catch {}
+      if (!res.writableEnded) {
+        res.json({ success: true, devices: [], error: err?.message || 'SSDP indisponível nesta rede' });
+      }
     }
   });
 
@@ -1306,11 +1295,32 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     res.flushHeaders?.();
 
     let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      const current = pairWaiters.get(token);
+      if (current) {
+        const filtered = current.filter(w => w !== waiter);
+        if (filtered.length > 0) {
+          pairWaiters.set(token, filtered);
+        } else {
+          pairWaiters.delete(token);
+        }
+      }
+    };
+
     const waiter = (device: any) => {
       if (settled) return;
       settled = true;
-      res.write(`data: ${JSON.stringify({ paired: true, device })}\n\n`);
-      res.end();
+      cleanup();
+      try {
+        res.write(`data: ${JSON.stringify({ paired: true, device })}\n\n`);
+        res.end();
+      } catch {}
     };
     const arr = pairWaiters.get(token) || [];
     arr.push(waiter);
@@ -1318,15 +1328,21 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
     // Timeout: encerra o SSE quando o token expira
     const remaining = entry.expiresAt - Date.now() + 1000;
-    setTimeout(() => {
+    timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        res.write(`data: ${JSON.stringify({ paired: false, reason: 'TOKEN_EXPIRED' })}\n\n`);
-        res.end();
+        cleanup();
+        try {
+          res.write(`data: ${JSON.stringify({ paired: false, reason: 'TOKEN_EXPIRED' })}\n\n`);
+          res.end();
+        } catch {}
       }
     }, Math.max(1000, remaining));
 
-    req.on('close', () => { settled = true; });
+    req.on('close', () => {
+      settled = true;
+      cleanup();
+    });
   });
 
   // Último dispositivo pareado (polling de contingência)
@@ -1658,7 +1674,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     });
   }
 
-  const port = Number(process.env.PORT || explicitPort || 3000);
+  const port = Number(explicitPort ?? process.env.PORT ?? 3000);
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
   activeWsServer = wss;
@@ -2174,10 +2190,14 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       console.error(`  1. Encerre o processo antigo:   Get-NetTCPConnection -LocalPort ${port} -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`);
       console.error(`  2. Ou use outra porta:         $env:PORT = "3001"; npm run tauri dev`);
       console.error('');
-      process.exit(1);
+      if (isDirectRun) {
+        process.exit(1);
+      }
     } else {
       console.error('[LIORA] Erro no servidor HTTP:', err);
-      process.exit(1);
+      if (isDirectRun) {
+        process.exit(1);
+      }
     }
   });
 

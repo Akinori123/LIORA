@@ -286,9 +286,15 @@ export const webBrowserAgentTool: ToolDefinition<{
     } else {
       // Cria sessão via browser_open_url (reutiliza todo o gerenciamento de sessões)
       const { browserOpenUrlTool } = await import('../browser/playwrightTool');
-      const openRes = await browserOpenUrlTool.execute({ url: urlCheck.url });
-      if (!openRes.success) {
-        result.error = String(openRes.error || 'Falha ao abrir a URL inicial.');
+      let openRes: any;
+      try {
+        openRes = await browserOpenUrlTool.execute({ url: urlCheck.url });
+      } catch (launchErr: any) {
+        result.error = String(launchErr?.message || 'Falha ao iniciar o browser.');
+        return result;
+      }
+      if (!openRes || !openRes.success) {
+        result.error = String(openRes?.error || 'Falha ao abrir a URL inicial.');
         return result;
       }
       sessionId = String(openRes.sessionId);
@@ -301,13 +307,14 @@ export const webBrowserAgentTool: ToolDefinition<{
     }
 
     // ── 3. Proteção contra downloads de executáveis ──
-    page.on('download', async (download) => {
+    const onDownload = async (download: import('playwright').Download) => {
       const blocked = isBlockedDownload(download.url());
       if (blocked) {
         try { await download.cancel(); } catch { /* ignore */ }
         console.warn(`[WebAgent] ${blocked} (${download.url()})`);
       }
-    });
+    };
+    page.on('download', onDownload);
 
     // ── 4. Execução do pipeline ──
     const globalTimer = setTimeout(() => {
@@ -475,24 +482,23 @@ export const webBrowserAgentTool: ToolDefinition<{
       }
 
       result.success = !result.error && result.stepsExecuted.length > 0;
-
-      // FIX (hang do runner de testes): quando o agente cria a PRÓPRIA sessão
-      // (sessionId omitido), ela é efêmera por design — fecha ao final do pipeline
-      // para liberar o Chromium e não reter o event loop. Sessões fornecidas pelo
-      // chamador (sessionId passado) permanecem abertas para reuso em cadeias.
-      if (!params.sessionId) {
-        try {
-          const { browserCloseSessionTool } = await import('../browser/playwrightTool');
-          await browserCloseSessionTool.execute({ sessionId });
-        } catch { /* ignore */ }
-      }
-
       return result;
     } catch (err: any) {
       result.error = `AGENT_ERROR: ${err?.message || 'falha desconhecida do agente'}`;
       return result;
     } finally {
       clearTimeout(globalTimer);
+      if (page) {
+        try { page.off('download', onDownload); } catch { /* ignore */ }
+      }
+      // FIX: quando o agente cria a PRÓPRIA sessão (sessionId omitido), ela é efêmera por design
+      // Fecha no finally para garantir que o Chromium seja liberado em caso de erro, timeout ou retorno antecipado.
+      if (!params.sessionId && sessionId) {
+        try {
+          const { browserCloseSessionTool } = await import('../browser/playwrightTool');
+          await browserCloseSessionTool.execute({ sessionId });
+        } catch { /* ignore */ }
+      }
     }
   }
 };

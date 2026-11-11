@@ -18,6 +18,7 @@ import { isTauriEnvironment, executeLocalTool, LocalExecutionResult } from '../s
 import { computeParametersHash } from '../security/canonicalizer';
 import { auditLogger } from '../security/auditLogger';
 import { IAuditLogger } from '../security/types';
+import { storageAdapter } from './storageAdapter';
 
 export const AUTOMATIONS_STORAGE_KEY = 'liora_automations_v1';
 
@@ -173,9 +174,10 @@ export class AutomationsEngine {
   }
 
   private persistToLocalStorage(): void {
+    const list = Array.from(this.rules.values());
+    storageAdapter.save('automations', 'rules_collection', list).catch(() => {});
     if (typeof localStorage === 'undefined') return;
     try {
-      const list = Array.from(this.rules.values());
       localStorage.setItem(AUTOMATIONS_STORAGE_KEY, JSON.stringify(list));
     } catch (err) {
       console.warn('[AutomationsEngine] Falha ao persistir regras no LocalStorage:', err);
@@ -1000,7 +1002,8 @@ export class AutomationsEngine {
    * Avalia gatilhos temporais para simulação ou loop de verificação
    */
   public async tick(currentHms?: string): Promise<AutomationExecutionLog[]> {
-    const targetHms = currentHms || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const now = new Date();
+    const targetHms = currentHms || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const executedLogs: AutomationExecutionLog[] = [];
 
     for (const rule of this.rules.values()) {
@@ -1008,9 +1011,28 @@ export class AutomationsEngine {
 
       if (rule.trigger.type === 'TIME_OF_DAY' && rule.trigger.config.timeOfDay) {
         if (targetHms.startsWith(rule.trigger.config.timeOfDay)) {
+          const lastExecRaw = rule.lastExecutedAt ? new Date(rule.lastExecutedAt).getTime() : 0;
+          if (Date.now() - lastExecRaw < 60_000) {
+            // Já executou neste minuto
+            continue;
+          }
           const log = await this.triggerRule(rule.id, {
             isManual: false,
             sessionId: `cron-${rule.id}-${targetHms.replace(':', '')}`
+          });
+          executedLogs.push(log);
+        }
+      } else if (rule.trigger.type === 'TIME_INTERVAL' && rule.trigger.config.intervalMinutes) {
+        const intervalMs = rule.trigger.config.intervalMinutes * 60 * 1000;
+        const lastExecRaw = rule.lastExecutedAt 
+          ? new Date(rule.lastExecutedAt).getTime() 
+          : (rule.createdAt ? new Date(rule.createdAt).getTime() : 0);
+        const lastExecTime = isNaN(lastExecRaw) ? 0 : lastExecRaw;
+        const elapsedMs = now.getTime() - lastExecTime;
+        if (elapsedMs >= intervalMs) {
+          const log = await this.triggerRule(rule.id, {
+            isManual: false,
+            sessionId: `interval-${rule.id}-${now.getTime()}`
           });
           executedLogs.push(log);
         }

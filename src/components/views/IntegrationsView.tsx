@@ -65,6 +65,16 @@ export const IntegrationsView: React.FC = () => {
   // CORREÇÃO (Etapa A): modal guiado para serviços de E-mail (IMAP/SMTP)
   const [isEmailSetupOpen, setIsEmailSetupOpen] = useState(false);
 
+  const pingTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const webhookTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (pingTimerRef.current) clearTimeout(pingTimerRef.current);
+      if (webhookTimerRef.current) clearTimeout(webhookTimerRef.current);
+    };
+  }, []);
+
   const filteredServices = selectedCategory === 'all' 
     ? services 
     : services.filter(s => s.category === selectedCategory);
@@ -114,7 +124,8 @@ export const IntegrationsView: React.FC = () => {
     try {
       await testServiceConnection(serviceId);
     } finally {
-      setTimeout(() => {
+      if (pingTimerRef.current) clearTimeout(pingTimerRef.current);
+      pingTimerRef.current = setTimeout(() => {
         setTestingServiceId(null);
       }, 400);
     }
@@ -141,7 +152,8 @@ export const IntegrationsView: React.FC = () => {
       setWebhookFeedback('Erro ao despachar webhook.');
     } finally {
       setIsSimulating(false);
-      setTimeout(() => setWebhookFeedback(null), 5000);
+      if (webhookTimerRef.current) clearTimeout(webhookTimerRef.current);
+      webhookTimerRef.current = setTimeout(() => setWebhookFeedback(null), 5000);
     }
   };
 

@@ -69,6 +69,7 @@ class SpeechService {
 
   private autoSendCallback: (() => void) | null = null;
   private silenceTimer: any = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private userSpokeInSession: boolean = false;
 
   private currentAudioElement: HTMLAudioElement | null = null;
@@ -92,7 +93,11 @@ class SpeechService {
 
   public setActiveNeuralVoice(voice: string) {
     if (['Aoede', 'Puck', 'Charon', 'Kore', 'Fenrir'].includes(voice)) {
-      this.activeNeuralVoice = voice;
+      if (this.activeNeuralVoice !== voice) {
+        this.activeNeuralVoice = voice;
+        this.ttsAudioCache.clear();
+        this.warmTtsCache();
+      }
     }
   }
 
@@ -132,13 +137,17 @@ class SpeechService {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (geminiKey) headers['Authorization'] = `Bearer ${geminiKey}`;
 
+    const storeModel = (typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState()?.settings?.ttsModel)
+      ? (window as any).__LIORA_STORE__.getState().settings.ttsModel
+      : 'gemini-3.8-flash-lite-tts';
+
     for (const phrase of defaultPhrases) {
       if (this.ttsAudioCache.has(phrase.toLowerCase())) continue;
       try {
         const res = await fetch('/api/gemini/tts', {
           method: 'POST',
           headers,
-          body: JSON.stringify({ text: phrase, voice: this.activeNeuralVoice })
+          body: JSON.stringify({ text: phrase, voice: this.activeNeuralVoice, model: storeModel })
         });
         if (res.ok) {
           const data = await res.json();
@@ -794,7 +803,9 @@ class SpeechService {
         // Se o usuário ainda quer manter a voz ativa, reinicia com uma nova instância limpa
         // evitando que o Chrome trave a escuta após pausas!
         if (this.shouldBeListening) {
-          setTimeout(() => {
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
             if (this.shouldBeListening) {
               try {
                 this.startListening(onResult, onError, onEnd, onAutoSend);
@@ -829,6 +840,10 @@ class SpeechService {
     if (this.silenceTimer) {
       clearTimeout(this.silenceTimer);
       this.silenceTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
     this.stopAudioMeter();
     if (this.recognition) {
@@ -968,10 +983,14 @@ class SpeechService {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (geminiKey) headers['Authorization'] = `Bearer ${geminiKey}`;
 
+      const storeModel = (typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState()?.settings?.ttsModel)
+        ? (window as any).__LIORA_STORE__.getState().settings.ttsModel
+        : 'gemini-3.8-flash-lite-tts';
+
       const res = await fetch('/api/gemini/tts', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ text: cleanText, voice: this.activeNeuralVoice })
+        body: JSON.stringify({ text: cleanText, voice: this.activeNeuralVoice, model: storeModel })
       });
 
       if (res.ok) {

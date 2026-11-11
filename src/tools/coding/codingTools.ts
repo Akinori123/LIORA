@@ -30,9 +30,16 @@ function resolveSafePath(rawPath: string): string {
 }
 
 /** Executa comando real via child_process com timeout e sem vazar processos */
-function execCommand(cmd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+function execCommand(cmd: string, timeoutMs: number, customCwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  let cwd = customCwd;
+  if (!cwd) {
+    const ws = getLioraWorkspaceRoot();
+    cwd = (fs.existsSync(ws) && (fs.existsSync(path.join(ws, 'package.json')) || fs.existsSync(path.join(ws, '.git'))))
+      ? ws
+      : process.cwd();
+  }
   return new Promise((resolve) => {
-    exec(cmd, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    exec(cmd, { cwd, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       const exitCode = err && typeof (err as any).code === 'number' ? (err as any).code : (err ? 1 : 0);
       resolve({ stdout: stdout || '', stderr: stderr || '', exitCode });
     });
@@ -211,6 +218,9 @@ export const codeReadFileTool: ToolDefinition<{
     const totalLines = allLines.length;
 
     const start = Math.max(1, startLine);
+    if (endLine !== undefined && endLine < start) {
+      throw new Error(`INVALID_RANGE: endLine (${endLine}) não pode ser menor que startLine (${start}).`);
+    }
     const end = endLine ? Math.min(totalLines, endLine) : Math.min(totalLines, start + maxLines - 1);
 
     const sliced = allLines.slice(start - 1, end).map((text, idx) => ({
@@ -281,10 +291,17 @@ export const codeApplyPatchTool: ToolDefinition<{
     const occurrences = content.split(target).length - 1;
     const updated = content.replace(target, replacement);
 
-    // Gravação segura via arquivo temporário
+    // Gravação segura via arquivo temporário com limpeza no catch
     const tmpPath = `${safePath}.tmp.${Date.now()}`;
-    fs.writeFileSync(tmpPath, updated, 'utf-8');
-    fs.renameSync(tmpPath, safePath);
+    try {
+      fs.writeFileSync(tmpPath, updated, 'utf-8');
+      fs.renameSync(tmpPath, safePath);
+    } catch (writeErr) {
+      if (fs.existsSync(tmpPath)) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+      }
+      throw writeErr;
+    }
 
     return {
       success: true,

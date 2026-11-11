@@ -33,12 +33,16 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
     if (isOpen) {
-      setTimeout(() => inputRef.current?.focus(), 100);
+      timer = setTimeout(() => inputRef.current?.focus(), 100);
     } else {
       setInputText('');
       setAttachedImage(null);
     }
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [isOpen]);
 
   if (!isOpen) return null;

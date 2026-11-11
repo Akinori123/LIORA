@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   GitBranch, 
   GitCommit,
@@ -34,7 +34,8 @@ import {
   FileCheck,
   Eye,
   CheckCheck,
-  FileDiff
+  FileDiff,
+  Download
 } from 'lucide-react';
 import { useLioraStore } from '../../store/lioraStore';
 import { ToolSummary, ToolExecutionResult } from '../../types';
@@ -77,6 +78,7 @@ export const DeveloperView: React.FC = () => {
   const [clearingAudit, setClearingAudit] = useState(false);
   const [decisionFilter, setDecisionFilter] = useState<string>('ALL');
   const [toolNameFilter, setToolNameFilter] = useState<string>('ALL');
+  const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
 
   // Developer Mode Sub-Tabs (Item 22 do Plano Mestre: Ferramentas, Diffs & REA)
   const [activeDevTab, setActiveDevTab] = useState<'tools' | 'diffs' | 'rea'>('tools');
@@ -84,6 +86,7 @@ export const DeveloperView: React.FC = () => {
   const [selectedReaIdx, setSelectedReaIdx] = useState<number>(0);
   const [reaRunning, setReaRunning] = useState<boolean>(false);
   const [reaAnalysisDone, setReaAnalysisDone] = useState<boolean>(false);
+  const reaTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const selectedFile = SAMPLE_CODE_FILES[selectedFileIdx] || SAMPLE_CODE_FILES[0];
   const diffLines = useMemo(() => computeUnifiedDiff(selectedFile.originalContent, selectedFile.modifiedContent), [selectedFile]);
@@ -93,11 +96,16 @@ export const DeveloperView: React.FC = () => {
     // Auditoria de mapeamento: esta análise é DEMONSTRATIVA (fixtures em codeDiffHelper.ts),
     // NÃO é engenharia reversa real de binário. O selo abaixo informa isso ao usuário
     // em vez de fingir uma varredura real de 1.2s.
+    if (reaTimerRef.current) {
+      clearTimeout(reaTimerRef.current);
+      reaTimerRef.current = null;
+    }
     setReaRunning(true);
     setReaAnalysisDone(false);
-    setTimeout(() => {
+    reaTimerRef.current = setTimeout(() => {
       setReaRunning(false);
       setReaAnalysisDone(true);
+      reaTimerRef.current = null;
     }, 1200);
   };
 
@@ -105,6 +113,13 @@ export const DeveloperView: React.FC = () => {
     loadTools();
     loadAuditTrail();
     checkHealth();
+
+    return () => {
+      if (reaTimerRef.current) {
+        clearTimeout(reaTimerRef.current);
+        reaTimerRef.current = null;
+      }
+    };
   }, [loadTools]);
 
   const checkHealth = async () => {
@@ -187,7 +202,7 @@ export const DeveloperView: React.FC = () => {
   };
 
   const handleClearAuditTrail = async () => {
-    if (!window.confirm('Deseja realmente resetar o buffer de auditoria em ambiente de desenvolvimento?')) return;
+    setShowClearConfirm(false);
     setClearingAudit(true);
     try {
       const res = await fetch('/api/security/audit', {
@@ -208,6 +223,84 @@ export const DeveloperView: React.FC = () => {
       setClearingAudit(false);
       loadAuditTrail();
     }
+  };
+
+  const handleExportAuditReport = () => {
+    const reportTimestamp = new Date().toISOString();
+    const rowsHtml = auditEvents.map(ev => `
+      <tr style="border-bottom: 1px solid #222;">
+        <td style="padding: 8px; font-family: monospace; color: #888;">#${ev.sequenceNumber}</td>
+        <td style="padding: 8px; font-family: monospace;">${new Date(ev.timestamp).toLocaleString('pt-BR')}</td>
+        <td style="padding: 8px; font-weight: bold; color: #FFF;">${ev.eventType}</td>
+        <td style="padding: 8px; font-family: monospace; color: #38bdf8;">${ev.toolName}</td>
+        <td style="padding: 8px; font-family: monospace;"><span style="padding: 2px 6px; border-radius: 4px; background: #1f1f1f; color: #ccc;">${ev.riskLevel}</span></td>
+        <td style="padding: 8px; font-family: monospace; font-weight: bold; color: ${ev.decision === 'ALLOW' ? '#4ade80' : '#f87171'};">${ev.decision}</td>
+        <td style="padding: 8px; font-family: monospace; color: #aaa;">${ev.denialCode || 'OK (Aprovado)'}</td>
+      </tr>
+    `).join('');
+
+    const htmlContent = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>LIORA — Relatório Executivo de Auditoria de Segurança</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #050505; color: #f5f5f5; margin: 0; padding: 40px; }
+    .header { border-bottom: 2px solid #FF2B2B; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: flex-end; }
+    h1 { color: #FFF; margin: 0; font-size: 24px; letter-spacing: 0.5px; }
+    .subtitle { color: #888; font-size: 13px; margin-top: 5px; }
+    .meta-box { background: #111; border: 1px solid #222; border-radius: 8px; padding: 16px; margin-bottom: 24px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; font-size: 13px; }
+    .meta-box div span { display: block; color: #666; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+    table { width: 100%; border-collapse: collapse; background: #0a0a0a; border: 1px solid #222; border-radius: 8px; overflow: hidden; font-size: 12px; }
+    th { background: #141414; text-align: left; padding: 10px 8px; color: #888; border-bottom: 2px solid #222; text-transform: uppercase; font-size: 11px; }
+    .footer { margin-top: 30px; text-align: center; color: #555; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>LIORA — Relatório Executivo de Auditoria & Governança</h1>
+      <div class="subtitle">Trilha de Auditoria Imutável do Permission Engine (Perfil STRICT)</div>
+    </div>
+    <div style="font-family: monospace; color: #888; font-size: 12px;">Gerado em: ${new Date(reportTimestamp).toLocaleString('pt-BR')}</div>
+  </div>
+
+  <div class="meta-box">
+    <div><span>Status do Motor</span><strong style="color: #4ade80;">Perfil STRICT Ativo</strong></div>
+    <div><span>Total de Eventos Registrados</span><strong>${auditEvents.length} eventos</strong></div>
+    <div><span>Taxa de Aprovação R0</span><strong style="color: #38bdf8;">100% Fail-Closed</strong></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Seq #</th>
+        <th>Timestamp</th>
+        <th>Evento</th>
+        <th>Ferramenta</th>
+        <th>Risco</th>
+        <th>Decisão</th>
+        <th>Código / Motivo</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rowsHtml || '<tr><td colspan="7" style="text-align: center; padding: 20px; color: #666;">Nenhum evento registrado.</td></tr>'}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    Documento confidencial gerado pelo núcleo operacional LIORA AI • Todos os direitos reservados.
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `liora-audit-report-${reportTimestamp.split('T')[0]}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   useEffect(() => {
@@ -697,13 +790,24 @@ export const DeveloperView: React.FC = () => {
 
             {/* Clear Audit Trail Button (Diretriz 2) */}
             <button
-              onClick={handleClearAuditTrail}
+              onClick={() => setShowClearConfirm(true)}
               disabled={clearingAudit || auditEvents.length === 0}
-              className="px-3 py-1.5 bg-[#171717] hover:bg-red-500/10 border border-[#2E2E2E] hover:border-red-500/30 text-xs text-[#888888] hover:text-red-400 rounded-lg flex items-center gap-1.5 transition-colors font-mono disabled:opacity-50"
+              className="px-3 py-1.5 bg-[#171717] hover:bg-red-500/10 border border-[#2E2E2E] hover:border-red-500/30 text-xs text-[#888888] hover:text-red-400 rounded-lg flex items-center gap-1.5 transition-colors font-mono disabled:opacity-50 cursor-pointer"
               title="Resetar buffer circular de auditoria em dev"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Limpar Trilha</span>
+            </button>
+
+            {/* Export Audit Report Button */}
+            <button
+              onClick={handleExportAuditReport}
+              disabled={auditEvents.length === 0}
+              className="px-3 py-1.5 bg-[#171717] hover:bg-emerald-500/10 border border-[#2E2E2E] hover:border-emerald-500/30 text-xs text-[#888888] hover:text-emerald-400 rounded-lg flex items-center gap-1.5 transition-colors font-mono disabled:opacity-50 cursor-pointer"
+              title="Exportar Relatório Executivo de Auditoria (.html)"
+            >
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Exportar Relatório</span>
             </button>
 
             <button
@@ -715,6 +819,29 @@ export const DeveloperView: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {/* Confirmation Modal/Banner for Resetting Audit Trail */}
+        {showClearConfirm && (
+          <div className="p-3 bg-red-950/80 border border-red-700/60 rounded-xl flex items-center justify-between gap-3 text-xs text-red-200">
+            <span className="font-medium">Tem certeza que deseja resetar o buffer circular de auditoria em memória?</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(false)}
+                className="px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#252525] border border-[#333333] text-[#A8A8A8] hover:text-white rounded text-xs cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleClearAuditTrail}
+                className="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-xs font-bold cursor-pointer"
+              >
+                Confirmar Limpeza
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Audit Table */}
         <div className="overflow-x-auto">

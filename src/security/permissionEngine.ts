@@ -323,12 +323,14 @@ export class PermissionEngine implements IPermissionEngine {
 
     // Registro seguro de auditoria no logger injetado (sem segredos)
     try {
+      const toolDef = toolRegistry.getTool(toolName);
+      const resolvedRisk: ToolRiskLevel = toolDef?.riskLevel || 'R1';
       this.logger.logEvent({
         auditId: generateUUID(),
         timestamp: new Date().toISOString(),
         eventType: 'CONSENT_ISSUED',
         toolName,
-        riskLevel: 'R1',
+        riskLevel: resolvedRisk,
         decision: 'ALLOW',
         sessionId,
         parametersHash,
@@ -397,12 +399,14 @@ export class PermissionEngine implements IPermissionEngine {
 
     // Registro seguro de auditoria do consumo
     try {
+      const toolDef = toolRegistry.getTool(toolName);
+      const resolvedRisk: ToolRiskLevel = toolDef?.riskLevel || 'R1';
       this.logger.logEvent({
         auditId: generateUUID(),
         timestamp: new Date().toISOString(),
         eventType: 'CONSENT_CONSUMED',
         toolName,
-        riskLevel: 'R1',
+        riskLevel: resolvedRisk,
         decision: 'ALLOW',
         sessionId,
         parametersHash,

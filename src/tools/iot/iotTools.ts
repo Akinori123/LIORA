@@ -158,20 +158,17 @@ export const iotSendCommandTool: ToolDefinition<{
   execute: async ({ deviceId, command, parameters = {} }) => {
     let device = activeDevices.get(deviceId);
     if (!device) {
-      // Se for dispositivo de portão não pré-cadastrado, inicializa dinamicamente
-      if (deviceId.toLowerCase().includes('portao') || deviceId.toLowerCase().includes('gate')) {
-        device = {
-          id: deviceId,
-          name: `Portão (${deviceId})`,
-          type: 'gate',
-          state: 'CLOSED',
-          protocol: 'http_webhook',
-          isSimulated: true
-        };
-        activeDevices.set(deviceId, device);
-      } else {
-        throw new Error(`DEVICE_NOT_FOUND: Dispositivo '${deviceId}' não encontrado no registro IoT.`);
-      }
+      // Se o usuário tentar acionar um dispositivo não cadastrado, retorna resposta graciosa imediata
+      return {
+        success: false,
+        deviceId,
+        command,
+        noDeviceConfigured: true,
+        error: 'NO_IOT_DEVICE_CONFIGURED: Mestre, nenhum dispositivo IoT está associado a esta ação.',
+        message: 'Mestre, nenhum dispositivo IoT está associado a esta ação.',
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
     }
 
     const haKey = integrationsVault.getRawKey('svc-homeassistant');
@@ -199,20 +196,23 @@ export const iotSendCommandTool: ToolDefinition<{
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 4000);
-        const res = await fetch(device.endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${haKey}`
-          },
-          body: JSON.stringify({ command, parameters }),
-          signal: controller.signal
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          executedReal = true;
-        } else {
-          actuationError = `HTTP ${res.status} do atuador físico`;
+        try {
+          const res = await fetch(device.endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${haKey}`
+            },
+            body: JSON.stringify({ command, parameters }),
+            signal: controller.signal
+          });
+          if (res.ok) {
+            executedReal = true;
+          } else {
+            actuationError = `HTTP ${res.status} do atuador físico`;
+          }
+        } finally {
+          clearTimeout(timeout);
         }
       } catch (actErr: any) {
         executedReal = false;
@@ -255,6 +255,7 @@ export const iotSendCommandTool: ToolDefinition<{
       };
     }
 
+    const previousState = device.state;
     // Atualiza memória APENAS se a actuação foi real OU o dispositivo é de bancada
     device.state = newState;
     device.lastAction = `${command} (${new Date().toLocaleTimeString('pt-BR')})`;
@@ -282,7 +283,7 @@ export const iotSendCommandTool: ToolDefinition<{
       deviceId,
       deviceName: device.name,
       command,
-      previousState: device.state,
+      previousState,
       newState,
       isRealActuation: executedReal,
       simulated: isSim,

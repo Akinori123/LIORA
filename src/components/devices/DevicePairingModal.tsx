@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   Smartphone, 
@@ -100,6 +100,7 @@ function generateQrMatrix(token: string): boolean[][] {
 export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, onClose }) => {
   const { addDevice } = useLioraStore();
   const [activeTab, setActiveTab] = useState<TabType>('smartphone');
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   // Aba 1: Smartphone — PAREAMENTO REAL via PULO (QR → página web no celular → registro no PC)
   const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -135,10 +136,27 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   // Feedback geral
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
+  const timersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const scheduleTimer = (cb: () => void, ms: number) => {
+    const id = setTimeout(() => {
+      timersRef.current.delete(id);
+      cb();
+    }, ms);
+    timersRef.current.add(id);
+    return id;
+  };
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach(t => clearTimeout(t));
+      timersRef.current.clear();
+    };
+  }, []);
+
   const handlePairVehicle = (e: React.FormEvent) => {
     e.preventDefault();
     setIsPairingVehicle(true);
-    setTimeout(() => {
+    scheduleTimer(() => {
       // BUG FIX (honestidade de dados): o dispositivo pareado NÃO tem leitura real
       // verificada nesta fase — nenhum handshake OBD/PULO é executado. Gravar
       // isSimulated: false + isRealHardware: true fingia telemetria real. O nó
@@ -166,7 +184,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       devicesManager.addDevice(newCar);
       setIsPairingVehicle(false);
       setSuccessToast(`Nó veicular '${newCar.name}' registrado. Aguardando primeiro handshake PULO/OBD para ativar telemetria real.`);
-      setTimeout(() => {
+      scheduleTimer(() => {
         onClose();
       }, 2200);
     }, 800);
@@ -175,6 +193,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   // Timer de expiração do token
   useEffect(() => {
     if (!isOpen) {
+      timersRef.current.forEach(t => clearTimeout(t));
+      timersRef.current.clear();
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
       setSuccessToast(null);
       setTvPinInput('');
       setTvPinError(null);
@@ -190,7 +214,13 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       setExpiresIn((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    };
   }, [isOpen]);
 
   if (!isOpen) return null;
@@ -200,6 +230,11 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   const startRealPairing = async () => {
     setPairError(null);
     setPairStatus('waiting');
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
     try {
       const res = await fetch('/api/pair/token', { method: 'POST' });
       const data = await res.json();
@@ -210,14 +245,23 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
 
       // Abre EventSource para aguardar o celular confirmar
       const es = new EventSource(`/api/pair/wait?token=${encodeURIComponent(data.token)}`);
+      eventSourceRef.current = es;
+
       es.onmessage = (ev) => {
-        const payload = JSON.parse(ev.data);
+        let payload: any = null;
+        try {
+          payload = JSON.parse(ev.data);
+        } catch {
+          // Ignora mensagens de keep-alive ou dados mal formatados sem quebrar o fluxo
+          return;
+        }
         es.close();
-        if (payload.paired && payload.device) {
+        if (eventSourceRef.current === es) eventSourceRef.current = null;
+        if (payload?.paired && payload?.device) {
           addDevice(payload.device as DeviceEntity);
           setPairStatus('paired');
           setSuccessToast(`"${payload.device.name}" vinculado com sucesso via PULO!`);
-          setTimeout(onClose, 1600);
+          scheduleTimer(onClose, 1600);
         } else {
           setPairStatus('error');
           setPairError('Token expirado sem confirmação do celular.');
@@ -225,6 +269,9 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       };
       es.onerror = () => {
         es.close();
+        if (eventSourceRef.current === es) eventSourceRef.current = null;
+        setPairStatus(prev => prev === 'waiting' ? 'error' : prev);
+        setPairError(prev => prev || 'Conexão com o servidor de pareamento interrompida.');
       };
     } catch (err: any) {
       setPairStatus('error');
@@ -282,7 +329,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
 
     addDevice(newTvDevice);
     setSuccessToast(`Smart TV "${tv.name}" registrada. PIN aceito localmente — primeiro handshake real pendente.`);
-    setTimeout(() => {
+    scheduleTimer(() => {
       onClose();
     }, 1200);
   };
@@ -318,7 +365,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
 
     addDevice(newManualDev);
     setSuccessToast(`Nó PULO "${manualName.trim()}" registrado. Primeiro handshake pendente — telemetria aparecerá quando conectar de verdade.`);
-    setTimeout(() => {
+    scheduleTimer(() => {
       onClose();
     }, 1200);
   };
@@ -460,7 +507,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                         onClick={() => {
                           if (pairUrl) navigator.clipboard.writeText(pairUrl);
                           setCopied(true);
-                          setTimeout(() => setCopied(false), 2000);
+                          scheduleTimer(() => setCopied(false), 2000);
                         }}
                         className="px-3.5 py-2.5 bg-[#1C1C1C] hover:bg-[#252525] border border-[#333333] text-white rounded-xl transition-colors flex items-center gap-1.5 text-xs font-mono shrink-0"
                         title="Copiar link de pareamento"

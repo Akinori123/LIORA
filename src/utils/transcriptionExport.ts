@@ -244,7 +244,9 @@ export function downloadFile(content: string, filename: string, mimeType: string
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
-    document.body.removeChild(a);
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
     URL.revokeObjectURL(url);
   }, 100);
 }

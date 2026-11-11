@@ -458,6 +458,8 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     let lastInteractionTime = Date.now();
     // FIX W9: flag para evitar múltiplos setTimeout de retomada agendados
     let isHiddenPauseScheduled = false;
+    let hiddenPauseTimer: ReturnType<typeof setTimeout> | null = null;
+    let isUnmounted = false;
 
     const resetInteraction = () => {
       lastInteractionTime = Date.now();
@@ -467,7 +469,7 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
 
     // FIX W9: listener de visibilidade — retoma o RAF imediatamente quando a janela volta ao foco
     const handleVisibilityChange = () => {
-      if (!document.hidden && !isHiddenPauseScheduled) {
+      if (!isUnmounted && !document.hidden && !isHiddenPauseScheduled) {
         cancelAnimationFrame(animId);
         animId = requestAnimationFrame(animate);
       }
@@ -479,6 +481,7 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     let blackFrameCheckFrames = 0;
 
     const animate = () => {
+      if (isUnmounted) return;
       // BUG CRÍTICO CORRIGIDO: o requestAnimationFrame de re-agendamento foi
       // removido acidentalmente durante o FIX W9 (pausa em document.hidden),
       // matando o loop após o PRIMEIRO frame. Sintomas: Orbe congelado/preto
@@ -492,9 +495,10 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
       if (typeof document !== 'undefined' && document.hidden) {
         if (!isHiddenPauseScheduled) {
           isHiddenPauseScheduled = true;
-          setTimeout(() => {
+          hiddenPauseTimer = setTimeout(() => {
+            hiddenPauseTimer = null;
             isHiddenPauseScheduled = false;
-            if (typeof document !== 'undefined' && !document.hidden) {
+            if (!isUnmounted && typeof document !== 'undefined' && !document.hidden) {
               animId = requestAnimationFrame(animate);
             }
           }, 250);
@@ -634,7 +638,12 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     }
 
     return () => {
+      isUnmounted = true;
       cancelAnimationFrame(animId);
+      if (hiddenPauseTimer) {
+        clearTimeout(hiddenPauseTimer);
+        hiddenPauseTimer = null;
+      }
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (resizeObserver) resizeObserver.disconnect();
       window.removeEventListener('mousemove', handleMouseMove);
@@ -645,8 +654,6 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
       container.removeEventListener('mousedown', handleMouseDown);
       container.removeEventListener('mousemove', handleMouseMove);
       container.removeEventListener('mouseup', handleMouseUp);
-      container.removeEventListener('touchstart', handleTouchStart);
-      container.removeEventListener('touchend', handleTouchEnd);
       container.removeEventListener('touchstart', handleTouchStart);
       container.removeEventListener('touchend', handleTouchEnd);
       

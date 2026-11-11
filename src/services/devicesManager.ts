@@ -10,6 +10,7 @@ import { ToolRiskLevel } from '../tools/types';
 import { isTauriEnvironment, invokeTauri } from '../security/localBridge';
 import { auditLogger } from '../security/auditLogger';
 import { eventBus } from '../utils/eventBus';
+import { storageAdapter } from './storageAdapter';
 
 export const INITIAL_DEVICES_REGISTRY: DeviceEntity[] = [
   {
@@ -86,9 +87,10 @@ export class DevicesManager {
   }
 
   private persistUserDevices(): void {
+    const userList = Array.from(this.devices.values()).filter(d => d.id !== 'dev-1');
+    storageAdapter.save('devices', 'paired_list', userList).catch(() => {});
     if (typeof localStorage === 'undefined') return;
     try {
-      const userList = Array.from(this.devices.values()).filter(d => d.id !== 'dev-1');
       localStorage.setItem(USER_DEVICES_STORAGE_KEY, JSON.stringify(userList));
     } catch (err) {
       console.warn('[DevicesManager] Erro ao salvar dispositivos pareados:', err);

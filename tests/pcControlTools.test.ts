@@ -289,6 +289,13 @@ test('PCINPUT-02: pc_simulate_input hotkey valida combinações e rejeita invál
   const missing = await pcSimulateInputTool.execute({ action: 'hotkey' });
   assert.strictEqual(missing.success, false);
   assert.match(String(missing.error), /MISSING_KEYS|INPUT_UNSUPPORTED/);
+
+  const validCtrlS = await pcSimulateInputTool.execute({ action: 'hotkey', keys: 'ctrl+s' });
+  assert.strictEqual(validCtrlS.success, true);
+  assert.strictEqual(validCtrlS.action, 'hotkey');
+
+  const validAltF4 = await pcSimulateInputTool.execute({ action: 'hotkey', keys: 'alt+f4' });
+  assert.strictEqual(validAltF4.success, true);
 });
 
 test('PCINPUT-03: pc_simulate_input click exige coordenadas', async () => {

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -305,7 +305,7 @@ test('AUDIT 7: Simular uma resposta interrompida ou incompleta e confirmar que e
     assert.equal(msgs[0].sender, 'user');
     assert.equal(msgs[1].sender, 'assistant');
     assert.equal(msgs[1].status, 'cancelled', 'Mensagem deve ter status cancelled');
-    assert.match(msgs[1].text, /GeraÃ§Ã£o interrompida/);
+    assert.match(msgs[1].text, /Geração interrompida/);
 
     // Verificar se a mensagem cancelada foi salva corretamente no storage sem corromper o JSON
     const stored = loadHistory();

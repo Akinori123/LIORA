@@ -297,7 +297,19 @@ export const pcManageAppsTool: ToolDefinition<{
       if (/[;&|`$<>]/.test(app)) return { success: false, error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos no appPath.', simulated: false, timestamp: new Date().toISOString() };
       if (platform === 'win32') {
         const res = await runFile('cmd.exe', ['/C', 'start', '', app], 8000);
-        return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
+        if (res.code === 0) {
+          // Garante que a janela gerada ganhe foco no Windows (primeiro plano)
+          setTimeout(async () => {
+            try {
+              const baseName = app.replace(/\.[^/.]+$/, '').replace(/.*[/\\]/, '');
+              const psFocus = `\ufeff(New-Object -ComObject WScript.Shell).AppActivate('${baseName}')`;
+              await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psFocus], 3000);
+            } catch {
+              // ignore focus retry
+            }
+          }, 450);
+        }
+        return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado e focado.` : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
       }
       const res = await runFile(platform === 'darwin' ? 'open' : 'xdg-open', [app], 8000);
       return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}'.`, simulated: false, timestamp: new Date().toISOString() };
@@ -361,7 +373,8 @@ export const pcSimulateInputTool: ToolDefinition<{
   outputSchema: { type: 'object', requiredFields: ['success', 'action', 'simulated'] },
   execute: async (params) => {
     const platform = os.platform();
-    if (platform !== 'win32' && platform !== 'darwin') {
+    const isDryRun = isOsDryRun();
+    if (platform !== 'win32' && platform !== 'darwin' && !isDryRun) {
       return { success: false, error: 'INPUT_UNSUPPORTED: automação de input nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
     }
 
@@ -370,6 +383,9 @@ export const pcSimulateInputTool: ToolDefinition<{
       const x = Math.round(params.x ?? -1);
       const y = Math.round(params.y ?? -1);
       if (x < 0 || y < 0) return { success: false, error: 'MISSING_COORDS: informe x e y para o clique.', simulated: false, timestamp: new Date().toISOString() };
+      if (isDryRun) {
+        return { success: true, action: 'click', x, y, doubleClick: Boolean(params.doubleClick), simulated: true, timestamp: new Date().toISOString() };
+      }
       if (platform === 'win32') {
         // BOM UTF-8 + SetCursorPos funciona com coordenadas inteiras — sem problema
         const clicks = params.doubleClick ? 2 : 1;
@@ -406,6 +422,9 @@ Write-Output "OK"`;
     if (params.action === 'type') {
       const text = (params.text || '').slice(0, 1000);
       if (!text) return { success: false, error: 'MISSING_TEXT: informe o texto a digitar.', simulated: false, timestamp: new Date().toISOString() };
+      if (isDryRun) {
+        return { success: true, action: 'type', length: text.length, simulated: true, timestamp: new Date().toISOString() };
+      }
 
       // CORREÇÃO (race condition abrir app + digitar): após pc_manage_apps launch,
       // o processo demora para criar a janela e ganhar foco do Windows — teclas
@@ -472,38 +491,80 @@ while ((Get-Date) -lt $deadline) {
     if (params.action === 'hotkey') {
       const combo = (params.keys || '').trim().toLowerCase();
       if (!combo) return { success: false, error: 'MISSING_KEYS: informe a combinação (ex: "ctrl+s").', simulated: false, timestamp: new Date().toISOString() };
-      // Mapa SendKeys do Windows
-      const SENDKEYS_MAP: Record<string, string> = {
-        'ctrl': '^', 'control': '^', 'alt': '%', 'shift': '+', 'win': '^%',
+      
+      const MODIFIER_MAP: Record<string, string> = {
+        'ctrl': '^', 'control': '^', 'alt': '%', 'shift': '+', 'win': '^%'
+      };
+      const SPECIAL_KEY_MAP: Record<string, string> = {
         'enter': '{ENTER}', 'tab': '{TAB}', 'esc': '{ESC}', 'escape': '{ESC}',
         'backspace': '{BACKSPACE}', 'delete': '{DELETE}', 'del': '{DELETE}',
         'up': '{UP}', 'down': '{DOWN}', 'left': '{LEFT}', 'right': '{RIGHT}',
         'home': '{HOME}', 'end': '{END}', 'pageup': '{PGUP}', 'pagedown': '{PGDN}',
+        'space': ' ', 'printscreen': '{PRTSC}',
         'f1': '{F1}', 'f2': '{F2}', 'f3': '{F3}', 'f4': '{F4}', 'f5': '{F5}',
-        'space': ' ', 'printscreen': '{PRTSC}'
+        'f6': '{F6}', 'f7': '{F7}', 'f8': '{F8}', 'f9': '{F9}', 'f10': '{F10}',
+        'f11': '{F11}', 'f12': '{F12}'
       };
-      // Normaliza: "ctrl+s" -> "^s", "enter" -> "{ENTER}"
+
       const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
-      let sendKeys = '';
+      let modifiers = '';
+      let key = '';
       let valid = true;
+
       for (const p of parts) {
-        const mapped = SENDKEYS_MAP[p];
-        if (mapped === undefined) { valid = false; break; }
-        sendKeys += mapped;
+        if (MODIFIER_MAP[p]) {
+          modifiers += MODIFIER_MAP[p];
+        } else if (SPECIAL_KEY_MAP[p]) {
+          key += SPECIAL_KEY_MAP[p];
+        } else if (/^[a-z0-9]$/i.test(p)) {
+          key += p.toLowerCase();
+        } else if (/^f([1-9]|1[0-2])$/i.test(p)) {
+          key += `{${p.toUpperCase()}}`;
+        } else {
+          valid = false;
+          break;
+        }
       }
+
+      const sendKeys = modifiers + key;
       if (!valid || !sendKeys) {
-        return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f5.`, simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f12.`, simulated: false, timestamp: new Date().toISOString() };
       }
+
       if (platform === 'win32') {
         const ps = `$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${sendKeys.replace(/'/g, "''")}')`;
         const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 10000);
         return { success: res.code === 0, action: 'hotkey', keys: combo, message: res.code === 0 ? `Atalho '${combo}' enviado ao app focado.` : `Falha no atalho: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
       }
-      // macOS: converte para osascript key code básico (ctrl+cmd etc.)
-      const macCombo = combo.replace('ctrl', 'control').replace('win', 'command');
-      const script = `osascript -e 'tell application "System Events" to keystroke "" using {${macCombo.split('+').join(', ')}}'`;
-      const res = await runReal(script, 10000);
-      return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+
+      if (platform === 'darwin') {
+        const macModifiers: string[] = [];
+        if (combo.includes('ctrl') || combo.includes('control')) macModifiers.push('control down');
+        if (combo.includes('alt') || combo.includes('option')) macModifiers.push('option down');
+        if (combo.includes('shift')) macModifiers.push('shift down');
+        if (combo.includes('win') || combo.includes('cmd') || combo.includes('command')) macModifiers.push('command down');
+        
+        let script: string;
+        if (key && /^[a-z0-9]$/i.test(key)) {
+          const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
+          script = `osascript -e 'tell application "System Events" to keystroke "${key}"${modStr}'`;
+        } else if (key === '{ENTER}') {
+          const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
+          script = `osascript -e 'tell application "System Events" to key code 36${modStr}'`;
+        } else {
+          script = `osascript -e 'tell application "System Events" to keystroke "${key}"'`;
+        }
+        const res = await runReal(script, 10000);
+        return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      if (platform === 'linux') {
+        const linuxKey = combo.replace('ctrl', 'ctrl').replace('win', 'super');
+        const res = await runReal(`xdotool key ${JSON.stringify(linuxKey)} 2>/dev/null`, 10000);
+        return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      return { success: true, action: 'hotkey', keys: combo, simulated: true, timestamp: new Date().toISOString() };
     }
 
     return { success: false, error: `UNKNOWN_ACTION: '${params.action}' não suportada.`, simulated: false, timestamp: new Date().toISOString() };
@@ -524,10 +585,12 @@ const ALLOWED_SEARCH_ROOTS = [
 ];
 
 /** Garante que o caminho está dentro das raízes permitidas. Retorna null se OK, mensagem de erro se bloqueado. */
-function checkSafePath(p: string): string | null {
+function checkSafePath(p: string, allowHomeRoot = false): string | null {
   try {
     const resolved = path.resolve(p);
-    const allowed = ALLOWED_SEARCH_ROOTS.some(root => resolved.toLowerCase().startsWith(root.toLowerCase()));
+    const home = os.homedir();
+    const isExactHome = resolved.toLowerCase() === home.toLowerCase();
+    const allowed = (allowHomeRoot && isExactHome) || ALLOWED_SEARCH_ROOTS.some(root => resolved.toLowerCase().startsWith(root.toLowerCase()));
     if (!allowed) {
       return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raízes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
     }
@@ -584,7 +647,7 @@ export const fileSearchAndReadTool: ToolDefinition<{
     try {
       const maxResults = Math.max(1, Math.min(100, params.maxResults || 20));
       const root = params.rootPath ? path.resolve(params.rootPath) : defaultSearchRoot();
-      const scopeErr = checkSafePath(root);
+      const scopeErr = checkSafePath(root, true);
       if (scopeErr) {
         return { success: false, error: scopeErr, results: [], simulated: false, timestamp: new Date().toISOString() };
       }
@@ -714,7 +777,15 @@ export const fileWriteAndModifyTool: ToolDefinition<{
 
       if (op === 'delete') {
         const recursive = Boolean(params.recursive);
-        const stat = await fsp.stat(target);
+        let stat;
+        try {
+          stat = await fsp.stat(target);
+        } catch (statErr: any) {
+          if (statErr?.code === 'ENOENT') {
+            return { success: false, operation: op, error: `FILE_NOT_FOUND: '${path.basename(target)}' não foi encontrado no disco para exclusão.`, simulated: false, timestamp: new Date().toISOString() };
+          }
+          throw statErr;
+        }
         if (stat.isDirectory()) {
           if (!recursive) return { success: false, operation: op, error: 'DIRECTORY_NOT_EMPTY_MODE: use recursive=true para excluir pastas.', simulated: false, timestamp: new Date().toISOString() };
           await fsp.rm(target, { recursive: true, force: false });

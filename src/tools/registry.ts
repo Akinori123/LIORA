@@ -31,6 +31,7 @@ import {
 // CORREÇÃO 2: tools de navegação/mapas existiam mas NUNCA foram registradas —
 // o modelo (chat e Live) nunca as recebia, e pedia "mercado mais próximo" falhava.
 import { openGpsNavigationTool, mapsSearchPlacesTool } from './navigation/navigationActionTool';
+import { resolvePlaceAliasTool, savePlaceAliasTool } from './navigation/placeAliasTool';
 
 export const DEFAULT_TOOL_TIMEOUT_MS = 5000;
 
@@ -58,6 +59,8 @@ export class ToolRegistry {
     // CORREÇÃO 2: navegação e busca de locais agora declaradas ao modelo
     this.registerTool(openGpsNavigationTool);
     this.registerTool(mapsSearchPlacesTool);
+    this.registerTool(resolvePlaceAliasTool);
+    this.registerTool(savePlaceAliasTool);
   }
 
   /**

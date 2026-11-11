@@ -22,6 +22,8 @@ export const GlobalConsentOverlay: React.FC = () => {
   const rejectConsent = useLioraStore((s) => s.rejectConsent);
   const expireConsent = useLioraStore((s) => s.expireConsent);
   const isVoiceActive = useLioraStore((s) => s.isVoiceActive);
+  const activeTab = useLioraStore((s) => s.activeTab);
+  const conversationSubTab = useLioraStore((s) => s.conversationSubTab);
 
   const pendingRef = useRef(pendingConsent);
   useEffect(() => {
@@ -49,14 +51,17 @@ export const GlobalConsentOverlay: React.FC = () => {
       const isReject = /\b(cancelar?|recusar?|negar?|nao|parar?|stop)\b/.test(text);
 
       if (isApprove) {
+        speechService.stopSpeaking();
         approveConsent();
       } else if (isReject) {
+        speechService.stopSpeaking();
         rejectConsent();
       }
     });
 
     return () => {
       unsubscribe();
+      speechService.stopSpeaking();
     };
   }, [pendingConsent, isVoiceActive, approveConsent, rejectConsent]);
 
@@ -71,8 +76,6 @@ export const GlobalConsentOverlay: React.FC = () => {
 
   // Se o consentimento já está sendo mostrado dentro da TranscriptionView
   // (aba conversation ativa), não duplica o overlay global.
-  const activeTab = useLioraStore.getState().activeTab;
-  const conversationSubTab = useLioraStore.getState().conversationSubTab;
   if (activeTab === 'conversation' && conversationSubTab === 'transcription') {
     return null;
   }

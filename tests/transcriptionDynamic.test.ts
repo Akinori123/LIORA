@@ -169,8 +169,8 @@ test('T4 & T5: Mensagens interrompidas mantÃªm o conteÃºdo parcial e status 
     const msgs = useLioraStore.getState().messages;
     const assistantMsg = msgs[1];
     assert.equal(assistantMsg.status, 'cancelled');
-    assert.match(assistantMsg.text, /Texto que foi gerado atÃ© a parada/);
-    assert.match(assistantMsg.text, /GeraÃ§Ã£o interrompida pelo usuÃ¡rio/);
+    assert.match(assistantMsg.text, /Texto que foi gerado at/);
+    assert.match(assistantMsg.text, /Geração interrompida pelo usuário/);
 
     const event = messageToTranscriptionEvent(assistantMsg, 'Abort Test');
     assert.equal(event.status, 'cancelled');

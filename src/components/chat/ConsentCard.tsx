@@ -35,8 +35,15 @@ export const ConsentCard: React.FC<ConsentCardProps> = ({
   });
   const [isActioning, setIsActioning] = useState(false);
 
+  const onExpireRef = React.useRef(onExpire);
+  useEffect(() => {
+    onExpireRef.current = onExpire;
+  }, [onExpire]);
+
   useEffect(() => {
     if (pendingConsent.status !== 'PENDING') return;
+
+    setSecondsRemaining(Math.max(0, Math.floor((pendingConsent.expiresAt - Date.now()) / 1000)));
 
     const interval = setInterval(() => {
       const remaining = Math.max(0, Math.floor((pendingConsent.expiresAt - Date.now()) / 1000));
@@ -44,14 +51,12 @@ export const ConsentCard: React.FC<ConsentCardProps> = ({
 
       if (remaining <= 0) {
         clearInterval(interval);
-        if (onExpire) {
-          onExpire();
-        }
+        onExpireRef.current?.();
       }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [pendingConsent.expiresAt, pendingConsent.status, onExpire]);
+  }, [pendingConsent.expiresAt, pendingConsent.status]);
 
   const handleApprove = async () => {
     if (isActioning || pendingConsent.status !== 'PENDING') return;

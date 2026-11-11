@@ -81,7 +81,15 @@ class StorageAdapter {
       try {
         const results = await invokeTauri<Array<{ payloadJson: string }>>('load_sqlite_records', { table });
         if (Array.isArray(results)) {
-          return results.map(r => JSON.parse(r.payloadJson) as T);
+          const list: T[] = [];
+          for (const r of results) {
+            try {
+              if (r?.payloadJson) {
+                list.push(JSON.parse(r.payloadJson) as T);
+              }
+            } catch {}
+          }
+          return list;
         }
       } catch (err) {
         console.warn(`[StorageAdapter] Erro ao ler SQLite na tabela '${table}':`, err);
@@ -95,7 +103,9 @@ class StorageAdapter {
         const raw = localStorage.getItem(storageKey);
         if (raw) {
           const records: Record<string, StorageRecord<T>> = JSON.parse(raw);
-          return Object.values(records).map(r => r.payload);
+          return Object.values(records)
+            .map(r => r?.payload)
+            .filter((p): p is T => p !== undefined && p !== null);
         }
       } catch (e) {
         console.warn(`[StorageAdapter] Erro ao ler tabela '${table}':`, e);

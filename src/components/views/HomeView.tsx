@@ -10,6 +10,7 @@ import { OrbErrorBoundary } from '../OrbErrorBoundary';
 import { devicesManager } from '../../services/devicesManager';
 import { integrationsVault } from '../../services/integrationsVault';
 import { speechService } from '../../services/speechService';
+import { voiceLiveClient } from '../../services/voiceLiveClient';
 import { 
   Send, 
   Mic, 
@@ -120,6 +121,21 @@ export const HomeView: React.FC = () => {
     }
   };
 
+  // Helper unificado para contar integrações ativas sem duplicidade
+  const updateActiveIntegrationsCount = (geminiConfigured: boolean, openRouterConfigured: boolean) => {
+    const integrations = integrationsVault.getServices();
+    const connectedServiceIds = new Set(
+      integrations.filter((i) => i.status === 'CONNECTED' || i.status === 'DEGRADED').map(i => i.id)
+    );
+    if (geminiConfigured) {
+      connectedServiceIds.add('svc-gemini');
+    }
+    if (openRouterConfigured) {
+      connectedServiceIds.add('svc-openrouter');
+    }
+    setActiveIntegrationsCount(connectedServiceIds.size);
+  };
+
   // Fetch status of keys from backend
   const loadApiKeyStatus = async () => {
     try {
@@ -129,12 +145,15 @@ export const HomeView: React.FC = () => {
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
+        const geminiConfigured = Boolean(data.gemini?.isConfigured);
+        const openRouterConfigured = Boolean(data.openrouter?.isConfigured);
         setApiKeyStatus({
-          geminiConfigured: Boolean(data.gemini?.isConfigured),
+          geminiConfigured,
           geminiMasked: data.gemini?.masked || '',
-          openRouterConfigured: Boolean(data.openrouter?.isConfigured),
+          openRouterConfigured,
           openRouterMasked: data.openrouter?.masked || ''
         });
+        updateActiveIntegrationsCount(geminiConfigured, openRouterConfigured);
       }
     } catch {
       // Offline fallback
@@ -149,17 +168,34 @@ export const HomeView: React.FC = () => {
         setCpuUsage(t.cpuUsagePercent);
         setRamUsage(t.memoryUsagePercent);
       }
-      const integrations = integrationsVault.getServices();
-      setActiveIntegrationsCount(integrations.filter((i) => i.status === 'CONNECTED').length);
+      updateActiveIntegrationsCount(apiKeyStatus.geminiConfigured, apiKeyStatus.openRouterConfigured);
     } catch {
       // Fallback
     }
+  };
+
+  const wsTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const notificationTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const scanTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const copiedTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const apiKeySaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Helper para exibir notificações com timer rastreado e seguro
+  const showIntentNotice = (msg: string, ms: number = 3500) => {
+    setIntentNotification(msg);
+    if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+    notificationTimerRef.current = setTimeout(() => {
+      setIntentNotification(null);
+    }, ms);
   };
 
   // Auditoria de mapeamento: teste REAL de conectividade do canal WebSocket /ws/voice.
   // Abre conexão efêmera, aguarda TRANSPORT_CONNECTED e fecha — resultado honesto.
   const handleTestLiveWs = () => {
     if (wsTestResult === 'testing') return;
+    if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
+    if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+
     setWsTestResult('testing');
     setIntentNotification('Testando canal de voz em tempo real (WebSocket /ws/voice)...');
 
@@ -171,7 +207,8 @@ export const HomeView: React.FC = () => {
       setIntentNotification(ok
         ? `Canal Live WS conectado e verificado (${wsEndpoint}).`
         : `Canal Live WS indisponível (${wsEndpoint}). Verifique se o servidor LIORA está rodando.`);
-      setTimeout(() => {
+      if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+      notificationTimerRef.current = setTimeout(() => {
         setIntentNotification(null);
         setWsTestResult('idle');
       }, 4000);
@@ -186,16 +223,15 @@ export const HomeView: React.FC = () => {
       probe = new WebSocket(wsUrl);
       probe.binaryType = 'arraybuffer';
 
-      const timeoutId = setTimeout(() => finish(false), 5000);
+      wsTimerRef.current = setTimeout(() => finish(false), 5000);
 
       probe.onopen = () => {
-        clearTimeout(timeoutId);
-        // Confirmado: conexão aberta — mensagem TRANSPORT_CONNECTED opcional
+        if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
         finish(true);
         try { probe?.close(); } catch {}
       };
       probe.onerror = () => {
-        clearTimeout(timeoutId);
+        if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
         finish(false);
       };
     } catch {
@@ -207,7 +243,14 @@ export const HomeView: React.FC = () => {
     loadApiKeyStatus();
     loadTelemetry();
     const interval = setInterval(loadTelemetry, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
+      if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      if (apiKeySaveTimerRef.current) clearTimeout(apiKeySaveTimerRef.current);
+    };
   }, []);
 
   // Escuta nível de áudio do microfone para animar a Orb 3D em tempo real
@@ -245,7 +288,9 @@ export const HomeView: React.FC = () => {
     setPromptInput(val);
 
     if (orbState === 'SPEAKING' && val.length > 0) {
-      // Trigger Barge-in
+      // Trigger Barge-in: interrompe a reprodução de áudio imediatamente
+      speechService.stopSpeaking();
+      voiceLiveClient.interrupt();
       setOrbState('LISTENING');
       addActivityLog({
         category: 'system',
@@ -253,7 +298,7 @@ export const HomeView: React.FC = () => {
         details: 'Voz interrompida pelo usuário via digitação instantânea.',
         riskLevel: 'R0',
         status: 'success',
-        simulated: true
+        simulated: false
       });
     }
   };
@@ -270,10 +315,10 @@ export const HomeView: React.FC = () => {
       setIntentNotification('Iniciando varredura analítica de hardware e workspace...');
       setOrbState('EXECUTING');
       await loadTelemetry();
-      setTimeout(() => {
+      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+      scanTimerRef.current = setTimeout(() => {
         setOrbState('IDLE');
-        setIntentNotification('Varredura concluída com sucesso.');
-        setTimeout(() => setIntentNotification(null), 3500);
+        showIntentNotice('Varredura concluída com sucesso.', 3500);
       }, 1200);
       return;
     }
@@ -282,8 +327,7 @@ export const HomeView: React.FC = () => {
     if (clean.startsWith('/clear')) {
       setPromptInput('');
       clearMessages();
-      setIntentNotification('Histórico de conversas da sessão atual foi limpo.');
-      setTimeout(() => setIntentNotification(null), 3000);
+      showIntentNotice('Histórico de conversas da sessão atual foi limpo.', 3000);
       return;
     }
 
@@ -292,8 +336,7 @@ export const HomeView: React.FC = () => {
       const cmd = clean.replace('/exec', '').trim();
       setPromptInput('');
       if (!cmd) {
-        setIntentNotification('Uso: /exec <comando>. Ex: /exec git status');
-        setTimeout(() => setIntentNotification(null), 3500);
+        showIntentNotice('Uso: /exec <comando>. Ex: /exec git status', 3500);
         return;
       }
       setOrbState('EXECUTING');
@@ -301,16 +344,16 @@ export const HomeView: React.FC = () => {
       try {
         const result = await executeTool('system_exec_sandbox', { command: cmd });
         setOrbState(result.success ? 'IDLE' : 'ERROR');
-        setIntentNotification(
+        showIntentNotice(
           result.success
             ? `Saída:\n${String((result.data as any)?.stdout || '(sem saída)').slice(0, 400)}`
-            : `Falhou: ${result.error || 'erro desconhecido'}`
+            : `Falhou: ${result.error || 'erro desconhecido'}`,
+          6000
         );
       } catch (err: any) {
         setOrbState('ERROR');
-        setIntentNotification(`Erro: ${err?.message || 'falha de execução'}`);
+        showIntentNotice(`Erro: ${err?.message || 'falha de execução'}`, 6000);
       }
-      setTimeout(() => setIntentNotification(null), 6000);
       return;
     }
 
@@ -354,7 +397,8 @@ export const HomeView: React.FC = () => {
     if (!lastMsg?.text) return;
     navigator.clipboard.writeText(lastMsg.text);
     setCopiedText(true);
-    setTimeout(() => setCopiedText(false), 2000);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopiedText(false), 2000);
   };
 
   // Save API key to .env via backend endpoint
@@ -386,7 +430,8 @@ export const HomeView: React.FC = () => {
         }
         setApiKeySaveStatus(`Sucesso: ${keyName} gravada e ativa no Cofre com sucesso.`);
         await loadApiKeyStatus();
-        setTimeout(() => setApiKeySaveStatus(null), 4000);
+        if (apiKeySaveTimerRef.current) clearTimeout(apiKeySaveTimerRef.current);
+        apiKeySaveTimerRef.current = setTimeout(() => setApiKeySaveStatus(null), 4000);
       } else {
         setApiKeySaveStatus(`Erro: ${data.error || 'Falha ao salvar chave.'}`);
       }

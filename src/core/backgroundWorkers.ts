@@ -252,6 +252,9 @@ class BackgroundWorkerManager {
   private async runShell(taskId: string, task: BackgroundTask, signal: AbortSignal): Promise<void> {
     const cmd = String(task.params.command);
     const cwd = String(task.params.cwd || path.join(os.homedir(), '.liora', 'workspace'));
+    if (!fs.existsSync(cwd)) {
+      try { fs.mkdirSync(cwd, { recursive: true }); } catch { /* ignore */ }
+    }
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(cmd, { shell: true, cwd, windowsHide: true, signal });
