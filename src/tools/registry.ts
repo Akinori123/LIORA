@@ -31,6 +31,7 @@ import {
 // CORREÇÃO 2: tools de navegação/mapas existiam mas NUNCA foram registradas —
 // o modelo (chat e Live) nunca as recebia, e pedia "mercado mais próximo" falhava.
 import { openGpsNavigationTool, mapsSearchPlacesTool } from './navigation/navigationActionTool';
+import { resolvePlaceAliasTool, savePlaceAliasTool } from './navigation/placeAliasTool';
 
 export const DEFAULT_TOOL_TIMEOUT_MS = 5000;
 
@@ -58,6 +59,8 @@ export class ToolRegistry {
     // CORREÇÃO 2: navegação e busca de locais agora declaradas ao modelo
     this.registerTool(openGpsNavigationTool);
     this.registerTool(mapsSearchPlacesTool);
+    this.registerTool(resolvePlaceAliasTool);
+    this.registerTool(savePlaceAliasTool);
   }
 
   /**
@@ -175,11 +178,15 @@ export class ToolRegistry {
       };
     }
 
+    // CORREÇÃO (falso timeout em tools nativas): respeita o timeout declarado
+    // pela própria ferramenta (timeoutMs) — zip/screenshot/exec real precisam
+    // de mais que o padrão de 5s.
+    const effectiveTimeoutMs = tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
     let timer: NodeJS.Timeout | null = null;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        reject(new Error(`Tempo limite de execução excedido (${DEFAULT_TOOL_TIMEOUT_MS}ms).`));
-      }, DEFAULT_TOOL_TIMEOUT_MS);
+        reject(new Error(`Tempo limite de execução excedido (${effectiveTimeoutMs}ms).`));
+      }, effectiveTimeoutMs);
     });
 
     try {

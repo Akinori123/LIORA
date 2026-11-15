@@ -91,16 +91,30 @@ class BackgroundWorkerManager {
     }
   }
 
-  private async persist(): Promise<void> {
-    try {
-      await fsp.mkdir(path.dirname(TASKS_FILE), { recursive: true });
-      const list = Array.from(this.tasks.values()).slice(0, MAX_TASKS_HISTORY);
-      const tmp = `${TASKS_FILE}.tmp`;
-      await fsp.writeFile(tmp, JSON.stringify(list, null, 2), 'utf8');
-      await fsp.rename(tmp, TASKS_FILE);
-    } catch (err) {
-      console.warn('[BackgroundWorkers] Falha ao persistir tarefas:', err);
-    }
+  /** Mutex de persistência: serializa chamadas concorrentes a persist().
+   * BUG FIX: múltiplas tarefas finalizam/insistem ao mesmo tempo e todas usariam
+   * o MESMO arquivo .tmp — o rename do segundo corrompia ou falhava com EPERM/ENOENT
+   * no Windows. Encadeamos as escritas em fila única. */
+  private persistChain: Promise<void> = Promise.resolve();
+  private persistPending = false;
+
+  private persist(): Promise<void> {
+    // Coalescência: se já há uma escrita pendente na fila, não empilha outra
+    if (this.persistPending) return this.persistChain;
+    this.persistPending = true;
+    this.persistChain = this.persistChain.then(async () => {
+      this.persistPending = false;
+      try {
+        await fsp.mkdir(path.dirname(TASKS_FILE), { recursive: true });
+        const list = Array.from(this.tasks.values()).slice(0, MAX_TASKS_HISTORY);
+        const tmp = `${TASKS_FILE}.${process.pid}.tmp`;
+        await fsp.writeFile(tmp, JSON.stringify(list, null, 2), 'utf8');
+        await fsp.rename(tmp, TASKS_FILE);
+      } catch (err) {
+        console.warn('[BackgroundWorkers] Falha ao persistir tarefas:', err);
+      }
+    }).catch(() => { /* nunca quebra a cadeia */ });
+    return this.persistChain;
   }
 
   private log(taskId: string, line: string): void {
@@ -252,6 +266,9 @@ class BackgroundWorkerManager {
   private async runShell(taskId: string, task: BackgroundTask, signal: AbortSignal): Promise<void> {
     const cmd = String(task.params.command);
     const cwd = String(task.params.cwd || path.join(os.homedir(), '.liora', 'workspace'));
+    if (!fs.existsSync(cwd)) {
+      try { fs.mkdirSync(cwd, { recursive: true }); } catch { /* ignore */ }
+    }
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(cmd, { shell: true, cwd, windowsHide: true, signal });
@@ -263,6 +280,14 @@ class BackgroundWorkerManager {
       child.on('error', (err) => reject(err));
       child.on('close', (code) => {
         task.exitCode = code ?? -1;
+        // BUG FIX (race com cancel()): se a tarefa foi cancelada enquanto o
+        // processo rodava, o evento 'close' dispara depois do cancelamento e
+        // sobrescrevia o status 'cancelled' de volta para 'completed'/'failed',
+        // emitindo um evento falso ao frontend. Só atualizamos se ainda 'running'.
+        if (task.status !== 'running') {
+          resolve();
+          return;
+        }
         if (code === 0) {
           task.status = 'completed';
           task.result = { exitCode: 0, message: 'Comando concluído com sucesso.' };
@@ -300,7 +325,12 @@ class BackgroundWorkerManager {
         visited++;
         // Progresso incremental a cada 500 itens
         if (visited % 500 === 0) {
-          task.progress = Math.min(95, Math.round((visited % 5000) / 50));
+          // BUG FIX: a fórmula antiga usava módulo (visited % 5000), o que fazia o
+          // progresso REGREDIR a 0 a cada 5.000 itens. Agora é monotônico com teto 95
+          // (100% é reservado para a conclusão real). Converte em ~2% a cada 100 itens.
+          // ?? 0: `progress` inicia indefinido e Math.max(undefined, x) = NaN,
+          // o que propagava NaN% para a UI em toda varredura.
+          task.progress = Math.min(95, Math.max(task.progress ?? 0, Math.round(visited / 50)));
           this.log(taskId, `Varridos ${visited} itens... (${files} arquivos, ${dirs} pastas)`);
           this.emit(taskId, 'progress', { visited, files, dirs, totalBytes });
         }
@@ -329,6 +359,10 @@ class BackgroundWorkerManager {
     task.status = 'completed';
     task.result = { sleptMs: ms };
     task.finishedAt = new Date().toISOString();
+    // BUG FIX: 'completed' nunca era emitido nesta tarefa — o frontend só recebia
+    // 'progress' final e nunca a notificação de conclusão (shell/file_scan emitem).
+    this.log(taskId, 'Tarefa de espera concluída.');
+    this.emit(taskId, 'completed', { sleptMs: ms });
   }
 
   /** Cancela uma tarefa (seguro: mata processo e marca cancelled) */

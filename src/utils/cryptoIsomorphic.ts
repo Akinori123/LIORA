@@ -25,27 +25,12 @@ const K = [
 ];
 
 export function sha256Sync(str: string): string {
-  // UTF-8 encode
-  const utf8: number[] = [];
-  for (let i = 0; i < str.length; i++) {
-    let code = str.charCodeAt(i);
-    if (code < 0x80) {
-      utf8.push(code);
-    } else if (code < 0x800) {
-      utf8.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    } else if (code < 0xd800 || code >= 0xe000) {
-      utf8.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-    } else {
-      i++;
-      code = 0x10000 + (((code & 0x3ff) << 10) | (str.charCodeAt(i) & 0x3ff));
-      utf8.push(
-        0xf0 | (code >> 18),
-        0x80 | ((code >> 12) & 0x3f),
-        0x80 | ((code >> 6) & 0x3f),
-        0x80 | (code & 0x3f)
-      );
-    }
-  }
+  return sha256FromBytes(utf8Bytes(str));
+}
+
+/** SHA-256 (FIPS 180-4) sobre BYTES puros — usado pelo HMAC e por sha256Sync */
+export function sha256FromBytes(inputBytes: Uint8Array | number[]): string {
+  const utf8: number[] = Array.from(inputBytes as number[]);
 
   const bitLength = utf8.length * 8;
   utf8.push(0x80);
@@ -158,43 +143,59 @@ export function generateRandomHex(byteCount = 32): string {
 }
 
 /**
+ * Codifica string como bytes UTF-8 (correção criptográfica: a versão antiga usava
+ * charCodeAt & 0xff (Latin1), o que corrompia chaves/mensagens com ç/ã/é/emoji e
+ * gerava HMACs DIFERENTES do padrão RFC 2104 — invalidando assinaturas de webhook
+ * e a verificação de integridade do cofre. Agora usa TextEncoder (isomórfico).
+ */
+function utf8Bytes(str: string): number[] {
+  if (typeof TextEncoder !== 'undefined') {
+    return Array.from(new TextEncoder().encode(str));
+  }
+  // Fallback raro (sem TextEncoder): escape/décodeURI trick
+  return Array.from(unescape(encodeURIComponent(str))).map(c => c.charCodeAt(0));
+}
+
+/**
  * Calcula HMAC SHA-256 determinístico de forma isomórfica (RFC 2104).
+ * CORRIGIDO: opera em BYTES UTF-8 (não em chars Latin1) — bate byte a byte com
+ * crypto.createHmac('sha256', key).update(msg, 'utf8') do Node.
  */
 export function computeHmacSha256Sync(secret: string, message: string): string {
   const blockSize = 64;
-  let keyBytes: number[] = [];
 
-  const secretUtf8: number[] = [];
-  for (let i = 0; i < secret.length; i++) {
-    secretUtf8.push(secret.charCodeAt(i) & 0xff);
+  let keyBytes: number[] = utf8Bytes(secret);
+  if (keyBytes.length > blockSize) {
+    // Chave maior que o bloco: H(K) — hash direto sobre os BYTES (RFC 2104)
+    const hex = sha256FromBytes(keyBytes);
+    keyBytes = [];
+    for (let i = 0; i < hex.length; i += 2) keyBytes.push(parseInt(hex.substr(i, 2), 16));
   }
 
-  if (secretUtf8.length > blockSize) {
-    const hashed = sha256Sync(secret);
-    for (let i = 0; i < hashed.length; i += 2) {
-      keyBytes.push(parseInt(hashed.substr(i, 2), 16));
-    }
-  } else {
-    keyBytes = [...secretUtf8];
-  }
-
-  while (keyBytes.length < blockSize) {
-    keyBytes.push(0);
-  }
+  while (keyBytes.length < blockSize) keyBytes.push(0);
 
   const oPad = keyBytes.map((b) => b ^ 0x5c);
   const iPad = keyBytes.map((b) => b ^ 0x36);
 
-  const innerStr = String.fromCharCode(...iPad) + message;
-  const innerHash = sha256Sync(innerStr);
+  const messageBytes = utf8Bytes(message);
+  // Concatenação em bytes (não chars UTF-16): iPad + message
+  const innerInput = new Uint8Array(blockSize + messageBytes.length);
+  innerInput.set(iPad, 0);
+  innerInput.set(messageBytes, blockSize);
+  const innerHex = sha256FromBytes(innerInput);
 
   const innerHashBytes: number[] = [];
-  for (let i = 0; i < innerHash.length; i += 2) {
-    innerHashBytes.push(parseInt(innerHash.substr(i, 2), 16));
-  }
+  for (let i = 0; i < innerHex.length; i += 2) innerHashBytes.push(parseInt(innerHex.substr(i, 2), 16));
 
-  const outerStr = String.fromCharCode(...oPad) + String.fromCharCode(...innerHashBytes);
-  return sha256Sync(outerStr);
+  const outerInput = new Uint8Array(blockSize + 32);
+  outerInput.set(oPad, 0);
+  outerInput.set(innerHashBytes, blockSize);
+  return sha256FromBytes(outerInput);
+}
+
+/** SHA-256 sobre BYTES puros — exporta para uso do HMAC */
+function sha256Bytes(bytes: Uint8Array | number[]): string {
+  return sha256FromBytes(bytes);
 }
 
 

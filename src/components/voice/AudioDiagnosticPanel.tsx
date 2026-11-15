@@ -51,6 +51,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
   const [isTestingAudio, setIsTestingAudio] = useState(false);
   const peakRef = useRef<number>(0);
   const peakTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const testNoticeTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Intervalo de atualização de telemetria em tempo real (10Hz)
   useEffect(() => {
@@ -59,7 +60,10 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
       setLiveDiag(voiceLiveClient.getDiagnosticData());
     }, 100);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (testNoticeTimerRef.current) clearTimeout(testNoticeTimerRef.current);
+    };
   }, []);
 
   // Monitora nível de áudio e espectro de frequência com inscrição estável
@@ -103,7 +107,8 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
     await speechService.requestMicrophonePermission();
     setSpeechDiag(speechService.getDiagnosticData());
     setTestNotice('AudioContext e microfone reativados com sucesso.');
-    setTimeout(() => setTestNotice(null), 3000);
+    if (testNoticeTimerRef.current) clearTimeout(testNoticeTimerRef.current);
+    testNoticeTimerRef.current = setTimeout(() => setTestNotice(null), 3000);
   };
 
   const handleTestTtsSound = async () => {
@@ -118,7 +123,8 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
         () => {
           setIsTestingAudio(false);
           setTestNotice('Teste de reprodução concluído com sucesso.');
-          setTimeout(() => setTestNotice(null), 3000);
+          if (testNoticeTimerRef.current) clearTimeout(testNoticeTimerRef.current);
+          testNoticeTimerRef.current = setTimeout(() => setTestNotice(null), 3000);
         }
       );
     } catch (e: any) {

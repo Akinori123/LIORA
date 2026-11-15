@@ -118,9 +118,15 @@ test('INT-04: Gestão de Escopos e Auto-Refresh de Tokens OAuth', async () => {
   assert.strictEqual(tokenRefreshedEvent, true, 'Deve publicar evento TOKEN_REFRESHED no EventBus');
 });
 
-test('INT-05: Persistência Cifrada do Vault no Armazenamento Seguro', () => {
+test('INT-05: Persistência Cifrada do Vault no Armazenamento Seguro', async () => {
   const bus = new EventBus();
   const vault = new IntegrationsVault(bus);
+
+  // CORREÇÃO (teste dependente de ambiente): o teste assumia um GEMINI_API_KEY
+  // configurado no .env da máquina do desenvolvedor — em CI/máquina limpa ele
+  // falhava. Semear a chave explicitamente torna o teste determinístico e valida
+  // o que realmente interessa aqui: a persistência cifrada e a restauração.
+  await vault.connectService('svc-gemini', 'AIzaSyTestPersistenceKey1234567890', { customLatencyMs: 25 });
 
   // Salvar no armazenamento seguro
   vault.saveVaultToStorage();

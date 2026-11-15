@@ -10,6 +10,7 @@ import { ToolRiskLevel } from '../tools/types';
 import { isTauriEnvironment, invokeTauri } from '../security/localBridge';
 import { auditLogger } from '../security/auditLogger';
 import { eventBus } from '../utils/eventBus';
+import { storageAdapter } from './storageAdapter';
 
 export const INITIAL_DEVICES_REGISTRY: DeviceEntity[] = [
   {
@@ -86,9 +87,10 @@ export class DevicesManager {
   }
 
   private persistUserDevices(): void {
+    const userList = Array.from(this.devices.values()).filter(d => d.id !== 'dev-1');
+    storageAdapter.save('devices', 'paired_list', userList).catch(() => {});
     if (typeof localStorage === 'undefined') return;
     try {
-      const userList = Array.from(this.devices.values()).filter(d => d.id !== 'dev-1');
       localStorage.setItem(USER_DEVICES_STORAGE_KEY, JSON.stringify(userList));
     } catch (err) {
       console.warn('[DevicesManager] Erro ao salvar dispositivos pareados:', err);
@@ -241,12 +243,12 @@ export class DevicesManager {
         if (hw && typeof hw.cpu_usage_percent === 'number') {
           const nowIso = hw.timestamp || new Date().toISOString();
           const telemetry: DeviceTelemetry = {
-            cpuUsagePercent: Number(hw.cpu_usage_percent.toFixed(1)),
-            memoryUsagePercent: Number(hw.memory_usage_percent.toFixed(1)),
+            cpuUsagePercent: Number(hw.cpu_usage_percent?.toFixed(1) ?? 0),
+            memoryUsagePercent: Number(hw.memory_usage_percent?.toFixed(1) ?? 0),
             memoryFreeBytes: hw.memory_free_bytes,
             memoryTotalBytes: hw.memory_total_bytes,
-            diskUsagePercent: Number(hw.disk_usage_percent.toFixed(1)),
-            batteryLevel: hw.battery_level !== undefined ? Math.round(hw.battery_level) : undefined,
+            diskUsagePercent: typeof hw.disk_usage_percent === 'number' ? Number(hw.disk_usage_percent.toFixed(1)) : undefined,
+            batteryLevel: typeof hw.battery_level === 'number' ? Math.round(hw.battery_level) : undefined,
             isCharging: hw.is_charging ?? true,
             temperatureCelsius: hw.temperature_celsius,
             uptimeSeconds: hw.uptime_seconds,

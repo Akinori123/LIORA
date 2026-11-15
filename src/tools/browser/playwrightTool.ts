@@ -98,6 +98,7 @@ export async function closeAllBrowserSessions(): Promise<void> {
 if (typeof process !== 'undefined') {
   process.on('exit', () => { for (const s of sessions.values()) { try { s.browser.close(); } catch { /* ignora */ } } });
   process.on('SIGTERM', async () => { await closeAllBrowserSessions(); process.exit(0); });
+  process.on('SIGINT', async () => { await closeAllBrowserSessions(); process.exit(0); });
 }
 
 /** Obtém sessão existente ou lança erro */
@@ -191,11 +192,12 @@ export const browserOpenUrlTool: ToolDefinition<{ url: string; sessionId?: strin
 
     // Tenta Chromium headless shell, depois msedge como fallback
     let browser: import('playwright').Browser;
+    const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
     try {
-      browser = await pw.chromium.launch({ headless: true, timeout: 15000 });
+      browser = await pw.chromium.launch({ headless: true, args: launchArgs, timeout: 15000 });
     } catch {
       try {
-        browser = await pw.chromium.launch({ channel: 'msedge', headless: true, timeout: 15000 });
+        browser = await pw.chromium.launch({ channel: 'msedge', headless: true, args: launchArgs, timeout: 15000 });
       } catch (e2) {
         throw new Error(`BROWSER_LAUNCH_FAILED: Não foi possível iniciar o browser. ${(e2 as Error).message}`);
       }

@@ -20,7 +20,7 @@ import os from 'os';
 import path from 'path';
 import { ToolDefinition } from './types';
 // NÚCLEO DE CONTROLE TOTAL DO PC: visão, apps/inputs e arquivos (R0-R2)
-import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool } from './pcControlTools';
+import { pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool } from './pcControlTools';
 // AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — R2 com consentimento HMAC
 import { webBrowserAgentTool } from './web/browserAgentTool';
 // FASE 2: PRODUTIVIDADE — E-mail IMAP/SMTP e Calendário local (R1 leitura, R2 escrita)
@@ -35,6 +35,7 @@ import { semanticMemoryService } from '../services/memory/semanticMemoryService'
 import { allCodingTools } from './coding/codingTools';
 import { allIotTools } from './iot/iotTools';
 import { openGpsNavigationTool, mapsSearchPlacesTool, launchGpsNavigation } from './navigation/navigationActionTool';
+import { resolvePlaceAliasTool, savePlaceAliasTool } from './navigation/placeAliasTool';
 
 /**
  * Resolve a raiz do workspace respeitando a configuração do usuário
@@ -85,7 +86,9 @@ function resolveSafeWorkspacePath(rawPath: string): string {
   }
   const root = ensureWorkspaceRoot();
   const resolved = path.resolve(root, trimmed);
-  if (!resolved.startsWith(root)) {
+  // Prefixo simples (startsWith) permitiria pastas irmãs (ex: root=ws, alvo=ws-evil);
+  // exigimos que o restante comece com o separador do SO ou que seja a própria raiz.
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
     throw new Error('PATH_TRAVERSAL_BLOCKED: Caminho resolvido escapou do workspace.');
   }
   return resolved;
@@ -319,6 +322,7 @@ export const nativeSystemExecSandboxTool: ToolDefinition<{ command: string; time
   category: 'system',
   riskLevel: 'R1',
   isSimulated: false,
+  timeoutMs: 12000, // comando pode pedir até 10s internamente
   parameters: {
     type: 'object',
     properties: {
@@ -448,6 +452,7 @@ export const nativeCalculateRouteTool: ToolDefinition<
       destLat: { type: 'number', description: 'Latitude de destino (opcional).' },
       destLng: { type: 'number', description: 'Longitude de destino (opcional).' }
     },
+    required: ['destination'],
     additionalProperties: false
   },
   outputSchema: {
@@ -482,7 +487,6 @@ export const nativeCalculateRouteTool: ToolDefinition<
 
     try {
       const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
       if (!res.ok) {
         throw new Error(`OSRM_HTTP_${res.status}: Falha ao consultar o serviço de rotas.`);
       }
@@ -508,7 +512,6 @@ export const nativeCalculateRouteTool: ToolDefinition<
         timestamp: new Date().toISOString()
       };
     } catch (err: any) {
-      clearTimeout(timeout);
       if (err?.name === 'AbortError') {
         return {
           success: false,
@@ -531,6 +534,8 @@ export const nativeCalculateRouteTool: ToolDefinition<
         };
       }
       throw err;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 };
@@ -549,6 +554,7 @@ const nativeFetchNewsTool: ToolDefinition<
   category: 'system',
   riskLevel: 'R1',
   isSimulated: false,
+  timeoutMs: 15000, // cadeia de feeds RSS com failover pode levar até 12s
   parameters: {
     type: 'object',
     properties: {
@@ -705,7 +711,8 @@ export const nativeListProcessesTool: ToolDefinition<{ limit?: number; filter?: 
         const psScript = `Get-Process | Sort-Object CPU -Descending | Select-Object -First ${limit * 2} Id, ProcessName, CPU, WorkingSet64 | ConvertTo-Json -Compress`;
         const { stdout } = await execRealCommand(`powershell -NoProfile -NonInteractive -Command "${psScript}"`, 6000);
         if (stdout && stdout.trim()) {
-          let parsed = JSON.parse(stdout.trim());
+          let parsed: any;
+          try { parsed = JSON.parse(stdout.trim()); } catch { parsed = []; }
           if (!Array.isArray(parsed)) parsed = [parsed];
           let list = parsed.map((p: any) => ({
             pid: Number(p.Id),
@@ -877,8 +884,8 @@ export const nativeWorkspaceSearchFilesTool: ToolDefinition<{ query?: string; ma
         const full = path.join(dir, entry.name);
         const rel = path.relative(root, full).replace(/\\/g, '/');
 
-        // Proteção contra escape
-        if (!full.startsWith(root)) continue;
+        // Proteção contra escape (evita corresponder a pastas irmãs via prefixo ambíguo)
+        if (full !== root && !full.startsWith(root + path.sep)) continue;
 
         const matches = !term || entry.name.toLowerCase().includes(term);
         if (matches) {
@@ -1303,9 +1310,12 @@ export function installNativeServerTools(registry: {
     nativeMemoryListContextTool,
     openGpsNavigationTool,
     mapsSearchPlacesTool,
+    resolvePlaceAliasTool,
+    savePlaceAliasTool,
     // NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3)
     pcTakeScreenshotTool,
     pcManageAppsTool,
+    openApplicationTool,
     pcSimulateInputTool,
     fileSearchAndReadTool,
     fileWriteAndModifyTool,

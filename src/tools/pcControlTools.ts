@@ -16,7 +16,7 @@
  *  5. file_write_and_modify— criar/escrever/renomear/zipar/excluir (R2)
  */
 
-import { exec, execFile } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import os from 'os';
@@ -25,7 +25,7 @@ import { ToolDefinition } from './types';
 
 /**
  * GUARDA ANTI-EFEITOS-COLATERAIS (Etapa E da auditoria UI/testes):
- * quando LIORA_NO_SO=1 (suíte de testes), os comandos reais de SO são PULADOS.
+ * quando LIORA_NO_BROWSER=1 (suíte de testes), os comandos reais de SO são PULADOS.
  * As ferramentas de controle do PC (launch/kill/focus/simulate_input/screenshot)
  * retornam sucesso simulado com dryRun: true — testam TODA a lógica de
  * validação/formatação sem tocar o sistema real do usuário.
@@ -76,6 +76,7 @@ export const pcTakeScreenshotTool: ToolDefinition<{ format?: 'png' | 'jpeg'; mon
   category: 'system',
   riskLevel: 'R1',
   isSimulated: false,
+  timeoutMs: 25000, // captura PowerShell usa até 20s internamente
   parameters: {
     type: 'object',
     properties: {
@@ -175,6 +176,109 @@ Write-Output "${tmpBase}.${ext}"`;
 // ============================================================================
 // MÓDULO 2 — CONTROLE DE APLICATIVOS E INPUTS
 // ============================================================================
+
+const WINDOWS_APP_MAP: Record<string, string> = {
+  'bloco de notas': 'notepad',
+  'bloco de nota': 'notepad',
+  'bloco notas': 'notepad',
+  'notepad': 'notepad',
+  'editor de texto': 'notepad',
+  'calculadora': 'calc',
+  'calculador': 'calc',
+  'calc': 'calc',
+  'calculator': 'calc',
+  'painel de controle': 'control',
+  'painel de controle do windows': 'control',
+  'control panel': 'control',
+  'control': 'control',
+  'configuracoes': 'ms-settings:',
+  'configurações': 'ms-settings:',
+  'configuracoes do windows': 'ms-settings:',
+  'configurações do windows': 'ms-settings:',
+  'ajustes': 'ms-settings:',
+  'settings': 'ms-settings:',
+  'google': 'chrome',
+  'google chrome': 'chrome',
+  'chrome': 'chrome',
+  'navegador': 'chrome',
+  'navegador chrome': 'chrome',
+  'internet': 'chrome',
+  'edge': 'msedge',
+  'microsoft edge': 'msedge',
+  'gerenciador de tarefas': 'taskmgr',
+  'task manager': 'taskmgr',
+  'taskmgr': 'taskmgr',
+  'explorador de arquivos': 'explorer',
+  'explorer': 'explorer',
+  'meus arquivos': 'explorer',
+  'pastas': 'explorer',
+  'spotify': 'spotify',
+  'musica': 'spotify',
+  'paint': 'mspaint',
+  'mspaint': 'mspaint',
+  'desenho': 'mspaint',
+  'prompt de comando': 'powershell',
+  'cmd': 'powershell',
+  'terminal': 'powershell',
+  'powershell': 'powershell',
+  'vscode': 'code',
+  'vs code': 'code',
+  'visual studio code': 'code',
+  'code': 'code',
+  'steam': 'steam',
+  'jogos steam': 'steam',
+  'discord': 'discord',
+  'whatsapp': 'whatsapp',
+  'zap': 'whatsapp',
+  'zap zap': 'whatsapp',
+  'word': 'winword',
+  'microsoft word': 'winword',
+  'excel': 'excel',
+  'microsoft excel': 'excel',
+  'planilha': 'excel',
+  'powerpoint': 'powerpnt',
+  'microsoft powerpoint': 'powerpnt',
+  'slides': 'powerpnt',
+  'opera': 'opera',
+  'opera gx': 'opera',
+  'navegador opera': 'opera',
+  'telegram': 'telegram',
+  'vlc': 'vlc',
+  'obs': 'obs64',
+  'obs studio': 'obs64',
+  'epic': 'com.epicgames.launcher',
+  'epic games': 'com.epicgames.launcher'
+};
+
+function resolveWindowsAppExecutable(appName: string): string {
+  if (!appName) return '';
+  const clean = appName
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+  if (WINDOWS_APP_MAP[clean]) {
+    return WINDOWS_APP_MAP[clean];
+  }
+
+  const stripped = clean
+    .replace(/^(?:abr[aei]r?|inici[aei]r?|execut[aei]r?|rod[aei]r?)\s+/, '')
+    .replace(/^(?:o|a|os|as|um|uma|aplicativo|app|programa)\s+/, '')
+    .trim();
+
+  if (WINDOWS_APP_MAP[stripped]) {
+    return WINDOWS_APP_MAP[stripped];
+  }
+
+  for (const [key, exe] of Object.entries(WINDOWS_APP_MAP)) {
+    if (clean.includes(key) || stripped.includes(key)) {
+      return exe;
+    }
+  }
+
+  return appName;
+}
 
 /**
  * pc_manage_apps (R0 listar / R2 kill) — gerenciamento real de processos.
@@ -291,13 +395,41 @@ export const pcManageAppsTool: ToolDefinition<{
 
     // ---- launch (R2 — executa app no SO) ----
     if (params.action === 'launch') {
-      const app = (params.appPath || '').trim();
-      if (!app) return { success: false, error: 'MISSING_APP: informe appPath para abrir o aplicativo.', simulated: false, timestamp: new Date().toISOString() };
+      const rawApp = (params.appPath || '').trim();
+      if (!rawApp) return { success: false, error: 'MISSING_APP: informe appPath para abrir o aplicativo.', simulated: false, timestamp: new Date().toISOString() };
       // Bloqueio de injeção: sem metacaracteres de shell
-      if (/[;&|`$<>]/.test(app)) return { success: false, error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos no appPath.', simulated: false, timestamp: new Date().toISOString() };
+      if (/[;&|`$<>]/.test(rawApp)) return { success: false, error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos no appPath.', simulated: false, timestamp: new Date().toISOString() };
+      const app = platform === 'win32' ? resolveWindowsAppExecutable(rawApp) : rawApp;
       if (platform === 'win32') {
-        const res = await runFile('cmd.exe', ['/C', 'start', '', app], 8000);
-        return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
+        if (isOsDryRun()) {
+          return { success: true, action: 'launch', app, message: `Aplicativo '${app}' iniciado.`, simulated: false, timestamp: new Date().toISOString() };
+        }
+        try {
+          // Lançamento com shell desvinculada (detached + windowsHide: false):
+          // O comando 'cmd /c start "" app' cria o processo com janela gráfica real
+          // no Desktop interativo da sessão do usuário, sem herdar flags de background.
+          const child = spawn('cmd.exe', ['/c', 'start', '', app], {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: false
+          });
+          child.unref();
+
+          // Garante foco em primeiro plano na janela criada
+          setTimeout(async () => {
+            try {
+              const baseName = app.replace(/\.[^/.]+$/, '').replace(/.*[/\\]/, '');
+              const psFocus = `\ufeff(New-Object -ComObject WScript.Shell).AppActivate('${baseName}')`;
+              await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psFocus], 3000);
+            } catch {
+              // ignore focus retry
+            }
+          }, 450);
+
+          return { success: true, action: 'launch', app, message: `Aplicativo '${app}' iniciado e focado.`, simulated: false, timestamp: new Date().toISOString() };
+        } catch (err: any) {
+          return { success: false, action: 'launch', app, message: `Falha ao iniciar '${app}': ${err?.message || 'erro de execução'}`, simulated: false, timestamp: new Date().toISOString() };
+        }
       }
       const res = await runFile(platform === 'darwin' ? 'open' : 'xdg-open', [app], 8000);
       return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}'.`, simulated: false, timestamp: new Date().toISOString() };
@@ -361,7 +493,8 @@ export const pcSimulateInputTool: ToolDefinition<{
   outputSchema: { type: 'object', requiredFields: ['success', 'action', 'simulated'] },
   execute: async (params) => {
     const platform = os.platform();
-    if (platform !== 'win32' && platform !== 'darwin') {
+    const isDryRun = isOsDryRun();
+    if (platform !== 'win32' && platform !== 'darwin' && !isDryRun) {
       return { success: false, error: 'INPUT_UNSUPPORTED: automação de input nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
     }
 
@@ -370,6 +503,9 @@ export const pcSimulateInputTool: ToolDefinition<{
       const x = Math.round(params.x ?? -1);
       const y = Math.round(params.y ?? -1);
       if (x < 0 || y < 0) return { success: false, error: 'MISSING_COORDS: informe x e y para o clique.', simulated: false, timestamp: new Date().toISOString() };
+      if (isDryRun) {
+        return { success: true, action: 'click', x, y, doubleClick: Boolean(params.doubleClick), simulated: true, timestamp: new Date().toISOString() };
+      }
       if (platform === 'win32') {
         // BOM UTF-8 + SetCursorPos funciona com coordenadas inteiras — sem problema
         const clicks = params.doubleClick ? 2 : 1;
@@ -406,6 +542,9 @@ Write-Output "OK"`;
     if (params.action === 'type') {
       const text = (params.text || '').slice(0, 1000);
       if (!text) return { success: false, error: 'MISSING_TEXT: informe o texto a digitar.', simulated: false, timestamp: new Date().toISOString() };
+      if (isDryRun) {
+        return { success: true, action: 'type', length: text.length, simulated: true, timestamp: new Date().toISOString() };
+      }
 
       // CORREÇÃO (race condition abrir app + digitar): após pc_manage_apps launch,
       // o processo demora para criar a janela e ganhar foco do Windows — teclas
@@ -447,15 +586,17 @@ while ((Get-Date) -lt $deadline) {
         // 2. Aspas duplas → escape PowerShell correto ('' dentro de string single-quoted
         //    não protege contra " que fecha a string em contextos de comando)
         // 3. Caracteres de controle (\x00-\x1F) removidos — nunca podem entrar no P-Invoke
-        const normalized = text
-          .replace(/\r\n/g, '\n')
-          .replace(/\r/g, '\n')
+        // 4. ORDEM CRÍTICA: escapar os metacaracteres do SendKeys ANTES de inserir
+        //    {ENTER}/{TAB}. Se o escape rodasse depois, ele re-escaparia as próprias
+        //    chaves das sequências ({ENTER} viraria {{ENTER}{}}, que o SendKeys
+        //    digita como TEXTO literal em vez de pressionar Enter).
+        const escaped = text
+          .replace(/\r\n|\r/g, '\n')
           .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')  // controles exceto \n (0x0A) e \t (0x09)
+          .replace(/([+^%~(){}[\]])/g, '{$1}')
+          .replace(/'/g, "''")
           .replace(/\n/g, '{ENTER}')
           .replace(/\t/g, '{TAB}');
-        const escaped = normalized
-          .replace(/([+^%~(){}[\]])/g, '{$1}')
-          .replace(/'/g, "''");
         // BOM UTF-8: garante que acentos/cirílico/chinês cheguem intactos ao PowerShell
         // (sem BOM, o PowerShell 5.1 interpreta o script como ANSI do sistema e
         // caracteres não-Latin1 viram lixo '?')
@@ -472,38 +613,80 @@ while ((Get-Date) -lt $deadline) {
     if (params.action === 'hotkey') {
       const combo = (params.keys || '').trim().toLowerCase();
       if (!combo) return { success: false, error: 'MISSING_KEYS: informe a combinação (ex: "ctrl+s").', simulated: false, timestamp: new Date().toISOString() };
-      // Mapa SendKeys do Windows
-      const SENDKEYS_MAP: Record<string, string> = {
-        'ctrl': '^', 'control': '^', 'alt': '%', 'shift': '+', 'win': '^%',
+      
+      const MODIFIER_MAP: Record<string, string> = {
+        'ctrl': '^', 'control': '^', 'alt': '%', 'shift': '+', 'win': '^%'
+      };
+      const SPECIAL_KEY_MAP: Record<string, string> = {
         'enter': '{ENTER}', 'tab': '{TAB}', 'esc': '{ESC}', 'escape': '{ESC}',
         'backspace': '{BACKSPACE}', 'delete': '{DELETE}', 'del': '{DELETE}',
         'up': '{UP}', 'down': '{DOWN}', 'left': '{LEFT}', 'right': '{RIGHT}',
         'home': '{HOME}', 'end': '{END}', 'pageup': '{PGUP}', 'pagedown': '{PGDN}',
+        'space': ' ', 'printscreen': '{PRTSC}',
         'f1': '{F1}', 'f2': '{F2}', 'f3': '{F3}', 'f4': '{F4}', 'f5': '{F5}',
-        'space': ' ', 'printscreen': '{PRTSC}'
+        'f6': '{F6}', 'f7': '{F7}', 'f8': '{F8}', 'f9': '{F9}', 'f10': '{F10}',
+        'f11': '{F11}', 'f12': '{F12}'
       };
-      // Normaliza: "ctrl+s" -> "^s", "enter" -> "{ENTER}"
+
       const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
-      let sendKeys = '';
+      let modifiers = '';
+      let key = '';
       let valid = true;
+
       for (const p of parts) {
-        const mapped = SENDKEYS_MAP[p];
-        if (mapped === undefined) { valid = false; break; }
-        sendKeys += mapped;
+        if (MODIFIER_MAP[p]) {
+          modifiers += MODIFIER_MAP[p];
+        } else if (SPECIAL_KEY_MAP[p]) {
+          key += SPECIAL_KEY_MAP[p];
+        } else if (/^[a-z0-9]$/i.test(p)) {
+          key += p.toLowerCase();
+        } else if (/^f([1-9]|1[0-2])$/i.test(p)) {
+          key += `{${p.toUpperCase()}}`;
+        } else {
+          valid = false;
+          break;
+        }
       }
+
+      const sendKeys = modifiers + key;
       if (!valid || !sendKeys) {
-        return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f5.`, simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f12.`, simulated: false, timestamp: new Date().toISOString() };
       }
+
       if (platform === 'win32') {
         const ps = `$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${sendKeys.replace(/'/g, "''")}')`;
         const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 10000);
         return { success: res.code === 0, action: 'hotkey', keys: combo, message: res.code === 0 ? `Atalho '${combo}' enviado ao app focado.` : `Falha no atalho: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
       }
-      // macOS: converte para osascript key code básico (ctrl+cmd etc.)
-      const macCombo = combo.replace('ctrl', 'control').replace('win', 'command');
-      const script = `osascript -e 'tell application "System Events" to keystroke "" using {${macCombo.split('+').join(', ')}}'`;
-      const res = await runReal(script, 10000);
-      return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+
+      if (platform === 'darwin') {
+        const macModifiers: string[] = [];
+        if (combo.includes('ctrl') || combo.includes('control')) macModifiers.push('control down');
+        if (combo.includes('alt') || combo.includes('option')) macModifiers.push('option down');
+        if (combo.includes('shift')) macModifiers.push('shift down');
+        if (combo.includes('win') || combo.includes('cmd') || combo.includes('command')) macModifiers.push('command down');
+        
+        let script: string;
+        if (key && /^[a-z0-9]$/i.test(key)) {
+          const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
+          script = `osascript -e 'tell application "System Events" to keystroke "${key}"${modStr}'`;
+        } else if (key === '{ENTER}') {
+          const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
+          script = `osascript -e 'tell application "System Events" to key code 36${modStr}'`;
+        } else {
+          script = `osascript -e 'tell application "System Events" to keystroke "${key}"'`;
+        }
+        const res = await runReal(script, 10000);
+        return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      if (platform === 'linux') {
+        const linuxKey = combo.replace('ctrl', 'ctrl').replace('win', 'super');
+        const res = await runReal(`xdotool key ${JSON.stringify(linuxKey)} 2>/dev/null`, 10000);
+        return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      return { success: true, action: 'hotkey', keys: combo, simulated: true, timestamp: new Date().toISOString() };
     }
 
     return { success: false, error: `UNKNOWN_ACTION: '${params.action}' não suportada.`, simulated: false, timestamp: new Date().toISOString() };
@@ -524,10 +707,19 @@ const ALLOWED_SEARCH_ROOTS = [
 ];
 
 /** Garante que o caminho está dentro das raízes permitidas. Retorna null se OK, mensagem de erro se bloqueado. */
-function checkSafePath(p: string): string | null {
+function checkSafePath(p: string, allowHomeRoot = false): string | null {
   try {
     const resolved = path.resolve(p);
-    const allowed = ALLOWED_SEARCH_ROOTS.some(root => resolved.toLowerCase().startsWith(root.toLowerCase()));
+    const home = os.homedir();
+    const isExactHome = resolved.toLowerCase() === home.toLowerCase();
+    // Prefixo simples (startsWith) permitiria pastas irmãs (ex: Documents vs Documents-evil);
+    // exigimos que o restante comece com o separador do SO ou que seja a própria raiz.
+    const allowed = (allowHomeRoot && isExactHome) || ALLOWED_SEARCH_ROOTS.some(root => {
+      const r = path.resolve(root);
+      const lower = resolved.toLowerCase();
+      const rootLower = r.toLowerCase();
+      return lower === rootLower || lower.startsWith(rootLower + path.sep.toLowerCase());
+    });
     if (!allowed) {
       return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raízes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
     }
@@ -584,7 +776,7 @@ export const fileSearchAndReadTool: ToolDefinition<{
     try {
       const maxResults = Math.max(1, Math.min(100, params.maxResults || 20));
       const root = params.rootPath ? path.resolve(params.rootPath) : defaultSearchRoot();
-      const scopeErr = checkSafePath(root);
+      const scopeErr = checkSafePath(root, true);
       if (scopeErr) {
         return { success: false, error: scopeErr, results: [], simulated: false, timestamp: new Date().toISOString() };
       }
@@ -664,6 +856,7 @@ export const fileWriteAndModifyTool: ToolDefinition<{
   category: 'workspace',
   riskLevel: 'R2',
   isSimulated: false,
+  timeoutMs: 70000, // zip usa 60s internamente — antes o registry abortava em 5s com falso timeout
   parameters: {
     type: 'object',
     properties: {
@@ -714,7 +907,15 @@ export const fileWriteAndModifyTool: ToolDefinition<{
 
       if (op === 'delete') {
         const recursive = Boolean(params.recursive);
-        const stat = await fsp.stat(target);
+        let stat;
+        try {
+          stat = await fsp.stat(target);
+        } catch (statErr: any) {
+          if (statErr?.code === 'ENOENT') {
+            return { success: false, operation: op, error: `FILE_NOT_FOUND: '${path.basename(target)}' não foi encontrado no disco para exclusão.`, simulated: false, timestamp: new Date().toISOString() };
+          }
+          throw statErr;
+        }
         if (stat.isDirectory()) {
           if (!recursive) return { success: false, operation: op, error: 'DIRECTORY_NOT_EMPTY_MODE: use recursive=true para excluir pastas.', simulated: false, timestamp: new Date().toISOString() };
           await fsp.rm(target, { recursive: true, force: false });
@@ -751,5 +952,48 @@ export const fileWriteAndModifyTool: ToolDefinition<{
     } catch (err: any) {
       return { success: false, operation: op, error: `FILE_OPERATION_FAILED: ${err?.message || 'falha desconhecida no disco'}`, simulated: false, timestamp: new Date().toISOString() };
     }
+  }
+};
+
+/**
+ * open_application (R2 launch) — abre aplicativos diretamente pelo nome ou executável.
+ * Resolve a expectativa do modelo ao receber comandos como "abre o spotify", "abre o bloco de notas", "inicie o chrome".
+ */
+export const openApplicationTool: ToolDefinition<{
+  appName?: string;
+  appPath?: string;
+  application?: string;
+}, any> = {
+  name: 'open_application',
+  description: 'Abre um aplicativo no computador pelo nome ou comando executável (ex: "spotify", "notepad", "calc", "chrome"). Risco R2.',
+  category: 'system',
+  riskLevel: 'R2',
+  isSimulated: false,
+  parameters: {
+    type: 'object',
+    properties: {
+      appName: { type: 'string', description: 'Nome do aplicativo a ser aberto (ex: "spotify", "notepad", "calc", "chrome").' },
+      appPath: { type: 'string', description: 'Caminho ou comando executável alternativo do aplicativo.' },
+      application: { type: 'string', description: 'Alias para o nome do aplicativo.' }
+    },
+    additionalProperties: false
+  },
+  outputSchema: { type: 'object', requiredFields: ['success', 'simulated'] },
+  execute: async (params) => {
+    const rawTarget = (params?.appName || params?.appPath || params?.application || '').trim();
+    if (!rawTarget) {
+      return {
+        success: false,
+        error: 'MISSING_APP: informe o nome do aplicativo que deseja abrir (ex: "spotify", "calc", "notepad").',
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+    const platform = os.platform();
+    const target = platform === 'win32' ? resolveWindowsAppExecutable(rawTarget) : rawTarget;
+    return pcManageAppsTool.execute({
+      action: 'launch',
+      appPath: target
+    });
   }
 };

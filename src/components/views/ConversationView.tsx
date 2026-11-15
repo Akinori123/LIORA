@@ -66,7 +66,6 @@ export const ConversationView: React.FC = () => {
   const [audioLevel, setAudioLevel] = useState(0);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [liveTranscription, setLiveTranscription] = useState<string>('');
-  const [selectedVoice, setSelectedVoice] = useState<'Aoede' | 'Puck' | 'Charon' | 'Kore' | 'Fenrir'>('Aoede');
 
   useEffect(() => {
     voiceLiveClient.setCallbacks({
@@ -92,6 +91,25 @@ export const ConversationView: React.FC = () => {
         setVoiceError(errMsg);
       }
     });
+
+    return () => {
+      voiceLiveClient.setCallbacks({});
+      if (recordTimerRef.current) {
+        clearInterval(recordTimerRef.current);
+        recordTimerRef.current = null;
+      }
+      if (testMicTimerRef.current) {
+        clearTimeout(testMicTimerRef.current);
+        testMicTimerRef.current = null;
+      }
+      if (testAudioRef.current) {
+        try {
+          testAudioRef.current.pause();
+        } catch {}
+        testAudioRef.current = null;
+      }
+      speechService.stopListening();
+    };
   }, []);
 
   const handleToggleVoiceSession = async () => {
@@ -170,6 +188,8 @@ export const ConversationView: React.FC = () => {
   const [selectedDevice, setSelectedDevice] = useState<string>(speechService.getSelectedAudioDevice() || '');
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [isTestRecording, setIsTestRecording] = useState(false);
+  const testMicTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const testAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const loadAudioDevices = async () => {
     const devices = await speechService.getAudioInputDevices();
@@ -215,7 +235,11 @@ export const ConversationView: React.FC = () => {
 
     speechService.startListening(() => {});
 
-    setTimeout(async () => {
+    if (testMicTimerRef.current) {
+      clearTimeout(testMicTimerRef.current);
+    }
+    testMicTimerRef.current = setTimeout(async () => {
+      testMicTimerRef.current = null;
       const audioBlob = await speechService.getRecordedAudioBlob();
       speechService.stopListening();
       setIsTestRecording(false);
@@ -227,9 +251,19 @@ export const ConversationView: React.FC = () => {
 
       setTestStatus('Reproduzindo o áudio gravado do seu microfone...');
       const audio = new Audio(`data:${audioBlob.mimeType};base64,${audioBlob.data}`);
-      audio.onended = () => setTestStatus('Teste concluído! Se você ouviu sua voz, seu microfone está 100% funcionando.');
-      audio.onerror = () => setTestStatus('Erro ao reproduzir teste de microfone.');
-      await audio.play().catch((e) => setTestStatus(`Falha na reprodução: ${e.message}`));
+      testAudioRef.current = audio;
+      audio.onended = () => {
+        if (testAudioRef.current === audio) testAudioRef.current = null;
+        setTestStatus('Teste concluído! Se você ouviu sua voz, seu microfone está 100% funcionando.');
+      };
+      audio.onerror = () => {
+        if (testAudioRef.current === audio) testAudioRef.current = null;
+        setTestStatus('Erro ao reproduzir teste de microfone.');
+      };
+      await audio.play().catch((e) => {
+        if (testAudioRef.current === audio) testAudioRef.current = null;
+        setTestStatus(`Falha na reprodução: ${e.message}`);
+      });
     }, 3200);
   };
 

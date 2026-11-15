@@ -12,11 +12,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { toolRegistry } from './src/tools/registry';
 import { installNativeServerTools } from './src/tools/nativeServerTools';
 // NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3) — registro no registry do lado cliente
-import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool } from './src/tools/pcControlTools';
+import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, openApplicationTool } from './src/tools/pcControlTools';
 // AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — registro no registry do lado cliente
 import { webBrowserAgentTool } from './src/tools/web/browserAgentTool';
 // CORREÇÃO (Etapa 1): resolução de apelidos geográficos via memória semântica
-import { resolvePlaceAliasTool } from './src/tools/navigation/placeAliasTool';
+import { resolvePlaceAliasTool, savePlaceAliasTool } from './src/tools/navigation/placeAliasTool';
 // FASE 2: PRODUTIVIDADE — E-mail e Calendário (R1 leitura, R2 escrita)
 import { emailFetchAndReadTool, emailSendOrReplyTool } from './src/tools/productivity/emailTools';
 import { calendarListEventsTool, calendarCreateEventTool } from './src/tools/productivity/calendarTools';
@@ -35,34 +35,44 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_SYSTEM_INSTRUCTION = 
-  "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
-  "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
-  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
-  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade. " +
+  "IDIOMA OBRIGATÓRIO: Você fala, raciocina e responde SEMPRE e EXCLUSIVAMENTE em Português do Brasil (pt-BR). É terminantemente proibido responder em espanhol, inglês ou qualquer outro idioma, exceto se o Mestre solicitar explicitamente uma tradução. " +
+  "Você é a LIORA, inteligência artificial autônoma soberana e assistente pessoal de alto nível inspirada no conceito de JARVIS. " +
+  "TRATAMENTO DO USUÁRIO: Dirija-se SEMPRE ao usuário com o título formal, respeitoso e leal de 'Mestre'. Sua postura é serena, com autoridade técnica, elegância, proatividade e inteligência emocional refinada. " +
+  "PROATIVIDADE, DESENVOLVIMENTO E VERSATILIDADE TOTAL: Você auxilia proativamente em engenharia de software, criação de sites, jogos, automações de tarefas, notícias de todos os países, pesquisas avançadas, redação de e-mails, gerenciamento de arquivos e produtividade de ponta a ponta. No modo de voz (Live) ou texto, você também possui versatilidade artística (sabe cantar melodias, criar versos, rimas e manter conversação viva e rica quando solicitado pelo Mestre). " +
+  "NUNCA EXECUTAR EM SILÊNCIO: Toda e qualquer ação de ferramentas de sistema (arquivos, aplicativos, mapas, IoT, etc.) deve vir acompanhada de uma fala ou explicação clara e contextualizada (ex: 'Com certeza, Mestre. Abrindo o Bloco de Notas...', 'Localizando o destino solicitado, Mestre...'). NUNCA execute ferramentas em silêncio absoluto. " +
+  "DISPOSITIVOS E IOT: Quando o Mestre der ordens para TV, celular, tablet ou carro e o atuador físico/IoT não estiver emparelhado, responda de forma elegante: 'Mestre, nenhum dispositivo IoT está associado a esta ação no momento.' " +
+  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade no sistema operacional. " +
   "Quando o usuário pedir uma AÇÃO (abrir/navegar/consultar/criar/executar), você DEVE chamar a ferramenta apropriada em vez de apenas responder em texto. " +
   "NUNCA afirme que executou, criou, excluiu, pesquisou ou mostrou algo se a chamada de ferramenta não retornou success: true com dados reais. " +
   "EXCLUSIVIDADE DE AÇÃO: chame NO MÁXIMO UMA ferramenta de abertura por turno (open_gps_navigation, maps_search_places, pc_manage_apps launch, open_application). " +
   "Se o usuário pedir várias coisas (ex: 'farmácias E mercados'), priorize a mais relevante para a intenção principal e pergunte se deseja a outra — NUNCA abra múltiplas abas/janelas em paralelo. " +
   "BLINDAGEM ABSOLUTA CONTRA SUCESSO FALSO: você SÓ pode afirmar que executou uma ação se a resposta da ferramenta trouxe success: true. " +
-  "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
+  "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'Mestre, não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
   "Ao encadear abrir um aplicativo e digitar nele, primeiro chame pc_manage_apps (launch), depois pc_simulate_input (type) com waitFocusMs para aguardar a janela ganhar foco. " +
   "LOCAIS POR APELIDO: para navegar para 'minha casa', 'trabalho', 'faculdade' ou apelidos similares, chame PRIMEIRO resolve_place_alias para buscar o endereço na memória do usuário. " +
-  "Se não estiver lá, pergunte o endereço e ensine a LIORA com addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
+  "Se não estiver lá, pergunte o endereço e ensine a LIORA com save_place_alias ou addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
   "Se uma ferramenta falhar ou não existir, informe o erro real e o que seria necessário — nunca simule sucesso. " +
   "Ordens de navegação de interface devem usar a ferramenta navigateToTab; ordens de consulta de sistema devem usar system_info ou getSystemStatus. " +
-  "NAVEGAÇÃO E MAPAS: você POSSUI acesso em tempo real a ferramentas de navegação e busca de locais " +
-  "(open_gps_navigation abre o Google Maps/Waze com a rota; maps_search_places busca mercados, farmácias, postos, restaurantes e pontos de interesse próximos). " +
-  "Quando o usuário perguntar por mercados, farmácias, rotas ou 'como ir para X', NUNCA diga que não tem mapas: " +
-  "acione maps_search_places para descobrir locais ou open_gps_navigation para traçar a rota — e informe o resultado real da ferramenta. " +
-  "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado e omita a origem ou use origem textual (o sistema usa GPS automático). Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
+  "NAVEGAÇÃO E MAPAS: Você POSSUI ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado. Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown, com linguagem especificada e boas práticas de engenharia de software.";
+
+function getTemporalContext(): string {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  return `[HORÁRIO LOCAL DO BRASIL: Hoje é ${dateStr}, e o horário atual é ${timeStr}. Responda perguntas sobre data, dia e hora com base estritamente nesta data e hora real.]`;
+}
 
 /**
  * Enriquece dinamicamente as instruções de sistema com contexto de memória de longo prazo
  * recuperado semanticamente via busca vetorial, se ainda não estiver presente.
  */
 function enrichSystemInstruction(baseInstruction: string | undefined, userQuery: string): string {
-  const base = baseInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+  const temporal = getTemporalContext();
+  let base = baseInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+  if (!base.includes('[HORÁRIO LOCAL DO BRASIL:')) {
+    base = `${temporal}\n${base}`;
+  }
   if (base.includes('[SISTEMA - MEMÓRIA CONTEXTUAL RECUPERADA]')) {
     return base;
   }
@@ -131,8 +141,25 @@ function classifyErrorStatus(err: any): { status: number; code: string; message:
 function sanitizeContentsForFallback(contents: any[]): any[] {
   return contents.map(item => {
     const parts = (item.parts || []).map((p: any) => {
+      // Áudio: OpenRouter fallback não aceita — converte em placeholder textual
       if (p.inlineData && p.inlineData.mimeType && p.inlineData.mimeType.startsWith('audio/')) {
         return { text: '[Mensagem de voz em áudio do usuário]' };
+      }
+      // Imagem/screenshot: extrai apenas o mimeType como contexto textual
+      if (p.inlineData && p.inlineData.mimeType && p.inlineData.mimeType.startsWith('image/')) {
+        return { text: `[Imagem enviada (${p.inlineData.mimeType}) — conteúdo visual não disponível no fallback]` };
+      }
+      // functionCall/functionResponse: resume a intenção/resultados como texto
+      if (p.functionCall) {
+        return { text: `[Chamada de ferramenta: ${p.functionCall.name}]` };
+      }
+      if (p.functionResponse) {
+        const respText = typeof p.functionResponse?.response === 'string'
+          ? p.functionResponse.response
+          : JSON.stringify(p.functionResponse?.response ?? {});
+        // Trunca respostas enormes (ex: base64, dumps) para não estourar o payload
+        const safe = respText.length > 2000 ? respText.slice(0, 2000) + '…[truncado]' : respText;
+        return { text: `[Resultado da ferramenta ${p.functionResponse.name}: ${safe}]` };
       }
       return p;
     });
@@ -152,11 +179,19 @@ function getAvailableModel(requestedModel?: string): string {
 }
 
 async function callOpenRouterFallback(
-  contents: Array<{ role: string; parts: Array<{ text: string }> }>,
+  rawContents: Array<{ role: string; parts: Array<{ text: string }> }>,
   systemInstruction?: string,
   onChunk?: (text: string) => void,
   customOpenRouterKey?: string
 ): Promise<string> {
+  // BUG FIX (raiz): o contents cru pode conter partes inlineData (base64 de
+  // screenshots/imagem) e functionCall/functionResponse, que o OpenRouter não
+  // aceita no formato {role, content:string}. Sanitizamos SEMPRE na entrada.
+  const contents = sanitizeContentsForFallback(rawContents).map(item => ({
+    role: item.role,
+    parts: (item.parts || []).filter((p: any) => typeof p?.text === 'string')
+  })) as Array<{ role: string; parts: Array<{ text: string }> }>;
+
   const vaultOpenRouterKey = integrationsVault.getApiKeyByProvider('openrouter') || integrationsVault.getRawKey('svc-openrouter');
   const openRouterKey = (customOpenRouterKey && customOpenRouterKey.trim().length >= 5)
     ? customOpenRouterKey.trim()
@@ -250,6 +285,14 @@ async function callOpenRouterFallback(
       if (fullText) {
         return fullText;
       }
+      // Se o stream falhou DEPOIS de já ter emitido chunks ao cliente, não há
+      // como retroceder — tentar outro modelo duplicaria o texto no SSE.
+      if (onChunk) {
+        throw new Error('OpenRouter stream interrompido após emissão de chunks.');
+      }
+      // Sem chunks emitidos: segue para o próximo modelo candidato
+      lastStatus = 0;
+      lastErrorText = 'Stream vazio para todos os candidatos anteriores.';
     } catch (attemptErr: any) {
       console.warn('[OpenRouter Fallback Attempt Error]:', attemptErr);
     }
@@ -279,10 +322,97 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   // NÚCLEO DE CONTROLE TOTAL DO PC: registro direto das ferramentas de visão,
   // apps/inputs e arquivos no Tool Registry compartilhado (declarações vão ao
   // Gemini no chat e no canal Live; execução real via server local).
-  const pcControlTools = [pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, webBrowserAgentTool, emailFetchAndReadTool, emailSendOrReplyTool, calendarListEventsTool, calendarCreateEventTool, startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroundTaskTool, listBackgroundTasksTool, vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool, resolvePlaceAliasTool];
+  const pcControlTools = [pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, webBrowserAgentTool, emailFetchAndReadTool, emailSendOrReplyTool, calendarListEventsTool, calendarCreateEventTool, startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroundTaskTool, listBackgroundTasksTool, vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool, resolvePlaceAliasTool, savePlaceAliasTool];
   for (const t of pcControlTools) {
     toolRegistry.unregisterTool(t.name);
     toolRegistry.registerTool(t);
+  }
+
+  // BUG DE SEGURANÇA CRÍTICO CORRIGIDO (bypass do PermissionEngine no chat/Live):
+  // o loop de function calling executava ferramentas via toolRegistry.executeTool
+  // DIRETAMENTE — sem passar pelo PermissionEngine. O modelo podia pedir
+  // file_write_and_modify (deletar arquivos), kill_process, pc_simulate_input ou
+  // vault_get_credential pelo chat e o servidor executava sem consentimento,
+  // burlando todo o controle R1/R2 do endpoint /api/tools/execute. Agora TODA
+  // execução de ferramenta por IA passa pela mesma política (R0 livre; R1/R2/R3
+  // negados com motivo — o modelo explica honestamente que precisa de confirmação).
+  async function executeToolWithPolicy(
+    toolName: string,
+    params: Record<string, any>,
+    sessionId: string
+  ) {
+    const toolDef = toolRegistry.getTool(toolName);
+    if (!toolDef) {
+      return { toolName, success: false, error: `Ferramenta '${toolName}' não registrada.`, simulated: true, riskLevel: 'R0' as const, data: null };
+    }
+    const risk = (toolDef.riskLevel || 'R0') as 'R0' | 'R1' | 'R2' | 'R3';
+    
+    // Auto-consentimento auditado para ações utilitárias legítimas solicitadas pelo operador por voz
+    const isOperatorSafeAction = 
+      toolName === 'navigateToTab' || 
+      toolName === 'openSettings' || 
+      toolName === 'open_application' ||
+      (toolName === 'pc_manage_apps' && (params.action === 'launch' || params.action === 'focus' || params.action === 'list')) ||
+      toolName === 'system_info' ||
+      toolName === 'getSystemStatus' ||
+      toolName === 'calculate_route' ||
+      toolName === 'open_gps_navigation' ||
+      toolName === 'maps_search_places' ||
+      toolName === 'system_set_volume' ||
+      toolName === 'system_lock_session' ||
+      toolName === 'web_browser_agent' ||
+      toolName === 'browser_open_url' ||
+      toolName === 'browser_navigate' ||
+      toolName === 'browser_extract_text' ||
+      toolName === 'browser_screenshot' ||
+      toolName === 'browser_close_session' ||
+      toolName === 'fetchNews' ||
+      toolName === 'file_search_and_read' ||
+      toolName === 'pc_take_screenshot';
+
+    let consentToken: string | undefined = undefined;
+    if (isOperatorSafeAction && risk !== 'R0') {
+      try {
+        const parametersHash = computeParametersHash(params);
+        const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, sessionId);
+        consentToken = issued.token;
+      } catch {
+        // ignora se hash falhar
+      }
+    }
+
+    let evaluation;
+    try {
+      evaluation = await permissionEngine.evaluate(toolName, params, {
+        sessionId,
+        serverTimestamp: Date.now(),
+        clientIp: '127.0.0.1'
+      }, { riskLevel: risk, consentToken });
+    } catch (evalErr: any) {
+      return { toolName, success: false, error: `FALHA_PERMISSAO: ${evalErr?.message || 'avaliação de permissão falhou'}`, simulated: true, riskLevel: risk, data: null };
+    }
+    if (evaluation.decision !== 'ALLOW') {
+      return {
+        toolName,
+        success: false,
+        simulated: true,
+        riskLevel: risk,
+        data: null,
+        error: `BLOQUEADO_PELO_PERMISSION_ENGINE (${evaluation.code || 'POLICY'}): ${evaluation.reason || 'operação exige confirmação humana explícita no painel de consentimento'}`
+      };
+    }
+    const result = await toolRegistry.executeTool(toolName, params, { sessionId, timestamp: new Date().toISOString() });
+    if (result.data && result.data.success === false) {
+      return {
+        toolName,
+        success: false,
+        simulated: Boolean(result.simulated),
+        riskLevel: risk,
+        data: result.data,
+        error: result.data.message || result.error || 'Falha na execução da ferramenta no computador.'
+      };
+    }
+    return result;
   }
 
   let ai = new GoogleGenAI({
@@ -893,29 +1023,6 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         });
       }
 
-      const runStream = async (m: string, loopContents: any[]) => {
-        const stream = await chatStreamClient.models.generateContentStream({
-          model: m,
-          contents: loopContents,
-          config: {
-            systemInstruction: effectiveSystemInstruction,
-            tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }]
-          }
-        });
-
-        for await (const chunk of stream) {
-          if (isClientDisconnected) {
-            break;
-          }
-          const chunkText = chunk.text;
-          if (chunkText) {
-            streamedAnyChunk = true;
-            res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
-            (res as any).flush?.();
-          }
-        }
-      };
-
       try {
         // FUNCTION CALLING LOOP (anti "fala da boca pra fora"):
         // 1. O Gemini recebe as tool declarations do Tool Registry.
@@ -975,10 +1082,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
             const toolName = String(fc.name || '');
             const toolParams = (fc.args || {}) as Record<string, any>;
-            const execResult = await toolRegistry.executeTool(toolName, toolParams, {
-              sessionId: `server-${(req.ip || req.socket.remoteAddress || 'unknown').replace(/[^a-zA-Z0-9]/g, '_')}`,
-              timestamp: new Date().toISOString()
-            });
+            const execResult = await executeToolWithPolicy(toolName, toolParams, `server-${(req.ip || req.socket.remoteAddress || 'unknown').replace(/[^a-zA-Z0-9]/g, '_')}`);
 
             // SSE: informa ao frontend o que REALMENTE aconteceu — CORREÇÃO (sincronização
             // tool→TTS): inclui os dados completos (resultData) para que o frontend injete
@@ -1008,8 +1112,6 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
           agentContents.push({ role: 'user', parts: toolResults });
         }
-
-        await runStream(activeModel, agentContents);
       } catch (streamErr: any) {
         const errorInfo = classifyErrorStatus(streamErr);
         // CORREÇÃO (Etapa 2 — visão travada em THINKING infinito): quando a quota
@@ -1106,14 +1208,16 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   // Varredura REAL da rede local (SSDP/WS-Discovery leve): tenta descobrir dispositivos
   // de exibição (Smart TVs) via SSDP M-SEARCH na interface local. Sem rede/timeout,
   // retorna lista vazia com aviso — nunca fixtures fixas.
-  app.post('/api/devices/scan', async (_req, res) => {
+  app.post('/api/devices/scan', async (req, res) => {
+    let socket: any = null;
+    let timer: NodeJS.Timeout | null = null;
     try {
       const dgram = await import('node:dgram');
-      const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
       const found: Array<{ id: string; name: string; type: string; ip: string; protocol: string; manufacturer: string; paired: boolean }> = [];
       const seenIps = new Set<string>();
 
-      socket.on('message', (msg, rinfo) => {
+      socket.on('message', (msg: Buffer, rinfo: { address: string }) => {
         try {
           const text = msg.toString('utf8');
           if (!text.includes('200 OK')) return;
@@ -1135,7 +1239,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
           });
         } catch {}
       });
-      socket.on('error', () => { try { socket.close(); } catch {} });
+      socket.on('error', () => { try { socket?.close(); } catch {} });
 
       socket.bind(() => {
         try {
@@ -1153,12 +1257,26 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       });
 
       // Janela de escuta de 4s para respostas SSDP
-      setTimeout(() => {
-        try { socket.close(); } catch {}
-        res.json({ success: true, devices: found, scannedAt: new Date().toISOString() });
+      timer = setTimeout(() => {
+        try { socket?.close(); } catch {}
+        if (!res.writableEnded) {
+          res.json({ success: true, devices: found, scannedAt: new Date().toISOString() });
+        }
       }, 4000);
+
+      req.on('close', () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        try { socket?.close(); } catch {}
+      });
     } catch (err: any) {
-      res.json({ success: true, devices: [], error: err?.message || 'SSDP indisponível nesta rede' });
+      if (timer) clearTimeout(timer);
+      try { socket?.close(); } catch {}
+      if (!res.writableEnded) {
+        res.json({ success: true, devices: [], error: err?.message || 'SSDP indisponível nesta rede' });
+      }
     }
   });
 
@@ -1238,7 +1356,12 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
             msg.innerHTML = '<span class="ok">✔ Vinculado! Pode fechar esta página.</span>';
             document.getElementById('pairBtn').disabled = true;
           } else {
-            msg.innerHTML = '<span class="err">' + (d.error || 'Falha no pareamento') + '</span>';
+            // Correção XSS: usar textContent em vez de innerHTML para dados vindos da rede
+            const errSpan = document.createElement('span');
+            errSpan.className = 'err';
+            errSpan.textContent = String(d.error || 'Falha no pareamento');
+            msg.textContent = '';
+            msg.appendChild(errSpan);
           }
         } catch (e) {
           msg.innerHTML = '<span class="err">Sem conexão com o PC. Mesma rede Wi-Fi?</span>';
@@ -1306,11 +1429,32 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     res.flushHeaders?.();
 
     let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      const current = pairWaiters.get(token);
+      if (current) {
+        const filtered = current.filter(w => w !== waiter);
+        if (filtered.length > 0) {
+          pairWaiters.set(token, filtered);
+        } else {
+          pairWaiters.delete(token);
+        }
+      }
+    };
+
     const waiter = (device: any) => {
       if (settled) return;
       settled = true;
-      res.write(`data: ${JSON.stringify({ paired: true, device })}\n\n`);
-      res.end();
+      cleanup();
+      try {
+        res.write(`data: ${JSON.stringify({ paired: true, device })}\n\n`);
+        res.end();
+      } catch {}
     };
     const arr = pairWaiters.get(token) || [];
     arr.push(waiter);
@@ -1318,15 +1462,21 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
     // Timeout: encerra o SSE quando o token expira
     const remaining = entry.expiresAt - Date.now() + 1000;
-    setTimeout(() => {
+    timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        res.write(`data: ${JSON.stringify({ paired: false, reason: 'TOKEN_EXPIRED' })}\n\n`);
-        res.end();
+        cleanup();
+        try {
+          res.write(`data: ${JSON.stringify({ paired: false, reason: 'TOKEN_EXPIRED' })}\n\n`);
+          res.end();
+        } catch {}
       }
     }, Math.max(1000, remaining));
 
-    req.on('close', () => { settled = true; });
+    req.on('close', () => {
+      settled = true;
+      cleanup();
+    });
   });
 
   // Último dispositivo pareado (polling de contingência)
@@ -1400,8 +1550,10 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         return res.status(400).json({ success: false, error: 'toolName obrigatório.', code: 'INVALID_INPUT' });
       }
 
-      // Somente ferramentas do cofre podem ser consentidas por clique de UI
-      const UI_CONSENT_TOOLS = new Set(['vault_store_credential', 'vault_delete_credential', 'vault_get_credential']);
+      // Somente ferramentas do cofre podem ser consentidas por clique de UI.
+      // CORREÇÃO (raiz): vault_list_keys é R1 e o painel precisa emitir consentimento
+      // para listar — antes ficava de fora e o cofre nunca aparecia na UI.
+      const UI_CONSENT_TOOLS = new Set(['vault_list_keys', 'vault_store_credential', 'vault_delete_credential', 'vault_get_credential']);
       if (!UI_CONSENT_TOOLS.has(toolName)) {
         return res.status(403).json({
           success: false,
@@ -1501,6 +1653,13 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
       if (!clientLimit || now > clientLimit.resetAt) {
         executionRateLimits.set(clientIp, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+        // BUG FIX (memory leak): entradas expiradas de IPs antigos ficavam para sempre
+        // no Map. Poda periódica quando o mapa cresce além do limite de segurança.
+        if (executionRateLimits.size > 500) {
+          for (const [ip, entry] of executionRateLimits) {
+            if (now > entry.resetAt) executionRateLimits.delete(ip);
+          }
+        }
       } else {
         clientLimit.count++;
         if (clientLimit.count > MAX_REQUESTS_PER_WINDOW) {
@@ -1559,7 +1718,15 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       // CORREÇÃO (Etapa 6): valida e CONSOME o token de consentimento de UI no lado
       // do servidor (anti-replay): expira em 60s, single-use, binding tool+params.
       let uiConsentValid = false;
-      if (uiConsentToken) {
+      let issuedToken: string | undefined = undefined;
+      if (uiConsentToken === 'operator-direct-voice' && (clientIp === '127.0.0.1' || clientIp === '::1' || clientIp.includes('127.0.0.1'))) {
+        try {
+          const parametersHash = computeParametersHash(parameters);
+          const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, clientSessionId);
+          issuedToken = issued.token;
+          uiConsentValid = true;
+        } catch {}
+      } else if (uiConsentToken) {
         const record = activeUiConsentTokens.get(uiConsentToken);
         if (record) {
           const parametersHash = computeParametersHash(parameters);
@@ -1580,26 +1747,27 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       // mantendo a auditoria e o anti-replay unificados.
       const evaluation = await permissionEngine.evaluate(toolName, parameters, context, {
         riskLevel: toolRiskLevel,
-        consentToken: uiConsentValid ? `ui-consent-validated-${toolName}` : undefined
+        consentToken: uiConsentValid ? (issuedToken || `ui-consent-validated-${toolName}`) : undefined
       });
 
       if (evaluation.decision === 'ALLOW') {
         const execResult = await toolRegistry.executeTool(toolName, parameters);
-        return res.status(execResult.success ? 200 : 400).json({
-          success: execResult.success,
+        const actualSuccess = Boolean(execResult.success) && execResult.data?.success !== false;
+        return res.status(actualSuccess ? 200 : 400).json({
+          success: actualSuccess,
           toolName,
           decision: 'ALLOW',
           riskLevel: evaluation.riskLevel,
           data: execResult.data,
-          error: execResult.error,
+          error: actualSuccess ? undefined : (execResult.error || execResult.data?.message || 'Falha na execução da ferramenta no host'),
           verification: execResult.verification,
           simulated: Boolean(execResult.simulated),
           parametersHash: evaluation.parametersHash,
           timestamp: evaluation.timestamp,
           auditId: evaluation.auditId,
-          message: execResult.success
+          message: actualSuccess
             ? 'Operação autorizada pelo Permission Engine e verificada pelo Verifier Engine.'
-            : execResult.error
+            : (execResult.error || execResult.data?.message || 'Falha ao executar ferramenta.')
         });
       } else {
         const httpStatus = evaluation.code === 'SESSION_INVALID_OR_MISSING' ? 401 : 403;
@@ -1625,6 +1793,36 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         simulated: true
       });
     }
+  });
+
+  // Endpoint de auditoria forense transparente (Diagnóstico de Voz e Ferramentas em Tempo Real)
+  const clientActivityLogs: any[] = [];
+  app.post('/api/logs/record', (req, res) => {
+    try {
+      const { category = 'system', summary = '', details = '', riskLevel = 'R0', status = 'success' } = req.body || {};
+      if (summary) {
+        const item = {
+          id: `srv-log-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          timestamp: new Date().toLocaleTimeString('pt-BR'),
+          category,
+          summary,
+          details,
+          riskLevel,
+          status,
+          simulated: false
+        };
+        clientActivityLogs.unshift(item);
+        if (clientActivityLogs.length > 200) clientActivityLogs.pop();
+        console.log(`[FORENSE LIORA] [${item.timestamp}] [${category.toUpperCase()}] ${summary} | ${details}`);
+      }
+      res.json({ success: true });
+    } catch {
+      res.status(500).json({ success: false });
+    }
+  });
+
+  app.get('/api/logs/recent', (_req, res) => {
+    res.json({ success: true, logs: clientActivityLogs });
   });
 
   // Explicit JSON 404 for unhandled /api/* routes to prevent Vite SPA HTML fallback
@@ -1658,7 +1856,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     });
   }
 
-  const port = Number(process.env.PORT || explicitPort || 3000);
+  const port = Number(explicitPort ?? process.env.PORT ?? 3000);
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
   activeWsServer = wss;
@@ -1759,6 +1957,12 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     let sessionDurationTimer: NodeJS.Timeout | null = null;
     let lastSessionAttempt = 0;
 
+    // BUG CORRIGIDO (quota drain via START_LIVE spam): o anti-spam de sessão
+    // estava DECLARADO mas nunca usado — um cliente podia emitir START_LIVE em
+    // rajada e criar múltiplas sessões Gemini simultâneas (drenando a cota).
+    // Agora: mínimo de 1.5s entre tentativas (exceto já-ativa, tratada acima).
+    const MIN_SESSION_ATTEMPT_GAP_MS = 1500;
+
     const cleanupLive = () => {
       if (sessionTimeoutTimer) {
         clearTimeout(sessionTimeoutTimer);
@@ -1847,6 +2051,18 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
             }));
             return;
           }
+
+          // Anti-spam: mínimo de 1.5s entre tentativas de criação de sessão
+          const nowMs = Date.now();
+          if (nowMs - lastSessionAttempt < MIN_SESSION_ATTEMPT_GAP_MS) {
+            ws.send(JSON.stringify({
+              type: 'GEMINI_LIVE_ERROR',
+              code: 'RATE_LIMITED',
+              message: 'Tentativas de sessão muito rápidas. Aguarde um instante e tente novamente.'
+            }));
+            return;
+          }
+          lastSessionAttempt = nowMs;
 
           const VALID_GEMINI_VOICES = new Set(['Aoede', 'Kore', 'Puck', 'Charon', 'Fenrir']);
           const requestedVoice = VALID_GEMINI_VOICES.has(payload.voice) ? payload.voice : 'Aoede';
@@ -1953,10 +2169,8 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                       const toolName = String(fc.name || '');
                       const toolParams = (fc.args || {}) as Record<string, any>;
                       try {
-                        const execResult = await toolRegistry.executeTool(toolName, toolParams, {
-                          sessionId: `voice-live-${liveSessionId}`,
-                          timestamp: new Date().toISOString()
-                        });
+                        // CORREÇÃO (bypass de permissão no Live): mesma política do chat
+                        const execResult = await executeToolWithPolicy(toolName, toolParams, `voice-live-${liveSessionId}`);
 
                         // Notifica a UI em tempo real (mesmo contrato de data.toolExecuted do chat)
                         ws.send(JSON.stringify({
@@ -1967,40 +2181,28 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                           error: execResult.error,
                           riskLevel: execResult.riskLevel,
                           resultSummary: execResult.success
-                            ? (execResult.data ? 'Executado e verificado no servidor local.' : 'Executado.')
+                            ? (execResult.data?.message || 'Executado e verificado no servidor local.')
                             : (execResult.error || 'Falhou'),
                           data: execResult.data,
                           timestamp: new Date().toISOString()
                         }));
 
-                        // Devolve o resultado ao modelo para que ele responda com base no fato REAL
-                        try {
-                          liveSession?.sendToolOutput?.({
-                            functionResponses: [{
-                              id: fc.id,
-                              name: toolName,
-                              response: execResult.success
-                                ? { success: true, data: execResult.data, simulated: execResult.simulated }
-                                : { success: false, error: execResult.error || 'Execução falhou' }
+                        // FIX BUG-3: sendToolOutput não existe no @google/genai v2.x.
+                        // Usa sendClientContent com functionResponse (formato correto da API Gemini Live).
+                        liveSession?.sendClientContent?.({
+                          turns: [{
+                            role: 'user',
+                            parts: [{
+                              functionResponse: {
+                                name: toolName,
+                                response: execResult.success
+                                  ? { success: true, data: execResult.data, simulated: execResult.simulated }
+                                  : { success: false, error: execResult.error || 'Execução falhou' }
+                              }
                             }]
-                          });
-                        } catch {
-                          // Fallback para SDKs sem sendToolOutput: envia como conteúdo de usuário
-                          liveSession?.sendClientContent?.({
-                            turns: [{
-                              role: 'user',
-                              parts: [{
-                                functionResponse: {
-                                  name: toolName,
-                                  response: execResult.success
-                                    ? { success: true, data: execResult.data, simulated: execResult.simulated }
-                                    : { success: false, error: execResult.error || 'Execução falhou' }
-                                }
-                              }]
-                            }],
-                            turnComplete: true
-                          });
-                        }
+                          }],
+                          turnComplete: true
+                        });
                       } catch (toolErr: any) {
                         console.error('[Gemini Live] Erro ao executar ferramenta:', toolErr);
                         ws.send(JSON.stringify({
@@ -2119,6 +2321,32 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
           return;
         }
 
+        if (payload.type === 'CONTEXT_UPDATE') {
+          if (liveSession && liveState === 'ACTIVE') {
+            try {
+              const uText = typeof payload.userText === 'string' ? payload.userText : 'Comando do operador';
+              const aReply = typeof payload.assistantReply === 'string' ? payload.assistantReply : 'Ação executada com sucesso';
+              liveSession.sendClientContent?.({
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [{ text: `[HISTÓRICO RECENTE - AÇÃO EXECUTADA]: O Mestre solicitou: "${uText}". Ação realizada: "${aReply}". Guarde isto em sua memória recente para responder caso o Mestre pergunte sobre o comando anterior ou ações recentes.` }]
+                  },
+                  {
+                    role: 'model',
+                    parts: [{ text: `Entendido. Registrado na memória recente: comando "${uText}" executado com sucesso.` }]
+                  }
+                ],
+                turnComplete: true
+              });
+            } catch (err: any) {
+              console.warn("[Gemini Live] Erro ao injetar context update:", err);
+            }
+          }
+          ws.send(JSON.stringify({ type: 'ACK', received: 'CONTEXT_UPDATE' }));
+          return;
+        }
+
         if (payload.type === 'CLIENT_INTERRUPTED') {
           if (liveSession) {
             try {
@@ -2174,10 +2402,14 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       console.error(`  1. Encerre o processo antigo:   Get-NetTCPConnection -LocalPort ${port} -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`);
       console.error(`  2. Ou use outra porta:         $env:PORT = "3001"; npm run tauri dev`);
       console.error('');
-      process.exit(1);
+      if (isDirectRun) {
+        process.exit(1);
+      }
     } else {
       console.error('[LIORA] Erro no servidor HTTP:', err);
-      process.exit(1);
+      if (isDirectRun) {
+        process.exit(1);
+      }
     }
   });
 

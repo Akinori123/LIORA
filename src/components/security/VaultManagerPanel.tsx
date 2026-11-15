@@ -41,16 +41,27 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
     setIsLoading(true);
     setError(null);
     try {
+      // CORREÇÃO (raiz): vault_list_keys é R1 — o PermissionEngine EXIGE consentimento
+      // para qualquer R1. Sem o token de UI, o servidor respondia DENY e o cofre
+      // aparecia sempre vazio. O clique de recarregar/abrir o painel é o consentimento.
+      const token = await getUiConsentToken('vault_list_keys', {});
       const res = await fetch('/api/tools/execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'x-liora-ui-consent': token } : {})
+        },
         body: JSON.stringify({ toolName: 'vault_list_keys', parameters: {} })
       });
       const data = await res.json();
+      // BUG FIX (raiz): /api/tools/execute retorna o payload da ferramenta em
+      // data.data (ex: { success, data: { keys, count } }), não em data.keys.
+      // A UI lia sempre [] e o painel mostrava o cofre vazio mesmo com credenciais.
+      const payload = data?.data ?? data;
       if (data.success) {
-        setKeys(data.keys || []);
+        setKeys(payload?.keys || []);
       } else {
-        setError(data.error || 'Falha ao listar o cofre.');
+        setError(data.error || payload?.error || 'Falha ao listar o cofre.');
       }
     } catch (err: any) {
       setError(err?.message || 'Falha de rede ao acessar o cofre.');
@@ -130,6 +141,9 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         setConfirmDelete(null);
         await loadKeys();
       } else {
+        // CORREÇÃO: em caso de falha, sai do modo confirmação — antes o botão
+        // 'Confirmar' ficava preso na entrada mesmo após erro/expiração do token.
+        setConfirmDelete(null);
         setFeedback(data.error || 'Falha ao remover.');
       }
     } catch (err: any) {

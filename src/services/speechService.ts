@@ -69,6 +69,7 @@ class SpeechService {
 
   private autoSendCallback: (() => void) | null = null;
   private silenceTimer: any = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private userSpokeInSession: boolean = false;
 
   private currentAudioElement: HTMLAudioElement | null = null;
@@ -92,7 +93,11 @@ class SpeechService {
 
   public setActiveNeuralVoice(voice: string) {
     if (['Aoede', 'Puck', 'Charon', 'Kore', 'Fenrir'].includes(voice)) {
-      this.activeNeuralVoice = voice;
+      if (this.activeNeuralVoice !== voice) {
+        this.activeNeuralVoice = voice;
+        this.ttsAudioCache.clear();
+        this.warmTtsCache();
+      }
     }
   }
 
@@ -127,10 +132,35 @@ class SpeechService {
   }
 
   public async warmTtsCache() {
-    const defaultPhrases = ['Entendido.', 'Certo.', 'Analisando.', 'Processando.'];
+    const defaultPhrases = [
+      'Entendido.',
+      'Certo.',
+      'Analisando.',
+      'Processando.',
+      'Abrindo Bloco de Notas, Mestre.',
+      'Abrindo Calculadora, Mestre.',
+      'Abrindo Painel de Controle, Mestre.',
+      'Abrindo Google Chrome, Mestre.',
+      'Abrindo Configurações do Windows, Mestre.',
+      'Abrindo Gerenciador de Tarefas, Mestre.',
+      'Abrindo Explorador de Arquivos, Mestre.',
+      'Abrindo Visual Studio Code, Mestre.',
+      'Bloqueando a sessão do computador, Mestre.',
+      'Aumentando o volume, Mestre.',
+      'Diminuindo o volume, Mestre.',
+      'Silenciando o áudio do computador, Mestre.',
+      'Navegando para o Painel Geral.',
+      'Abrindo as Configurações.',
+      'Abrindo Automações.',
+      'Abrindo Dispositivos IoT.'
+    ];
     const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (geminiKey) headers['Authorization'] = `Bearer ${geminiKey}`;
+
+    const storeModel = (typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState()?.settings?.ttsModel)
+      ? (window as any).__LIORA_STORE__.getState().settings.ttsModel
+      : 'gemini-3.8-flash-lite-tts';
 
     for (const phrase of defaultPhrases) {
       if (this.ttsAudioCache.has(phrase.toLowerCase())) continue;
@@ -138,7 +168,7 @@ class SpeechService {
         const res = await fetch('/api/gemini/tts', {
           method: 'POST',
           headers,
-          body: JSON.stringify({ text: phrase, voice: this.activeNeuralVoice })
+          body: JSON.stringify({ text: phrase, voice: this.activeNeuralVoice, model: storeModel })
         });
         if (res.ok) {
           const data = await res.json();
@@ -176,6 +206,13 @@ class SpeechService {
           source.buffer = cached;
           source.connect(this.audioContext.destination);
           this.currentAudioSource = source;
+          // Correção: sem onended, a referência fica órfã e isSpeaking() retorna true para sempre,
+          // bloqueando reconhecimentos futuros e o turn-taking do duplex.
+          source.onended = () => {
+            if (this.currentAudioSource === source) {
+              this.currentAudioSource = null;
+            }
+          };
           source.start(0);
           return true;
         } catch {}
@@ -435,6 +472,16 @@ class SpeechService {
         clearInterval(this.meterIntervalId);
       }
       this.meterIntervalId = setInterval(() => {
+        // Auto-recuperação do AudioContext caso seja suspenso pelo WebView2/Chromium
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          this.audioContext.resume().catch(() => {});
+        }
+        if (this.micGainNode && this.audioContext && this.micGainNode.gain.value === 0) {
+          try {
+            this.micGainNode.gain.setValueAtTime(1.0, this.audioContext.currentTime);
+          } catch {}
+        }
+
         if (!this.shouldBeListening || !this.analyser) return;
 
         this.analyser.getByteTimeDomainData(timeData);
@@ -461,16 +508,18 @@ class SpeechService {
           const levelEmit = Math.round(smoothedLevel);
           this.audioLevelListeners.forEach(listener => listener(levelEmit));
 
-          // VAD (Voice Activity Detection): detecção de voz e barge-in
-          if (levelEmit >= 10 || rms > 0.02) {
-            if (this.isSpeaking()) {
-              this.stopSpeaking();
-            }
-
-            this.userSpokeInSession = true;
-            if (this.silenceTimer) {
-              clearTimeout(this.silenceTimer);
-              this.silenceTimer = null;
+          // VAD (Voice Activity Detection): detecção de voz do operador
+          if (levelEmit >= 12 || rms > 0.025) {
+            // Anti-auto-interrupção acústica: quando a LIORA está falando pelo alto-falante,
+            // o microfone capta o som dos próprios alto-falantes (eco acústico).
+            // NUNCA interrompe a fala por RMS bruto — a interrupção inteligente (barge-in)
+            // é tratada exclusivamente pelo STT no onResult quando palavras humanas reais são reconhecidas.
+            if (!this.isSpeaking()) {
+              this.userSpokeInSession = true;
+              if (this.silenceTimer) {
+                clearTimeout(this.silenceTimer);
+                this.silenceTimer = null;
+              }
             }
           } else if (this.userSpokeInSession && levelEmit < 8 && this.autoSendCallback) {
             if (!this.silenceTimer) {
@@ -510,6 +559,21 @@ class SpeechService {
     } catch (err: any) {
       console.info('[GlobalVoiceBar AudioContext] Microfone físico não inicializado. Ativando sintetizador espectral de fallback:', err?.message || err);
       this.startFallbackAudioMeter();
+    }
+  }
+
+  public ensureAudioMeterRunning(): void {
+    this.shouldBeListening = true;
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume().catch(() => {});
+    }
+    if (this.micGainNode && this.audioContext) {
+      try {
+        this.micGainNode.gain.setValueAtTime(1.0, this.audioContext.currentTime);
+      } catch {}
+    }
+    if (!this.meterIntervalId || !this.mediaStream || !this.mediaStream.active || !this.analyser) {
+      void this.startAudioMeter();
     }
   }
 
@@ -794,7 +858,9 @@ class SpeechService {
         // Se o usuário ainda quer manter a voz ativa, reinicia com uma nova instância limpa
         // evitando que o Chrome trave a escuta após pausas!
         if (this.shouldBeListening) {
-          setTimeout(() => {
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
             if (this.shouldBeListening) {
               try {
                 this.startListening(onResult, onError, onEnd, onAutoSend);
@@ -829,6 +895,10 @@ class SpeechService {
     if (this.silenceTimer) {
       clearTimeout(this.silenceTimer);
       this.silenceTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
     this.stopAudioMeter();
     if (this.recognition) {
@@ -968,10 +1038,14 @@ class SpeechService {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (geminiKey) headers['Authorization'] = `Bearer ${geminiKey}`;
 
+      const storeModel = (typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState()?.settings?.ttsModel)
+        ? (window as any).__LIORA_STORE__.getState().settings.ttsModel
+        : 'gemini-3.8-flash-lite-tts';
+
       const res = await fetch('/api/gemini/tts', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ text: cleanText, voice: this.activeNeuralVoice })
+        body: JSON.stringify({ text: cleanText, voice: this.activeNeuralVoice, model: storeModel })
       });
 
       if (res.ok) {
@@ -1032,8 +1106,53 @@ class SpeechService {
   }
 
   private speakFallbackBrowser(cleanText: string, onStart?: () => void, onEnd?: () => void) {
-    // Eliminação total de voz robótica do navegador. Executa apenas terminação limpa.
-    onEnd?.();
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      onEnd?.();
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.lang = 'pt-BR';
+      utterance.rate = 1.05;
+      utterance.pitch = 1.0;
+
+      // Seleciona a melhor voz natural pt-BR instalada no Windows (Microsoft Francisca, Maria, etc.)
+      const voices = window.speechSynthesis.getVoices();
+      const ptBrVoice = voices.find(v => (v.lang === 'pt-BR' || v.lang === 'pt_BR') && (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Microsoft') || v.name.includes('Francisca') || v.name.includes('Luciana') || v.name.includes('Maria'))) 
+        || voices.find(v => v.lang === 'pt-BR' || v.lang === 'pt_BR');
+      
+      if (ptBrVoice) {
+        utterance.voice = ptBrVoice;
+      }
+
+      utterance.onstart = () => {
+        this.currentUtterance = utterance;
+        onStart?.();
+      };
+
+      utterance.onend = () => {
+        if (this.currentUtterance === utterance) {
+          this.currentUtterance = null;
+        }
+        onEnd?.();
+      };
+
+      utterance.onerror = (e) => {
+        console.warn('[SpeechService Fallback TTS Error]:', e);
+        if (this.currentUtterance === utterance) {
+          this.currentUtterance = null;
+        }
+        onEnd?.();
+      };
+
+      this.currentUtterance = utterance;
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.warn('[SpeechService Fallback TTS Exception]:', err);
+      onEnd?.();
+    }
   }
 
   public stopSpeaking() {

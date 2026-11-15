@@ -36,6 +36,32 @@ export interface ReaInspectionTarget {
  * Calcula um diff unificado linha a linha de forma puramente determinística
  */
 export function computeUnifiedDiff(original: string, modified: string): DiffLine[] {
+  if (original === modified) {
+    if (!original) return [];
+    return original.split('\n').map((content, idx) => ({
+      type: 'unchanged',
+      content,
+      oldLineNumber: idx + 1,
+      newLineNumber: idx + 1
+    }));
+  }
+
+  if (!original) {
+    return modified.split('\n').map((content, idx) => ({
+      type: 'added',
+      content,
+      newLineNumber: idx + 1
+    }));
+  }
+
+  if (!modified) {
+    return original.split('\n').map((content, idx) => ({
+      type: 'removed',
+      content,
+      oldLineNumber: idx + 1
+    }));
+  }
+
   const oldLines = original.split('\n');
   const newLines = modified.split('\n');
   const result: DiffLine[] = [];

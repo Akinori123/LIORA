@@ -41,8 +41,9 @@ export async function captureScreen(): Promise<ScreenCaptureResult> {
 
   // 2. Caminho Web Display Media API (se disponível no navegador)
   if (typeof navigator !== 'undefined' && navigator.mediaDevices && 'getDisplayMedia' in navigator.mediaDevices) {
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { mediaSource: 'screen' } as any });
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { mediaSource: 'screen' } as any });
       const video = document.createElement('video');
       video.srcObject = stream;
       await video.play();
@@ -56,9 +57,6 @@ export async function captureScreen(): Promise<ScreenCaptureResult> {
         const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
         const base64Data = dataUrl.replace(/^data:image\/[a-z]+;base64,/, '');
 
-        // Encerra a transmissão após capturar o quadro
-        stream.getTracks().forEach(track => track.stop());
-
         return {
           base64Data,
           mimeType: 'image/jpeg',
@@ -70,6 +68,12 @@ export async function captureScreen(): Promise<ScreenCaptureResult> {
       }
     } catch (err) {
       console.warn('[ScreenCapture] Usuário cancelou ou navegador não permitiu captura por DisplayMedia:', err);
+    } finally {
+      if (stream) {
+        stream.getTracks().forEach(track => {
+          try { track.stop(); } catch {}
+        });
+      }
     }
   }
 
@@ -146,7 +150,7 @@ export async function captureScreen(): Promise<ScreenCaptureResult> {
       timestamp,
       width: 1280,
       height: 720,
-      isRealScreen: true
+      isRealScreen: false
     };
   }
 

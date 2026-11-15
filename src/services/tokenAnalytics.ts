@@ -55,7 +55,10 @@ class TokenAnalyticsService {
     if (typeof localStorage === 'undefined') return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.stats));
-    } catch {}
+    } catch (err) {
+      // Quota do localStorage estourou — análise não é crítica, apenas loga
+      console.warn('[TokenAnalytics] Falha ao persistir métricas (quota?):', err);
+    }
   }
 
   public getStats(): TokenUsageStats {

@@ -63,6 +63,14 @@ export interface ToolDefinition<TParams = any, TResult = any> {
   isSimulated: boolean;
   parameters: ToolParametersSchema;
   outputSchema?: ToolOutputSchema;
+  /**
+   * Timeout de execução em ms (opcional). Se não definido, usa DEFAULT_TOOL_TIMEOUT_MS.
+   * BUG CORRIGIDO: o timeout era fixo em 5s no registry — ferramentas reais de SO
+   * (zip até 60s, screenshot até 20s, exec_sandbox até 10s) sempre estouravam
+   * falso timeout, e o efeito colateral continuava rodando no disco mesmo após
+   * o erro reportado. Cada tool nativa declara agora o seu limite real.
+   */
+  timeoutMs?: number;
   execute: (params: TParams, context?: ToolExecutionContext) => Promise<TResult>;
 }
 

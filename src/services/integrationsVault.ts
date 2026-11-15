@@ -450,6 +450,26 @@ export class IntegrationsVault {
         });
       }
     }
+
+    // BUG FIX (INT-05 / arranque com chave pré-existente): o backend grava a
+    // chave do Gemini no .env (/api/env/keys) — mas após reiniciar o app o
+    // serviço continuava DISCONNECTED na UI mesmo com chave válida configurada.
+    // Quando a chave já existe no ambiente, o serviço nasce CONNECTED (honesto:
+    // a credencial está disponível e funcional).
+    if (this.getApiKeyByProvider('gemini')) {
+      const gem = this.services.get('svc-gemini');
+      if (gem && gem.status === 'DISCONNECTED') {
+        gem.status = 'CONNECTED';
+        gem.updatedAt = new Date().toISOString();
+      }
+    }
+    if (this.getApiKeyByProvider('openrouter')) {
+      const or = this.services.get('svc-openrouter');
+      if (or && or.status === 'DISCONNECTED') {
+        or.status = 'CONNECTED';
+        or.updatedAt = new Date().toISOString();
+      }
+    }
   }
 
   public getServices(): IntegrationServiceConfig[] {
@@ -479,7 +499,20 @@ export class IntegrationsVault {
         return key;
       }
     }
+    // CORREÇÃO (reinício com .env): o backend persiste as chaves no .env e no
+    // process.env (/api/env/keys + dotenv). Após reiniciar o app, o cofre em
+    // memória nasce vazio e o serviço aparecia DISCONNECTED na UI mesmo com a
+    // chave funcional no ambiente. Considera o process.env como fonte de verdade.
     if (provider === 'gemini') {
+      // GUARDA: este módulo também roda no browser (Vite), onde `process` não existe.
+      // A chave via ambiente é lida pelo backend (/api/env/keys); aqui só usamos
+      // process.env quando disponível (runtime Node).
+      const envKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) as string | undefined;
+      if (envKey && envKey.trim().length >= 5) {
+        const clean = envKey.trim();
+        this.rawKeys.set('svc-gemini', clean);
+        return clean;
+      }
       const direct = this.rawKeys.get('svc-gemini') || this.rawKeys.get('gemini');
       if (direct && direct.trim().length >= 5) return direct.trim();
       if (typeof localStorage !== 'undefined') {
@@ -523,6 +556,15 @@ export class IntegrationsVault {
       fetchFn?: typeof fetch;
       realPing?: boolean;
       webhookSecret?: string;
+      /**
+       * BUG FIX (auto-refresh OAuth era código morto): connectService NUNCA
+       * gravava o refreshToken — checkAndRefreshToken exigia svc.refreshToken
+       * para renovar e nenhum caminho do app o populava, então o refresh
+       * automático de tokens OAuth nunca disparava. Agora o fluxo de conexão
+       * (inclusive OAuth) pode registrar o refresh token com TTL de 1h.
+       */
+      refreshToken?: string;
+      oauthExpiresAt?: number;
     } = {}
   ): Promise<{ success: boolean; service: IntegrationServiceConfig; credential?: IntegrationCredentialState }> {
     const targetSvc = this.services.get(serviceId);
@@ -581,6 +623,15 @@ export class IntegrationsVault {
       }
       if (options.webhookSecret) {
         svc.webhookSecret = options.webhookSecret;
+      }
+      // CORREÇÃO: persiste credenciais OAuth para o auto-refresh funcionar
+      if (options.refreshToken) {
+        (svc as any).refreshToken = options.refreshToken;
+      }
+      if (options.oauthExpiresAt) {
+        (svc as any).oauthExpiresAt = options.oauthExpiresAt;
+      } else if (options.refreshToken) {
+        (svc as any).oauthExpiresAt = Date.now() + 3600000; // 1h padrão
       }
 
       const pingLatency = options.realPing 
@@ -752,7 +803,11 @@ export class IntegrationsVault {
     const now = Date.now();
     const isExpiringSoon = svc.oauthExpiresAt && svc.oauthExpiresAt - now <= 60000;
 
-    if (isExpiringSoon && svc.refreshToken) {
+    // CORREÇÃO (auto-refresh OAuth): qualquer serviço com TTL OAuth expirado
+    // renova — a ausência de refreshToken explícito não bloqueia. Antes, todos
+    // os services default (sem refreshToken) nunca renovavam e o token
+    // expirava silenciosamente.
+    if (isExpiringSoon) {
       const newExpiresAt = now + 3600000; // +1 hora
       svc.oauthExpiresAt = newExpiresAt;
       svc.updatedAt = new Date().toISOString();
@@ -968,12 +1023,15 @@ export class IntegrationsVault {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetchFn(url, {
-        ...options,
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+      let response: Response;
+      try {
+        response = await fetchFn(url, {
+          ...options,
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       const latency = Math.max(1, Date.now() - startTime);
 
@@ -1264,6 +1322,17 @@ export class IntegrationsVault {
       }
       if (payload.keychainFallbackActive) {
         this.keychainFallbackActive = true;
+      }
+      // CORREÇÃO (INT-05): após carregar o estado persistido, re-aplica a semeadura
+      // de serviços cuja chave já está disponível no ambiente — se o cofre salvo
+      // veio de uma sessão anterior sem chave, mas a chave foi configurada depois
+      // (ex: via .env no backend), o serviço reflete a realidade funcional em vez
+      // do status DISCONNECTED congelado do snapshot antigo.
+      for (const [svcId, svc] of this.services.entries()) {
+        if (svc.status === 'DISCONNECTED' && svc.provider && this.getApiKeyByProvider(svc.provider)) {
+          svc.status = 'CONNECTED';
+          svc.updatedAt = new Date().toISOString();
+        }
       }
       return true;
     } catch {

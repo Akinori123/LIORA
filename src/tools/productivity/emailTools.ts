@@ -100,9 +100,19 @@ interface ImapResponse {
     const tag = 'A';
     let socket: tls.TLSSocket | net.Socket;
     let tagCounter = 0;
+    let startTimer: NodeJS.Timeout | null = null;
+    let logoutTimer: NodeJS.Timeout | null = null;
 
     const finish = (err?: Error) => {
-      try { socket.end(); } catch { /* ignore */ }
+      clearTimeout(timeout);
+      if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+      if (logoutTimer) { clearTimeout(logoutTimer); logoutTimer = null; }
+      try { 
+        if (!socket.destroyed) {
+          socket.end(); 
+          socket.destroy();
+        }
+      } catch { /* ignore */ }
       if (err) reject(err);
       else resolve({ status, data });
     };
@@ -125,15 +135,21 @@ interface ImapResponse {
     });
 
     const sendNext = () => {
+      if (socket.destroyed || socket.writableEnded) return;
       if (cmdIdx >= commands.length) {
         clearTimeout(timeout);
-        socket.write(`B LOGOUT\r\n`);
-        setTimeout(() => finish(), 300);
+        try { socket.write(`B LOGOUT\r\n`); } catch {}
+        logoutTimer = setTimeout(() => finish(), 300);
         return;
       }
       const cmd = commands[cmdIdx];
       tagCounter++;
-      socket.write(`A${tagCounter} ${cmd}\r\n`);
+      try {
+        socket.write(`A${tagCounter} ${cmd}\r\n`);
+      } catch (writeErr) {
+        finish(writeErr as Error);
+        return;
+      }
       cmdIdx++;
     };
 
@@ -142,7 +158,7 @@ interface ImapResponse {
 
       // Processa linhas completas — BUG FIX: linha a linha com regex de tag ÚNICA
       // (antes, o tag 'A' casava com QUALQUER linha começando com 'A' — ex:
-      //Subject: Apple — e o servidor achava que o comando terminou antes da hora,
+      // Subject: Apple — e o servidor achava que o comando terminou antes da hora,
       // desincronizando o protocolo completamente).
       let idx;
       while ((idx = buffer.indexOf('\r\n')) !== -1) {
@@ -177,7 +193,7 @@ interface ImapResponse {
 
     // Espera o greeting e começa
     socket.once('data', () => {
-      setTimeout(sendNext, 100);
+      startTimer = setTimeout(sendNext, 100);
     });
   });
 }
@@ -413,6 +429,11 @@ export const emailSendOrReplyTool: ToolDefinition<{
       ? `--LIORA-BOUNDARY\r\nContent-Type: text/html; charset="UTF-8"\r\n\r\n${body}`
       : body;
 
+    // RFC 5321 §4.5.2 (dot-stuffing): qualquer linha do payload que comece com
+    // '.' deve ter o ponto dobrado, senão o servidor interpreta como fim do DATA
+    // e o restante do corpo vira comandos SMTP (corrupção/injeção de protocolo).
+    const stuffedBody = mimeBody.split(/\r\n/).map(l => l.startsWith('.') ? '.' + l : l).join('\r\n');
+
     const message = [
       `From: ${cred.smtp.user}`,
       `To: ${recipients.join(', ')}`,
@@ -424,12 +445,30 @@ export const emailSendOrReplyTool: ToolDefinition<{
         ? 'Content-Type: multipart/alternative; boundary="LIORA-BOUNDARY"'
         : 'Content-Type: text/plain; charset="UTF-8"',
       '',
-      mimeBody
+      stuffedBody
     ].filter(Boolean).join('\r\n');
 
     // ── Sessão SMTP real (Node puro) ──
     return new Promise((resolve) => {
+      let stage = 'greeting';
+      let buffer = '';
+      let rcptIndex = 0;
+      let settled = false;
+
+      let socket: net.Socket;
+
+      // CORREÇÃO (TLS): a porta 465 usa TLS implícito e a 587 usa texto puro que
+      // exige STARTTLS antes de AUTH — antes usávamos net puro SEMPRE, o que
+      // (a) falhava em toda porta 465 (handshake TLS esperado) e (b) enviava
+      // credenciais em texto claro na 587. Agora: 465 → tls.connect direto;
+      // outras portas → net puro com upgrade STARTTLS após EHLO.
+      const useImplicitTls = cred.smtp.port === 465;
+      let upgradedToTls = false;
+
       const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { socket.destroy(); } catch {}
         resolve({
           success: false,
           error: `SMTP_TIMEOUT: servidor ${cred.smtp.host}:${cred.smtp.port} não respondeu em 20s.`,
@@ -438,16 +477,18 @@ export const emailSendOrReplyTool: ToolDefinition<{
         });
       }, 20000);
 
-      let stage = 'greeting';
-      let buffer = '';
-
-      const socket = net.createConnection({ host: cred.smtp.host, port: cred.smtp.port }, () => {
+      socket = (useImplicitTls ? tls.connect({ host: cred.smtp.host, port: cred.smtp.port, rejectUnauthorized: false }, () => {
         stage = 'greeting';
-      });
+      }) : net.createConnection({ host: cred.smtp.host, port: cred.smtp.port }, () => {
+        stage = 'greeting';
+      })) as net.Socket;
 
       socket.setEncoding('utf8');
       socket.on('error', (err) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
+        try { socket.destroy(); } catch {}
         resolve({
           success: false,
           error: `SMTP_ERROR: ${err.message}`,
@@ -456,11 +497,29 @@ export const emailSendOrReplyTool: ToolDefinition<{
         });
       });
 
-      const send = (line: string) => socket.write(line + '\r\n');
+      socket.on('close', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve({
+          success: false,
+          error: `SMTP_CLOSED: A conexão com o servidor SMTP foi encerrada inesperadamente antes da conclusão.`,
+          simulated: false,
+          timestamp: new Date().toISOString()
+        });
+      });
+
+      const send = (line: string) => {
+        if (!socket.destroyed && !socket.writableEnded) {
+          socket.write(line + '\r\n');
+        }
+      };
 
       const smtpError = (resp: string) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
-        socket.end();
+        try { socket.end(); socket.destroy(); } catch {}
         resolve({
           success: false,
           error: `SMTP_REJECTED: ${resp.slice(0, 200)}`,
@@ -486,7 +545,42 @@ export const emailSendOrReplyTool: ToolDefinition<{
             break;
           case 'ehlo':
             if (code !== 250) return smtpError(lastLine);
+            // STARTTLS na porta 587:Upgrade do socket antes de autenticar
+            if (!useImplicitTls && !upgradedToTls) {
+              const plain = socket;
+              // BUG FIX (recursão infinita pós-STARTTLS): o handler de dados do
+              // socket seguro precisa reemitir para o TRANSPORTE ORIGINAL (plain,
+              // que carrega o parser principal). Referenciar `socket` aqui era
+              // errado — após `socket = secure`, `socket.emit('data')` apontaria
+              // para o próprio `secure`, causando recursão infinita/stack overflow
+              // no primeiro pacote pós-handshake. Capturamos o transporte ANTES.
+              const transport = socket;
+              stage = 'tls_wait'; // bloqueia o handler genérico durante o upgrade
+              plain.write('STARTTLS\r\n');
+              plain.once('data', function onTlsResp(chunk) {
+                const resp = chunk.toString('utf8');
+                if (!/^\d{3}/.test(resp.trim())) return; // multiline, aguarda
+                if (resp.startsWith('220')) {
+                  upgradedToTls = true;
+                  const secure = tls.connect({ socket: plain, rejectUnauthorized: false }, () => {
+                    stage = 'ehlo'; // novo EHLO após upgrade
+                    send('EHLO liora.local');
+                  });
+                  secure.setEncoding('utf8');
+                  secure.on('error', (e) => transport.emit('error', e));
+                  secure.on('data', (c) => transport.emit('data', c));
+                  socket = secure;
+                } else {
+                  stage = 'ehlo';
+                  socket.emit('error', new Error(`STARTTLS_FAILED: ${resp.trim().slice(0, 120)}`));
+                }
+              });
+              return; // stage continua 'ehlo'; o callback acima retoma o fluxo
+            }
             stage = 'auth'; send('AUTH LOGIN');
+            break;
+          case 'tls_wait':
+            // Resposta do STARTTLS consumida pelo callback de upgrade — ignorar
             break;
           case 'auth':
             if (code !== 334) return smtpError(lastLine);
@@ -502,19 +596,19 @@ export const emailSendOrReplyTool: ToolDefinition<{
             break;
           case 'mail_from':
             if (code !== 250) return smtpError(lastLine);
-            stage = 'rcpt_to'; send(`RCPT TO:<${allRecipients[0]}>`);
+            stage = 'rcpt_to';
+            rcptIndex = 0;
+            send(`RCPT TO:<${allRecipients[0]}>`);
             break;
           case 'rcpt_to': {
             if (code !== 250) return smtpError(lastLine);
-            // Envia os demais destinatários antes do DATA
-            const remaining = allRecipients.slice(1);
-            if (remaining.length > 0) {
-              const next = remaining.shift()!;
-              send(`RCPT TO:<${next}>`);
-              // permanece em rcpt_to para o próximo
+            rcptIndex++;
+            if (rcptIndex < allRecipients.length) {
+              send(`RCPT TO:<${allRecipients[rcptIndex]}>`);
               return;
             }
-            stage = 'data'; send('DATA');
+            stage = 'data';
+            send('DATA');
             break;
           }
           case 'data':
@@ -525,9 +619,10 @@ export const emailSendOrReplyTool: ToolDefinition<{
           case 'body':
             if (code !== 250) return smtpError(lastLine);
             stage = 'quit';
+            settled = true;
             clearTimeout(timeout);
             send('QUIT');
-            socket.end();
+            try { socket.end(); } catch {}
             resolve({
               success: true,
               to: recipients,

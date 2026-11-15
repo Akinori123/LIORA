@@ -38,8 +38,12 @@ import { tokenAnalytics } from '../services/tokenAnalytics';
 import { speechService } from '../services/speechService';
 import { voiceLiveClient } from '../services/voiceLiveClient';
 import { storageAdapter } from '../services/storageAdapter';
+import { notificationSystem } from '../notifications/notificationSystem';
 import { parseNavigationIntent, parseRouteIntent, parsePlacesSearchIntent } from '../utils/navigationParser';
+import { parsePcCommandIntent } from '../utils/pcCommandParser';
+import { parseTimeCommandIntent } from '../utils/timeCommandParser';
 import { launchGpsNavigation, launchPlacesSearch } from '../tools/navigation/navigationActionTool';
+import { executePcAction } from '../tools/pc/pcActionLauncher';
 
 export interface PendingConsentState {
   auditId: string;
@@ -64,8 +68,8 @@ export interface LioraState {
   isTelemetryOpen: boolean;
   isVoiceActive: boolean;
   isGenerating: boolean;
-  // FIX W7: activeAbortController removido do estado global (nÃ£o observÃ¡vel por UI).
-  // Agora vive em escopo de mÃ³dulo â€” acesse via getActiveAbortController().
+  // FIX W7: activeAbortController removido do estado global (não observável por UI).
+  // Agora vive em escopo de módulo — acesse via getActiveAbortController().
   
   // Real Sessions & Messages
   sessions: ConversationSession[];
@@ -100,6 +104,7 @@ export interface LioraState {
   abortGeneration: () => void;
   retryMessage: (messageId: string) => Promise<void>;
   clearMessages: () => void;
+  recordVoiceExchange: (userText: string, assistantText: string) => void;
   setActiveModel: (model: string) => void;
 
   // System & Management Actions
@@ -191,7 +196,7 @@ function bootstrapInitialSessions(): { sessions: ConversationSession[]; activeSe
   const initialWelcomeMessage: ChatMessage = {
     id: 'msg-1',
     sender: 'assistant',
-    text: 'OlÃ¡. Sou a LIORA, sua assistente pessoal inteligente. Como posso auxiliar em seus projetos, automaÃ§Ãµes ou investigaÃ§Ãµes hoje?',
+    text: 'Olá, Mestre. Sou a LIORA, sua inteligência artificial e assistente operacional pessoal soberana. Como posso auxiliá-lo em seus projetos, desenvolvimento, automações, pesquisas ou investigações hoje?',
     timestamp: initialNow.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     status: 'completed',
     modelUsed: 'gemini-3.1-flash-lite',
@@ -223,16 +228,19 @@ export const ACTIVITY_LOGS_STORAGE_KEY = 'liora_activity_logs_v1';
 
 // Instrução de sistema compartilhada entre sendMessage e retryMessage (Fix W1)
 export const LIORA_SYSTEM_INSTRUCTION = 
-  "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
-  "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
-  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
-  "Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Ao receber ordens para navegar ou alternar abas, confirme com prontidão e naturalidade. " +
+  "IDIOMA OBRIGATÓRIO: Você fala, raciocina e responde SEMPRE e EXCLUSIVAMENTE em Português do Brasil (pt-BR). É expressamente proibido responder em espanhol, inglês ou outro idioma, exceto se o Mestre pedir explicitamente uma tradução. " +
+  "Você é a LIORA, inteligência artificial autônoma soberana e assistente pessoal de alto nível inspirada no conceito de JARVIS. " +
+  "TRATAMENTO DO USUÁRIO: Dirija-se SEMPRE ao usuário com o título formal, respeitoso e leal de 'Mestre'. Sua postura é calma, com autoridade técnica, elegância e dedicação absoluta ao seu Mestre. " +
+  "PROATIVIDADE, DESENVOLVIMENTO E VERSATILIDADE: Você auxilia proativamente em programação de software, criação de sites, jogos, automações de tarefas, notícias de todos os países, pesquisas avançadas, e-mails e produtividade de ponta a ponta. No modo de voz (Live) ou texto, você também possui flexibilidade artística (sabe cantar melodias, criar versos, rimas e manter conversação rica e descontraída quando solicitado). " +
+  "NUNCA EXECUTAR EM SILÊNCIO: Toda execução de ferramenta de sistema (arquivos, apps, mapas, IoT, etc.) deve ser antecedida ou acompanhada por uma fala clara e contextualizada (ex: 'Com certeza, Mestre. Abrindo o Bloco de Notas...', 'Localizando o destino solicitado, Mestre...'). " +
+  "DISPOSITIVOS E IOT: Quando o Mestre der ordens para TV, celular, tablet ou carro e o atuador físico/IoT não estiver emparelhado, responda de forma elegante: 'Mestre, nenhum dispositivo IoT está associado a esta ação no momento.' " +
+  "CONTROLE OPERACIONAL: Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Para mudar de tela, use a ferramenta navigateToTab. " +
   "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), use 'open_gps_navigation'. Quando pedir locais próximos ('mercado mais próximo', 'farmácia', 'posto'), use 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown com linguagem especificada.";
 
 const defaultActivityLogs: ActivityLogItem[] = [
   { id: 'log-1', timestamp: '20:43:50', category: 'system', summary: 'LIORA Core inicializado com sucesso', details: 'Carregado modelo gemini-3.1-flash-lite via servidor Express.', riskLevel: 'R0', status: 'success', simulated: false },
-  { id: 'log-2', timestamp: '20:43:52', category: 'security', summary: 'Permission Engine verificado', details: 'NÃ­veis R0â€“R3 ativos. Sandbox web com bridges simuladas.', riskLevel: 'R0', status: 'success', simulated: false },
+  { id: 'log-2', timestamp: '20:43:52', category: 'security', summary: 'Permission Engine verificado', details: 'Níveis R0–R3 ativos. Sandbox web com bridges simuladas.', riskLevel: 'R0', status: 'success', simulated: false },
   { id: 'log-3', timestamp: '20:44:01', category: 'ai', summary: 'Streaming de chat conectado', details: 'Endpoint /api/gemini/chat respondendo com sucesso.', riskLevel: 'R0', status: 'success', simulated: false }
 ];
 
@@ -255,15 +263,15 @@ function bootstrapActivityLogs(): ActivityLogItem[] {
 
 export const MEMORIES_STORAGE_KEY = 'liora_memories_v1';
 
-// FIX W7: AbortController ativo Ã© um objeto volÃ¡til de escopo de mÃ³dulo (nÃ£o-vÃ¡lido em React)
-// e NÃƒO deve viver no estado global do Zustand â€” referÃªncias mutÃ¡veis no estado disparam
-// re-renderizaÃ§Ãµes em cascata em todos os subscribers a cada troca.
-// AbortController Ã© intencionalmente oculto do estado global.
+// FIX W7: AbortController ativo é um objeto volátil de escopo de módulo (não-válido em React)
+// e NÃO deve viver no estado global do Zustand — referências mutáveis no estado disparam
+// re-renderizações em cascata em todos os subscribers a cada troca.
+// AbortController é intencionalmente oculto do estado global.
 let moduleAbortController: AbortController | null = null;
 
 /**
- * FIX 6: montagem compartilhada dos cabeÃ§alhos de chat (usada por sendMessage e retryMessage).
- * Garante que o reenvio NUNCA perca as credenciais do cofre/headers de autenticaÃ§Ã£o.
+ * FIX 6: montagem compartilhada dos cabeçalhos de chat (usada por sendMessage e retryMessage).
+ * Garante que o reenvio NUNCA perca as credenciais do cofre/headers de autenticação.
  */
 /**
  * P4/R4 (sanitização de TTS): remove a marcação Markdown (cabeçalhos #, itálico/negrito
@@ -326,10 +334,11 @@ function buildChatHeaders(): Record<string, string> {
 }
 
 const defaultMemoryEntries: MemoryEntry[] = [
-  { id: 'mem-1', category: 'preference', key: 'idioma', value: 'PortuguÃªs Brasileiro (pt-BR)', confidence: 0.99, updatedAt: new Date().toISOString().split('T')[0] },
-  { id: 'mem-2', category: 'preference', key: 'tema_visual', value: 'Perfil dinÃ¢mico de cores (Crimson, Emerald, Amber, Ice)', confidence: 1.0, updatedAt: new Date().toISOString().split('T')[0] },
-  { id: 'mem-3', category: 'project', key: 'diretorio_workspace', value: '/workspace/liora-core', confidence: 0.95, updatedAt: new Date().toISOString().split('T')[0] },
-  { id: 'mem-4', category: 'routine', key: 'horario_silencioso', value: '23:00 Ã s 07:00', confidence: 0.9, updatedAt: new Date().toISOString().split('T')[0] }
+  { id: 'mem-1', category: 'preference', key: 'idioma', value: 'Português Brasileiro (pt-BR)', confidence: 0.99, updatedAt: new Date().toISOString().split('T')[0] },
+  { id: 'mem-2', category: 'preference', key: 'tema_visual', value: 'Perfil dinâmico de cores (Crimson, Emerald, Amber, Ice)', confidence: 1.0, updatedAt: new Date().toISOString().split('T')[0] },
+  { id: 'mem-3', category: 'routine', key: 'tratamento_usuario', value: 'Mestre', confidence: 1.0, updatedAt: new Date().toISOString().split('T')[0] },
+  { id: 'mem-4', category: 'project', key: 'diretorio_workspace', value: '/workspace/liora-core', confidence: 0.95, updatedAt: new Date().toISOString().split('T')[0] },
+  { id: 'mem-5', category: 'routine', key: 'horario_silencioso', value: '23:00 às 07:00', confidence: 0.9, updatedAt: new Date().toISOString().split('T')[0] }
 ];
 
 function bootstrapMemoryEntries(): MemoryEntry[] {
@@ -356,7 +365,7 @@ function persistMemoriesToLocalStorage(memories: MemoryEntry[]): void {
     }
     // Espelhamento transacional via storageAdapter (Desktop SQLite / Cache Unificado)
     storageAdapter.save('memories', 'collection', memories).catch((e) => {
-      console.warn('[MemoryStore] Falha ao espelhar memÃ³rias no storageAdapter:', e);
+      console.warn('[MemoryStore] Falha ao espelhar memórias no storageAdapter:', e);
     });
   } catch (e) {
     console.warn('[MemoryStore] Failed to save memory entries to LocalStorage:', e);
@@ -394,11 +403,11 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
   activeTask: {
     id: 'task-1',
-    goal: 'Otimizar pipeline de build e verificar dependÃªncias locais',
+    goal: 'Otimizar pipeline de build e verificar dependências locais',
     steps: [
-      { id: 's1', title: 'InspeÃ§Ã£o de estrutura de arquivos', status: 'completed', toolName: 'files.list', durationMs: 120 },
-      { id: 's2', title: 'VerificaÃ§Ã£o de pacotes TypeScript', status: 'completed', toolName: 'dev.typecheck', durationMs: 450 },
-      { id: 's3', title: 'AnÃ¡lise de seguranÃ§a e segredos', status: 'running', toolName: 'security.audit' }
+      { id: 's1', title: 'Inspeção de estrutura de arquivos', status: 'completed', toolName: 'files.list', durationMs: 120 },
+      { id: 's2', title: 'Verificação de pacotes TypeScript', status: 'completed', toolName: 'dev.typecheck', durationMs: 450 },
+      { id: 's3', title: 'Análise de segurança e segredos', status: 'running', toolName: 'security.audit' }
     ],
     status: 'running',
     riskLevel: 'R1',
@@ -450,7 +459,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     get().addActivityLog({
       category: 'system',
       summary: next ? 'Voz Ao Vivo Ativada (Live Duplex)' : 'Voz Desativada',
-      details: next ? 'Microfone contÃ­nuo ativo. Fale livremente ou interrompa a qualquer momento.' : 'Microfone pausado.',
+      details: next ? 'Microfone contínuo ativo. Fale livremente ou interrompa a qualquer momento.' : 'Microfone pausado.',
       riskLevel: 'R0',
       status: 'success',
       simulated: false
@@ -487,7 +496,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     get().addActivityLog({
       category: 'system',
       summary: 'Nova conversa criada',
-      details: `SessÃ£o ID ${newId} criada e ativada.`,
+      details: `Sessão ID ${newId} criada e ativada.`,
       riskLevel: 'R0',
       status: 'success',
       simulated: false
@@ -613,6 +622,38 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     });
   },
 
+  recordVoiceExchange: (userText: string, assistantText: string) => {
+    const nowIso = new Date().toISOString();
+    const userMsg: ChatMessage = {
+      id: `msg-${Date.now()}-u`,
+      sender: 'user',
+      text: userText,
+      timestamp: nowIso,
+      status: 'completed',
+      source: 'voice'
+    };
+    const assistantMsg: ChatMessage = {
+      id: `msg-${Date.now()}-a`,
+      sender: 'assistant',
+      text: assistantText,
+      timestamp: nowIso,
+      status: 'completed',
+      source: 'voice'
+    };
+    set((state) => {
+      const activeId = state.activeSessionId;
+      const updatedMessages = [...state.messages, userMsg, assistantMsg];
+      const updatedSessions = state.sessions.map(s => 
+        s.id === activeId ? { ...s, messages: [...s.messages, userMsg, assistantMsg], updatedAt: nowIso } : s
+      );
+      saveHistory(updatedSessions, activeId);
+      return {
+        messages: updatedMessages,
+        sessions: updatedSessions
+      };
+    });
+  },
+
   sendMessage: async (text: string, image?: { data: string; mimeType?: string }, audio?: { data: string; mimeType?: string }) => {
     const clean = sanitizeInput(text);
     if (!clean && !image && !audio) return;
@@ -637,7 +678,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Otimização de exaustão: throttle de persistência durante o streaming (1s)
     let lastPersistTime = 0;
 
-    // Desbloqueia a saÃ­da de Ã¡udio Web Audio API no evento de clique do usuÃ¡rio
+    // Desbloqueia a saída de áudio Web Audio API no evento de clique do usuário
     speechService.unlockAudio();
 
     // Ensure we have a valid active session
@@ -651,7 +692,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Automatic smart title generation for new conversations
     let updatedTitle = targetSession.title;
     if (targetSession.title === 'Nova Conversa' || targetSession.title === 'Conversa Inicial') {
-      const autoTitle = (clean || (image ? 'AnÃ¡lise de Imagem' : 'Mensagem de Ãudio')).slice(0, 38).trim();
+      const autoTitle = (clean || (image ? 'Análise de Imagem' : 'Mensagem de Áudio')).slice(0, 38).trim();
       updatedTitle = autoTitle + ((clean || '').length > 38 ? '...' : '');
     }
 
@@ -662,10 +703,10 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     let userMsgText = clean;
     if (image) userMsgText = `${clean ? clean + '\n\n' : ''}[Captura de Tela Anexada]`;
     if (audio) {
-      if (clean && clean !== 'Responda Ã  minha mensagem de voz.') {
-        userMsgText = `ðŸŽ¤ "${clean}"`;
+      if (clean && clean !== 'Responda à minha mensagem de voz.') {
+        userMsgText = `🎤 "${clean}"`;
       } else {
-        userMsgText = `ðŸŽ¤ [Mensagem de Voz Enviada]`;
+        userMsgText = `🎤 [Mensagem de Voz Enviada]`;
       }
     }
 
@@ -720,7 +761,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     });
     setActiveAbortController(controller);
 
-    // Rankeamento de memÃ³rias contextuais relevantes para o turno atual
+    // Rankeamento de memórias contextuais relevantes para o turno atual
     const memories = get().memoryEntries;
     const rankedMemories = rankMemories(clean || (audio ? 'audio' : 'imagem'), memories, {
       minScoreThreshold: 0.35,
@@ -730,23 +771,21 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     const memoryContextBlock = formatMemoryContextBlock(rankedMemories, 400);
 
     // Interceptação determinística imediata de comandos de navegação por voz/texto
+    // NOTA: quando o modo Live está ativo, o GlobalVoiceBar já intercepta via onTranscription/STT.
+    // Aqui só executa se a chamada veio do chat de TEXTO (não de voz com Live ativo).
+    const liveIsHandling = get().isVoiceActive && audio;
+    
     const navMatch = parseNavigationIntent(clean || '');
-    if (navMatch) {
+    if (navMatch && !liveIsHandling) {
       get().setActiveTab(navMatch.tab);
-
-      const assistantMessageId = `msg-nav-${Date.now()}`;
-      const assistantMessage: ChatMessage = {
-        id: assistantMessageId,
-        sender: 'assistant',
-        text: navMatch.spokenFeedback,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        createdAt: new Date().toISOString(),
-        status: 'completed',
-        source: audio ? 'voice' : 'text'
-      };
+      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
 
       set((state) => {
-        const updated = [...state.messages, assistantMessage];
+        const updated = state.messages.map((m): ChatMessage =>
+          m.id === assistantMsgId
+            ? { ...m, text: navMatch.spokenFeedback, status: 'completed', source: msgSource }
+            : m
+        );
         const updatedSessions = state.sessions.map((sess) => {
           if (sess.id === targetSessionId) {
             return {
@@ -785,20 +824,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     // Interceptação determinística de rotas veiculares (GPS)
     const routeIntent = parseRouteIntent(clean || '');
-    if (routeIntent) {
-      const assistantMessageId = `msg-route-${Date.now()}`;
-      const assistantMessage: ChatMessage = {
-        id: assistantMessageId,
-        sender: 'assistant',
-        text: routeIntent.spokenFeedback,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        createdAt: new Date().toISOString(),
-        status: 'completed',
-        source: audio ? 'voice' : 'text'
-      };
-
+    if (routeIntent && !liveIsHandling) {
+      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
       set((state) => {
-        const updated = [...state.messages, assistantMessage];
+        const updated = state.messages.map((m): ChatMessage =>
+          m.id === assistantMsgId
+            ? { ...m, text: routeIntent.spokenFeedback, status: 'completed', source: msgSource }
+            : m
+        );
         const updatedSessions = state.sessions.map((sess) => {
           if (sess.id === targetSessionId) {
             return {
@@ -840,20 +873,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     // Interceptação determinística de busca de locais (Google Maps Places)
     const placesIntent = parsePlacesSearchIntent(clean || '');
-    if (placesIntent) {
-      const assistantMessageId = `msg-places-${Date.now()}`;
-      const assistantMessage: ChatMessage = {
-        id: assistantMessageId,
-        sender: 'assistant',
-        text: placesIntent.spokenFeedback,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        createdAt: new Date().toISOString(),
-        status: 'completed',
-        source: audio ? 'voice' : 'text'
-      };
-
+    if (placesIntent && !liveIsHandling) {
+      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
       set((state) => {
-        const updated = [...state.messages, assistantMessage];
+        const updated = state.messages.map((m): ChatMessage =>
+          m.id === assistantMsgId
+            ? { ...m, text: placesIntent.spokenFeedback, status: 'completed', source: msgSource }
+            : m
+        );
         const updatedSessions = state.sessions.map((sess) => {
           if (sess.id === targetSessionId) {
             return {
@@ -892,6 +919,106 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       return;
     }
 
+    // Interceptação determinística de data e hora local
+    const timeMatch = parseTimeCommandIntent(clean || '');
+    if (timeMatch && !liveIsHandling) {
+      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
+      set((state) => {
+        const updated = state.messages.map((m): ChatMessage =>
+          m.id === assistantMsgId
+            ? { ...m, text: timeMatch.spokenFeedback, status: 'completed', source: msgSource }
+            : m
+        );
+        const updatedSessions = state.sessions.map((sess) => {
+          if (sess.id === targetSessionId) {
+            return {
+              ...sess,
+              messages: updated,
+              updatedAt: new Date().toISOString()
+            };
+          }
+          return sess;
+        });
+        saveHistory(updatedSessions, state.activeSessionId);
+        return {
+          messages: updated,
+          sessions: updatedSessions,
+          isGenerating: false,
+          orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
+        };
+      });
+
+      get().addActivityLog({
+        category: 'ai',
+        summary: '🕒 Consulta de Data/Hora Local',
+        details: `Pergunta: "${timeMatch.rawInput}" | Resposta: "${timeMatch.spokenFeedback}"`,
+        riskLevel: 'R0',
+        status: 'success',
+        simulated: false
+      });
+
+      if (get().isVoiceActive) {
+        speechService.unlockAudio();
+        speechService.speak(timeMatch.spokenFeedback);
+      }
+
+      return;
+    }
+
+    // Interceptação determinística de comandos de PC (abrir apps, volume, bloqueio)
+    const pcMatch = parsePcCommandIntent(clean || '');
+    if (pcMatch && !liveIsHandling) {
+      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
+      
+      // Executa de verdade antes de responder
+      executePcAction(pcMatch).then((result) => {
+        const responseText = result.success
+          ? `${pcMatch.spokenFeedback}`
+          : `Mestre, não consegui executar o comando: ${result.error || 'verifique se o aplicativo está instalado'}.`;
+
+        set((state) => {
+          const updated = state.messages.map((m): ChatMessage =>
+            m.id === assistantMsgId
+              ? { ...m, text: responseText, status: result.success ? 'completed' : 'error', source: msgSource }
+              : m
+          );
+          const updatedSessions = state.sessions.map((sess) => {
+            if (sess.id === targetSessionId) {
+              return {
+                ...sess,
+                messages: updated,
+                updatedAt: new Date().toISOString()
+              };
+            }
+            return sess;
+          });
+          saveHistory(updatedSessions, state.activeSessionId);
+          return {
+            messages: updated,
+            sessions: updatedSessions,
+            isGenerating: false,
+            orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
+          };
+        });
+
+        get().addActivityLog({
+          category: 'system',
+          summary: pcMatch.type === 'app_launch' ? `Executar App: ${pcMatch.appName}` : `Ação de Sistema: ${pcMatch.action}`,
+          details: result.message,
+          riskLevel: 'R1',
+          status: result.success ? 'success' : 'error',
+          simulated: false
+        });
+
+        if (get().isVoiceActive) {
+          speechService.unlockAudio();
+          speechService.speak(responseText);
+        }
+      });
+
+      return;
+    }
+
     const systemInstruction = memoryContextBlock 
       ? `${LIORA_SYSTEM_INSTRUCTION}${memoryContextBlock}` 
       : LIORA_SYSTEM_INSTRUCTION;
@@ -899,7 +1026,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     get().addActivityLog({
       category: 'ai',
       summary: `Mensagem enviada: "${(clean || (audio ? 'Mensagem de Voz' : 'Captura de Tela')).slice(0, 30)}..."`,
-      details: `SessÃ£o [${targetSessionId}]. Enviado para /api/gemini/chat/stream com ${history.length} turnos de contexto${rankedMemories.length > 0 ? ` e ${rankedMemories.length} memÃ³rias contextuais` : ''}.`,
+      details: `Sessão [${targetSessionId}]. Enviado para /api/gemini/chat/stream com ${history.length} turnos de contexto${rankedMemories.length > 0 ? ` e ${rankedMemories.length} memórias contextuais` : ''}.`,
       riskLevel: 'R0',
       status: 'success',
       simulated: false
@@ -912,7 +1039,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         method: 'POST',
         headers: chatHeaders,
         body: JSON.stringify({
-          message: (audio && clean === 'Responda Ã  minha mensagem de voz.') ? '' : clean,
+          message: (audio && clean === 'Responda à minha mensagem de voz.') ? '' : clean,
           image,
           audio,
           history,
@@ -962,7 +1089,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       }
 
       const reader = res.body?.getReader();
-      if (!reader) throw new Error('Readable stream indisponÃ­vel.');
+      if (!reader) throw new Error('Readable stream indisponível.');
 
       const decoder = new TextDecoder();
       let accumulatedText = '';
@@ -974,6 +1101,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       const shouldSpeakResponse = isVoiceActive || wasAudioSent;
 
       let unspokenBuffer = '';
+      let modelUsedRef: string | null = null;
       if (shouldSpeakResponse) {
         speechService.resetStreamingQueue();
       }
@@ -992,13 +1120,25 @@ export const useLioraStore = create<LioraState>((set, get) => ({
             const jsonStr = line.replace(/^data:\s*/, '');
             try {
               const data = JSON.parse(jsonStr);
+              // FIX: o servidor informa o modelo real usado (incl. 'openrouter/fallback')
+              // no done final — refletir na mensagem para o histórico ficar honesto.
+              if (data.done && data.modelUsed) {
+                modelUsedRef = data.modelUsed;
+              }
               if (data.failover) {
                 const failoverNotice = `\n\n> âš ï¸ *[Alternado para OpenRouter: ${data.message || 'Cota do Gemini excedida'}]*\n\n`;
                 accumulatedText += failoverNotice;
+                // BUG FIX (raiz — métricas): o provider usado nas métricas de tokens
+                // nunca era atualizado no failover — todas as respostas do OpenRouter
+                // eram contabilizadas como chamadas do Gemini, corrompendo o
+                // AnalyticsDashboard. Marcamos o provider real a partir de agora.
+                if (data.provider === 'openrouter') {
+                  usedProvider = 'openrouter';
+                }
                 get().addActivityLog({
                   category: 'ai',
                   summary: 'Cota Gemini Excedida -> OpenRouter Failover',
-                  details: data.message || 'Cota do Gemini atingida. Alternando para o modelo de contingÃªncia OpenRouter.',
+                  details: data.message || 'Cota do Gemini atingida. Alternando para o modelo de contingência OpenRouter.',
                   riskLevel: 'R0',
                   status: 'warning',
                   simulated: false
@@ -1033,7 +1173,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
                 if (shouldSpeakResponse) {
                   unspokenBuffer += data.chunk;
-                  // Busca por delimitadores de frase (., !, ?, \n, ;) ou acÃºmulo de >35 caracteres
+                  // Busca por delimitadores de frase (., !, ?, \n, ;) ou acúmulo de >35 caracteres
                   const match = unspokenBuffer.match(/^([^.!?\n;]+[.!?\n;]+)(.*)/s);
                   if (match) {
                     const sentenceToSpeak = match[1].trim();
@@ -1043,7 +1183,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                       speechService.speakStreamingChunk(sanitizeTextForSpeech(sentenceToSpeak), () => set({ orbState: 'SPEAKING' }));
                     }
                   } else if (unspokenBuffer.length >= 40) {
-                    // Trunca na Ãºltima palavra para nÃ£o cortar palavras
+                    // Trunca na última palavra para não cortar palavras
                     const lastSpaceIdx = unspokenBuffer.lastIndexOf(' ');
                     if (lastSpaceIdx > 12) {
                       const phraseToSpeak = unspokenBuffer.slice(0, lastSpaceIdx).trim();
@@ -1055,7 +1195,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                   }
                 }
 
-                // OtimizaÃ§Ã£o de exaustÃ£o: throttled persist 1s (mesma estratÃ©gia do stream de texto)
+                // Otimização de exaustão: throttled persist 1s (mesma estratégia do stream de texto)
                 const nowMs = Date.now();
                 const shouldPersistThisChunk = nowMs - lastPersistTime > 1000;
                 if (shouldPersistThisChunk) lastPersistTime = nowMs;
@@ -1135,13 +1275,13 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         }
       }
 
-      // Finaliza texto restante no buffer de fala e dispara o aviso de conclusÃ£o
+      // Finaliza texto restante no buffer de fala e dispara o aviso de conclusão
       if (shouldSpeakResponse && unspokenBuffer.trim()) {
         speechService.speakStreamingChunk(sanitizeTextForSpeech(unspokenBuffer.trim()), () => set({ orbState: 'SPEAKING' }));
       }
 
       // Stream successfully completed
-      // Registra mÃ©tricas reais de tokens/latÃªncia para o AnalyticsDashboard
+      // Registra métricas reais de tokens/latência para o AnalyticsDashboard
       const totalLatencyMs = Math.round(performance.now() - startMs);
       tokenAnalytics.recordApiCall(
         usedProvider,
@@ -1161,7 +1301,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
               m.id === assistantMsgId ? {
                 ...m,
                 text: accumulatedText || 'Sem resposta gerada.',
-                status: 'completed'
+                status: 'completed',
+                ...(modelUsedRef ? { modelUsed: modelUsedRef } : {})
               } : m
             )
           };
@@ -1210,7 +1351,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                   ...m,
                   status: 'cancelled',
                   errorCode: 'CANCELLED',
-                  text: m.text ? `${m.text}\n\n*[GeraÃ§Ã£o interrompida pelo usuÃ¡rio]*` : '*[GeraÃ§Ã£o cancelada]*'
+                  text: m.text ? `${m.text}\n\n*[Geração interrompida pelo usuário]*` : '*[Geração cancelada]*'
                 } : m
               )
             };
@@ -1265,9 +1406,12 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           messages: isCurrent && currentSession ? currentSession.messages : state.messages,
           orbState: 'ERROR',
           isGenerating: false,
-          
         };
       });
+
+      setTimeout(() => {
+        if (get().orbState === 'ERROR') set({ orbState: 'IDLE' });
+      }, 3000);
     }
   },
 
@@ -1283,6 +1427,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     if (get().isGenerating) return;
     // Otimização de exaustão: throttle de persistência durante o streaming do retry
     let lastPersistTime = 0;
+    const retryStartMs = performance.now();
 
     const targetSessionId = get().activeSessionId;
     if (!targetSessionId) return;
@@ -1351,13 +1496,13 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     try {
       // FIX W1: retryMessage agora reaproveita integralmente as credenciais do cofre,
-      // o modelo ativo e o systemInstruction com memÃ³rias contextuais (antes o retry
-      // fazia fetch sem Authorization/keys e sem contexto de memÃ³ria).
+      // o modelo ativo e o systemInstruction com memórias contextuais (antes o retry
+      // fazia fetch sem Authorization/keys e sem contexto de memória).
       // FIX 6: retryMessage reutiliza os MESMOS headers/montagem do sendMessage
       // (credenciais do cofre preservadas no reenvio) via buildChatHeaders.
       const retryHeaders = buildChatHeaders();
 
-      // Contexto de memÃ³rias rankeadas para o retry (mesma polÃ­tica do sendMessage)
+      // Contexto de memórias rankeadas para o retry (mesma política do sendMessage)
       const retryMemories = rankMemories(userText, get().memoryEntries, {
         minScoreThreshold: 0.35,
         maxInjectedMemories: 4,
@@ -1419,7 +1564,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       }
 
       const reader = res.body?.getReader();
-      if (!reader) throw new Error('Readable stream indisponÃ­vel.');
+      if (!reader) throw new Error('Readable stream indisponível.');
       const decoder = new TextDecoder();
       let accumulatedText = '';
       let buffer = '';
@@ -1446,10 +1591,10 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                   set({ orbState: 'SPEAKING' });
                 }
 
-                // OtimizaÃ§Ã£o de exaustÃ£o: persistÃªncia do histÃ³rico durante o streaming Ã©
+                // Otimização de exaustão: persistência do histórico durante o streaming é
                 // THROTTLED a 1s. Antes, cada chunk serializava e regravava TODAS as
-                // sessÃµes no localStorage (O(nÂ²) de I/O). O texto completo persiste de
-                // forma atÃ´mica no save final (status: 'completed').
+                // sessões no localStorage (O(n²) de I/O). O texto completo persiste de
+                // forma atômica no save final (status: 'completed').
                 const nowMs = Date.now();
                 const shouldPersistThisChunk = nowMs - lastPersistTime > 1000;
                 if (shouldPersistThisChunk) lastPersistTime = nowMs;
@@ -1517,6 +1662,16 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         }
       }
 
+      // CORREÇÃO (métricas cegas no retry): o sendMessage registra tokens/latência
+      // no AnalyticsDashboard, mas o retryMessage não registrava — toda resposta
+      // reenviada ficava invisível nas estatísticas. Registro na conclusão.
+      tokenAnalytics.recordApiCall(
+        'gemini',
+        userText.length + JSON.stringify(history).length,
+        accumulatedText.length,
+        Math.round(performance.now() - retryStartMs)
+      );
+
       set((state) => {
         const finalIso = new Date().toISOString();
         const updatedSessions = state.sessions.map((s) => {
@@ -1548,7 +1703,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         };
       });
 
-      // Se o modo de voz contÃ­nua estiver ativo, a LIORA responde falando em voz alta (Live Duplex)
+      // Se o modo de voz contínua estiver ativo, a LIORA responde falando em voz alta (Live Duplex)
       if (get().isVoiceActive && accumulatedText) {
         set({ orbState: 'SPEAKING' });
         // P4: sanitiza Markdown antes do TTS para não ler crases/asteriscos em voz alta
@@ -1586,7 +1741,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                   ...m,
                   status: 'cancelled',
                   errorCode: 'CANCELLED',
-                  text: m.text ? `${m.text}\n\n*[GeraÃ§Ã£o interrompida pelo usuÃ¡rio]*` : '*[GeraÃ§Ã£o cancelada]*'
+                  text: m.text ? `${m.text}\n\n*[Geração interrompida pelo usuário]*` : '*[Geração cancelada]*'
                 } : m
               )
             };
@@ -1641,9 +1796,12 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           messages: isCurrent && currentSession ? currentSession.messages : state.messages,
           orbState: 'ERROR',
           isGenerating: false,
-          
         };
       });
+
+      setTimeout(() => {
+        if (get().orbState === 'ERROR') set({ orbState: 'IDLE' });
+      }, 3000);
     }
   },
 
@@ -1664,6 +1822,15 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       }
       return { activityLogs: updated };
     });
+
+    // Envia telemetria em segundo plano para o terminal do servidor (apenas ambiente browser)
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      void fetch('/api/logs/record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(log)
+      }).catch(() => {});
+    }
   },
 
   clearActivityLogs: () => {
@@ -1671,8 +1838,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       id: `log-${Date.now()}-sec`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       category: 'security',
-      summary: 'Logs de auditoria limpos pelo usuÃ¡rio',
-      details: 'HistÃ³rico de auditoria anterior zerado com autorizaÃ§Ã£o do usuÃ¡rio.',
+      summary: 'Logs de auditoria limpos pelo usuário',
+      details: 'Histórico de auditoria anterior zerado com autorização do usuário.',
       riskLevel: 'R1',
       status: 'warning',
       simulated: false
@@ -1716,8 +1883,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       });
       get().addActivityLog({
         category: 'system',
-        summary: `MemÃ³ria sobrescrita: "${cleanKey}"`,
-        details: `Valor atualizado para "${entry.value}" (DeduplicaÃ§Ã£o automÃ¡tica).`,
+        summary: `Memória sobrescrita: "${cleanKey}"`,
+        details: `Valor atualizado para "${entry.value}" (Deduplicação automática).`,
         riskLevel: 'R0',
         status: 'success',
         simulated: false
@@ -1734,8 +1901,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       updatedList = [newItem, ...currentMemories];
       get().addActivityLog({
         category: 'system',
-        summary: `Nova memÃ³ria gravada: "${cleanKey}"`,
-        details: `Categoria: ${entry.category} â€¢ Valor: "${entry.value}"`,
+        summary: `Nova memória gravada: "${cleanKey}"`,
+        details: `Categoria: ${entry.category} • Valor: "${entry.value}"`,
         riskLevel: 'R0',
         status: 'success',
         simulated: false
@@ -1763,7 +1930,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     if (target) {
       get().addActivityLog({
         category: 'system',
-        summary: `MemÃ³ria editada: "${target.key}"`,
+        summary: `Memória editada: "${target.key}"`,
         details: `Novo valor: "${target.value}"`,
         riskLevel: 'R0',
         status: 'success',
@@ -1783,8 +1950,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     get().addActivityLog({
       category: 'system',
-      summary: 'MemÃ³ria removida do cofre',
-      details: target ? `Chave "${target.key}" excluÃ­da.` : `Item ${id} removido.`,
+      summary: 'Memória removida do cofre',
+      details: target ? `Chave "${target.key}" excluída.` : `Item ${id} removido.`,
       riskLevel: 'R1',
       status: 'warning',
       simulated: false
@@ -1827,8 +1994,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     get().addActivityLog({
       category: 'system',
-      summary: `Cofre de memÃ³rias importado (${entries.length} itens)`,
-      details: `Modo de importaÃ§Ã£o: ${mode}. Total de registros ativos: ${finalEntries.length}.`,
+      summary: `Cofre de memórias importado (${entries.length} itens)`,
+      details: `Modo de importação: ${mode}. Total de registros ativos: ${finalEntries.length}.`,
       riskLevel: 'R1',
       status: 'success',
       simulated: false
@@ -1898,7 +2065,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           toolName,
           executionTimeMs: Math.round(performance.now() - start),
           riskLevel: 'R0',
-          error: `Resposta nÃ£o-JSON do servidor (${res.status}).`,
+          error: `Resposta não-JSON do servidor (${res.status}).`,
           simulated: true,
           timestamp: new Date().toISOString()
         };
@@ -1906,28 +2073,29 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
       const isBlocked = (data as any).code === 'EXECUTION_BLOCKED_NO_PERMISSION_ENGINE';
+      const isSimulatedExecution = (data as any).simulated !== undefined ? Boolean((data as any).simulated) : true;
       const logItem: ActivityLogItem = {
         id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
         timestamp: nowTime,
         category: isBlocked ? 'security' : 'tool',
         summary: isBlocked 
-          ? `Tool Registry: ${toolName} (ExecuÃ§Ã£o Bloqueada)`
+          ? `Tool Registry: ${toolName} (Execução Bloqueada)`
           : `Tool Registry: ${toolName} (${data.riskLevel || 'R0'})`,
         details: isBlocked
-          ? 'ExecuÃ§Ã£o bloqueada no backend: O Permission Engine (Marco 6.2) Ã© necessÃ¡rio para autorizar execuÃ§Ãµes.'
+          ? 'Execução bloqueada no backend: O Permission Engine (Marco 6.2) é necessário para autorizar execuções.'
           : data.success
-            ? `Executado e verificado com sucesso em ${data.executionTimeMs}ms${(data as any).verification ? ` [${(data as any).verification.checkName}]` : ''} (Simulado).`
-            : `Falha na validaÃ§Ã£o/execuÃ§Ã£o: ${data.error || 'Erro desconhecido'}`,
+            ? `Executado e verificado com sucesso em ${data.executionTimeMs}ms${(data as any).verification ? ` [${(data as any).verification.checkName}]` : ''} (${isSimulatedExecution ? 'Simulado' : 'Nativo'}).`
+            : `Falha na validação/execução: ${data.error || 'Erro desconhecido'}`,
         riskLevel: data.riskLevel || 'R0',
         status: isBlocked ? 'warning' : data.success ? 'success' : 'error',
-        simulated: true,
+        simulated: isSimulatedExecution,
         verified: Boolean((data as any).verification?.verified),
         verificationDetails: (data as any).verification?.checkDetails
       };
 
       set((state) => ({ activityLogs: [logItem, ...state.activityLogs] }));
 
-      // ExecuÃ§Ã£o de AÃ§Ãµes Reais de Interface e NavegaÃ§Ã£o na Store
+      // Execução de Ações Reais de Interface e Navegação na Store
       if (data.success || !isBlocked) {
         if (toolName === 'navigateToTab' && parameters?.tab) {
           get().setActiveTab(parameters.tab as any);
@@ -1950,10 +2118,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
             riskLevel: data.riskLevel || 'R1',
             parameters,
             parametersHash: (data as any).parametersHash,
-            consentToken: (data as any).consentToken || `consent-${now}-${Math.random().toString(36).substr(2, 9)}`,
+            // CORREÇÃO: não inventar token no cliente — o consentimento REAL é
+            // emitido pelo servidor (/api/security/ui-consent) no momento da
+            // aprovação (approveConsent). Um token fake aqui era decorativo e
+            // podia enganar fluxos que confiassem nele.
+            consentToken: '',
             sessionId: get().activeSessionId || 'default-session',
             expiresAt: now + 60000,
-            reason: (data as any).error || 'OperaÃ§Ã£o de nÃ­vel R1 requer confirmaÃ§Ã£o humana explÃ­cita.',
+            reason: (data as any).error || 'Operação de nível R1 requer confirmação humana explícita.',
             status: 'PENDING'
           }
         });
@@ -2004,12 +2176,50 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     set({ pendingConsent: { ...pending, status: 'APPROVED' } });
 
-    // Disparar execuÃ§Ã£o autorizada via executeLocalTool
-    const result = await executeLocalTool(
-      pending.toolName,
-      pending.parameters,
-      pending.sessionId
-    );
+    // BUG CRÍTICO CORRIGIDO (falso sucesso no consentimento): o executeTool
+    // chamava /api/tools/execute SEM o header x-liora-ui-consent — o servidor
+    // reavaliava a permissão e NEGAVA R1/R2 com REQUIRES_USER_CONFIRMATION,
+    // mas o log local registrava "Execução autorizada... success" de qualquer
+    // forma. O usuário aprovava e NADA era executado, com auditoria mentindo.
+    // Agora: emite o consentimento de UI (o clique É o consentimento) e loga
+    // o resultado REAL da execução, incluindo falhas de permissão.
+    let uiConsentToken: string | null = null;
+    try {
+      const consentRes = await fetch('/api/security/ui-consent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName: pending.toolName, parameters: pending.parameters })
+      });
+      const consentData = await consentRes.json();
+      uiConsentToken = consentData.success ? consentData.token : null;
+    } catch {
+      // sem token — executa mesmo assim; o servidor dirá se bloqueou
+    }
+
+    const start = performance.now();
+    const res = await fetch('/api/tools/execute', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'x-liora-session-id': pending.sessionId,
+        ...(uiConsentToken ? { 'x-liora-ui-consent': uiConsentToken } : {})
+      },
+      body: JSON.stringify({ toolName: pending.toolName, parameters: pending.parameters })
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    const result = (contentType.includes('application/json'))
+      ? await res.json()
+      : {
+          success: false,
+          toolName: pending.toolName,
+          error: `Resposta não-JSON do servidor (${res.status}).`,
+          simulated: true,
+          riskLevel: pending.riskLevel,
+          executionTimeMs: Math.round(performance.now() - start),
+          timestamp: new Date().toISOString()
+        };
 
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const logItem: ActivityLogItem = {
@@ -2017,10 +2227,12 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       timestamp: nowTime,
       category: 'security',
       summary: `Consentimento Aprovado: ${pending.toolName}`,
-      details: `ExecuÃ§Ã£o autorizada pelo usuÃ¡rio para a ferramenta ${pending.toolName}.`,
+      details: (result as any).success
+        ? `Execução autorizada pelo usuário para a ferramenta ${pending.toolName} — executada com sucesso.`
+        : `Execução autorizada pelo usuário, porém FALHOU: ${(result as any).error || 'erro desconhecido no servidor'}.`,
       riskLevel: pending.riskLevel,
-      status: 'success',
-      simulated: true
+      status: (result as any).success ? 'success' : 'error',
+      simulated: Boolean((result as any).simulated)
     };
 
     set(state => ({ activityLogs: [logItem, ...state.activityLogs] }));
@@ -2039,7 +2251,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       timestamp: nowTime,
       category: 'security',
       summary: `Consentimento Rejeitado: ${pending.toolName}`,
-      details: `ExecuÃ§Ã£o recusada pelo usuÃ¡rio para a ferramenta ${pending.toolName}.`,
+      details: `Execução recusada pelo usuário para a ferramenta ${pending.toolName}.`,
       riskLevel: pending.riskLevel,
       status: 'warning',
       simulated: true
@@ -2079,8 +2291,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       category: 'security',
       summary: next ? 'Shield Mode Ativado (Local Soberano)' : 'Shield Mode Desativado',
       details: next 
-        ? 'ProteÃ§Ã£o mÃ¡xima ativa: execuÃ§Ãµes autÃ´nomas contidas, consentimento rigoroso exigido.' 
-        : 'Modo padrÃ£o ativado: automaÃ§Ãµes R0 autÃ´nomas liberadas.',
+        ? 'Proteção máxima ativa: execuções autônomas contidas, consentimento rigoroso exigido.' 
+        : 'Modo padrão ativado: automações R0 autônomas liberadas.',
       riskLevel: 'R1',
       status: next ? 'success' : 'warning',
       simulated: false
@@ -2110,8 +2322,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       });
       get().addActivityLog({
         category: 'system',
-        summary: `AutomaÃ§Ã£o ${updated.enabled ? 'Ativada' : 'Pausada'}: ${updated.name}`,
-        details: `Gatilho: ${updated.trigger.humanReadable} | AÃ§Ã£o: ${updated.action.description}`,
+        summary: `Automação ${updated.enabled ? 'Ativada' : 'Pausada'}: ${updated.name}`,
+        details: `Gatilho: ${updated.trigger.humanReadable} | Ação: ${updated.action.description}`,
         riskLevel: updated.action.expectedRiskLevel,
         status: 'success',
         simulated: true
@@ -2134,7 +2346,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     });
 
     if (log.status === 'SUCCESS') {
-      const successText = `âš™ï¸ **AutomaÃ§Ã£o Executada:** "${rule.name}" executada com sucesso (${log.durationMs}ms).\n\n*AÃ§Ã£o:* \`${rule.action.toolName || rule.action.description}\` realizada com risco **${rule.action.expectedRiskLevel}**.`;
+      const successText = `âš™ï¸ **Automação Executada:** "${rule.name}" executada com sucesso (${log.durationMs}ms).\n\n*Ação:* \`${rule.action.toolName || rule.action.description}\` realizada com risco **${rule.action.expectedRiskLevel}**.`;
       
       const targetSessionId = get().activeSessionId;
       if (targetSessionId) {
@@ -2171,6 +2383,20 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           speechService.speak(successText.replace(/[*#`]/g, ''), () => {});
         }
       }
+
+      if (get().settings.desktopNotifications) {
+        notificationSystem.notify(
+          `Automação Concluída: ${rule.name}`,
+          `Ação executada com sucesso (${log.durationMs}ms).`,
+          'success'
+        );
+      }
+    } else if (log.status === 'FAILED' && get().settings.desktopNotifications) {
+      notificationSystem.notify(
+        `Falha na Automação: ${rule.name}`,
+        log.errorMessage || 'Erro ao executar regra de automação.',
+        'error'
+      );
     }
 
     // Se o acionamento manual de ferramenta R1 necessitar de consentimento humano:
@@ -2208,7 +2434,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           consentToken,
           sessionId,
           expiresAt,
-          reason: log.errorMessage || `AutomaÃ§Ã£o manual '${rule.name}' requer aprovaÃ§Ã£o para executar ferramenta ${toolName}.`,
+          reason: log.errorMessage || `Automação manual '${rule.name}' requer aprovação para executar ferramenta ${toolName}.`,
           status: 'PENDING'
         }
       });
@@ -2249,7 +2475,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     });
 
     if (log.status === 'SUCCESS') {
-      const successText = `âœ… **Consentimento Aprovado & Executado:** "${rule.name}" concluÃ­da com sucesso (${log.durationMs}ms).\n\n*AÃ§Ã£o:* \`${rule.action.toolName || rule.action.description}\`.`;
+      const successText = `✅ **Consentimento Aprovado & Executado:** "${rule.name}" concluída com sucesso (${log.durationMs}ms).\n\n*Ação:* \`${rule.action.toolName || rule.action.description}\`.`;
       const targetSessionId = get().activeSessionId;
       if (targetSessionId) {
         const now = new Date();
@@ -2285,12 +2511,26 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           speechService.speak(sanitizeTextForSpeech(successText), () => {});
         }
       }
+
+      if (get().settings.desktopNotifications) {
+        notificationSystem.notify(
+          `Automação Concluída: ${rule.name}`,
+          `Ação autorizada e executada com sucesso (${log.durationMs}ms).`,
+          'success'
+        );
+      }
+    } else if (log.status === 'FAILED' && get().settings.desktopNotifications) {
+      notificationSystem.notify(
+        `Falha na Automação: ${rule.name}`,
+        log.errorMessage || 'Falha ao executar ação de automação consentida.',
+        'error'
+      );
     }
 
     get().addActivityLog({
       category: 'security',
-      summary: `ExecuÃ§Ã£o Aprovada na UI: ${rule.name}`,
-      details: `Consentimento validado diretamente no card da automaÃ§Ã£o (${log.status}).`,
+      summary: `Execução Aprovada na UI: ${rule.name}`,
+      details: `Consentimento validado diretamente no card da automação (${log.status}).`,
       riskLevel: rule.action.expectedRiskLevel,
       status: log.status === 'SUCCESS' ? 'success' : 'error',
       simulated: log.simulated
@@ -2316,8 +2556,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     get().addActivityLog({
       category: 'system',
-      summary: `Nova AutomaÃ§Ã£o Criada: ${newRule.name}`,
-      details: `Gatilho: ${newRule.trigger.humanReadable} | AÃ§Ã£o: ${newRule.action.description}`,
+      summary: `Nova Automação Criada: ${newRule.name}`,
+      details: `Gatilho: ${newRule.trigger.humanReadable} | Ação: ${newRule.action.description}`,
       riskLevel: newRule.action.expectedRiskLevel,
       status: 'success',
       simulated: true
@@ -2334,7 +2574,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       if (rule) {
         get().addActivityLog({
           category: 'system',
-          summary: `AutomaÃ§Ã£o Removida: ${rule.name}`,
+          summary: `Automação Removida: ${rule.name}`,
           details: `Identificador: ${id}`,
           riskLevel: rule.action.expectedRiskLevel,
           status: 'warning',
@@ -2357,8 +2597,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       });
       get().addActivityLog({
         category: 'system',
-        summary: `Regras de automaÃ§Ã£o importadas (${res.count} regras)`,
-        details: `ImportaÃ§Ã£o em modo ${mode} concluÃ­da com sucesso.`,
+        summary: `Regras de automação importadas (${res.count} regras)`,
+        details: `Importação em modo ${mode} concluída com sucesso.`,
         riskLevel: 'R1',
         status: 'success',
         simulated: false
@@ -2369,16 +2609,39 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
   // Integrations & External Services Actions (Marco 9.1)
   runVaultDiagnostics: async (): Promise<boolean> => {
-    const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || 
-                      integrationsVault.getRawKey('svc-gemini') ||
-                      (typeof localStorage !== 'undefined' ? (localStorage.getItem('GEMINI_API_KEY') || localStorage.getItem('liora_gemini_key')) : null);
+    let geminiKey = integrationsVault.getApiKeyByProvider('gemini') || 
+                    integrationsVault.getRawKey('svc-gemini') ||
+                    (typeof localStorage !== 'undefined' ? (localStorage.getItem('GEMINI_API_KEY') || localStorage.getItem('liora_gemini_key')) : null);
 
-    const isMissing = !geminiKey || typeof geminiKey !== 'string' || geminiKey.trim().length < 5;
+    let isMissing = !geminiKey || typeof geminiKey !== 'string' || geminiKey.trim().length < 5;
+
+    // Se não estiver em memória no browser, verifica se o servidor backend já possui a chave configurada no .env
+    if (isMissing && typeof fetch !== 'undefined') {
+      try {
+        const res = await fetch('/api/env/keys/status');
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.gemini?.isConfigured) {
+            isMissing = false;
+          }
+        } else {
+          const healthRes = await fetch('/api/health');
+          if (healthRes.ok) {
+            const healthData = await healthRes.json();
+            if (healthData?.hasApiKey) {
+              isMissing = false;
+            }
+          }
+        }
+      } catch {
+        // ignora falha de rede na checagem
+      }
+    }
 
     if (isMissing) {
       set({
         isVaultKeyMissing: true,
-        vaultDiagnosticMessage: 'Chave de API do Gemini ausente ou nÃ£o configurada no Cofre. Configure sua chave em IntegraÃ§Ãµes para habilitar a voz e a inteligÃªncia da LIORA.'
+        vaultDiagnosticMessage: 'Chave de API do Gemini ausente ou não configurada no Cofre. Configure sua chave em Integrações para habilitar a voz e a inteligência da LIORA.'
       });
       return false;
     } else {
@@ -2444,8 +2707,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
       get().addActivityLog({
         category: 'system',
-        summary: `ServiÃ§o Conectado: ${res.service.name}`,
-        details: `Status: ${res.service.status} | LatÃªncia: ${res.service.latencyMs}ms | Fingerprint: ${res.service.keyFingerprint}`,
+        summary: `Serviço Conectado: ${res.service.name}`,
+        details: `Status: ${res.service.status} | Latência: ${res.service.latencyMs}ms | Fingerprint: ${res.service.keyFingerprint}`,
         riskLevel: 'R0',
         status: res.success ? 'success' : 'error',
         simulated: res.service.isSimulated
@@ -2455,8 +2718,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     } catch (err: any) {
       get().addActivityLog({
         category: 'system',
-        summary: `Falha ao Conectar ServiÃ§o`,
-        details: err?.message || 'Erro desconhecido na autenticaÃ§Ã£o.',
+        summary: `Falha ao Conectar Serviço`,
+        details: err?.message || 'Erro desconhecido na autenticação.',
         riskLevel: 'R0',
         status: 'error',
         simulated: true
@@ -2476,7 +2739,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       if (svc) {
         get().addActivityLog({
           category: 'system',
-          summary: `ServiÃ§o Desconectado: ${svc.name}`,
+          summary: `Serviço Desconectado: ${svc.name}`,
           details: `Credenciais e escopos revogados.`,
           riskLevel: 'R0',
           status: 'warning',
@@ -2496,8 +2759,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     if (svc) {
       get().addActivityLog({
         category: 'system',
-        summary: `Ping de LatÃªncia: ${svc.name}`,
-        details: `LatÃªncia apurada: ${res.latencyMs}ms | Status: ${res.status}`,
+        summary: `Ping de Latência: ${svc.name}`,
+        details: `Latência apurada: ${res.latencyMs}ms | Status: ${res.status}`,
         riskLevel: 'R0',
         status: res.success ? 'success' : 'error',
         simulated: svc.isSimulated
@@ -2531,7 +2794,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     get().addActivityLog({
       category: 'system',
       summary: `Webhook Recebido: ${webhookRes.payloadSummary}`,
-      details: `ID: ${webhookRes.id} | Assinatura Verificada: ${webhookRes.verifiedSignature ? 'Sim' : 'NÃ£o'}`,
+      details: `ID: ${webhookRes.id} | Assinatura Verificada: ${webhookRes.verifiedSignature ? 'Sim' : 'Não'}`,
       riskLevel: 'R0',
       status: 'success',
       simulated: true
@@ -2574,7 +2837,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       get().addActivityLog({
         category: 'system',
         summary: `Dispositivo Removido: ${target?.name || deviceId}`,
-        details: `VÃ­nculo com o protocolo PULO encerrado e purgado do registro.`,
+        details: `Vínculo com o protocolo PULO encerrado e purgado do registro.`,
         riskLevel: 'R0',
         status: 'warning',
         simulated: false
@@ -2644,8 +2907,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     get().addActivityLog({
       category: 'system',
-      summary: 'ConfiguraÃ§Ãµes Globais Atualizadas',
-      details: `PreferÃªncias atualizadas: ${Object.keys(partial).join(', ')}`,
+      summary: 'Configurações Globais Atualizadas',
+      details: `Preferências atualizadas: ${Object.keys(partial).join(', ')}`,
       riskLevel: 'R0',
       status: 'success',
       simulated: false
@@ -2656,12 +2919,16 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     const def = settingsManager.loadSettings(); // resets via manager default if cleared
     settingsManager.saveSettings(def);
     settingsManager.applyTheme(def.theme);
+    if (def.ttsVoice) {
+      speechService.setActiveNeuralVoice(def.ttsVoice);
+      voiceLiveClient.setVoice(def.ttsVoice as any);
+    }
     set({ settings: def });
 
     get().addActivityLog({
       category: 'system',
-      summary: 'ConfiguraÃ§Ãµes Restauradas ao PadrÃ£o',
-      details: 'Todas as preferÃªncias globais retornaram aos valores normativos iniciais.',
+      summary: 'Configurações Restauradas ao Padrão',
+      details: 'Todas as preferências globais retornaram aos valores normativos iniciais.',
       riskLevel: 'R0',
       status: 'success',
       simulated: false
@@ -2673,85 +2940,104 @@ if (typeof window !== 'undefined') {
   (window as any).__LIORA_STORE__ = useLioraStore;
 }
 
-// P0b (paridade voz x chat): ferramentas executadas no canal Gemini Live (/ws/voice)
-// são publicadas pelo voiceLiveClient no eventBus e registradas aqui no log de
-// atividade exatamente como o data.toolExecuted do chat de texto.
-eventBus.subscribe('liora:voice_tool_executed', (payload: any) => {
-  if (payload.toolName === 'navigateToTab' && (payload.data?.activeTab || payload.parameters?.tab)) {
-    const targetTab = payload.data?.activeTab || payload.parameters?.tab;
-    useLioraStore.getState().setActiveTab(targetTab as any);
-  } else if (payload.toolName === 'openSettings') {
-    useLioraStore.getState().setActiveTab('settings');
-  }
+// Guarda HMR: evita registrar múltiplos listeners caso o módulo seja recarregado pelo Vite em desenvolvimento
+const canRegisterBusListeners = typeof window === 'undefined' || !(window as any).__LIORA_BUS_SUBSCRIBED__;
+if (typeof window !== 'undefined') {
+  (window as any).__LIORA_BUS_SUBSCRIBED__ = true;
+}
 
-  useLioraStore.getState().addActivityLog({
-    category: 'tool',
-    summary: `Ferramenta executada por voz: ${payload.toolName}`,
-    details: payload.resultSummary || (payload.success ? 'Execução real confirmada pelo canal Live.' : 'Falhou.'),
-    riskLevel: (payload.riskLevel || 'R1') as any,
-    status: payload.success ? 'success' : 'error',
-    simulated: Boolean(payload.simulated)
-  });
-});
-
-// CORREÇÃO (sincronização tool→TTS): transforma o resultado REAL da ferramenta
-// em fala quando o modo de voz está ativo. Elimina a alucinação de 'não ter
-// localização' — a LIORA fala o que a ferramenta REALMENTE retornou.
-eventBus.subscribe('liora:tool_result', (payload: any) => {
-  const state = useLioraStore.getState();
-  if (!state.isVoiceActive) return;
-
-  const { toolName, success, resultData, resultSummary } = payload;
-  let speech: string | null = null;
-
-  try {
-    switch (toolName) {
-      case 'maps_search_places': {
-        const q = resultData?.query || resultSummary;
-        speech = success
-          ? `Abrindo a busca por ${q || 'locais'} no Google Maps. Os resultados estão na tela.`
-          : 'Não consegui abrir a busca no Google Maps.';
-        break;
-      }
-      case 'open_gps_navigation': {
-        const dest = resultData?.destination;
-        const prov = resultData?.provider === 'waze' ? 'Waze' : 'Google Maps';
-        speech = success
-          ? `Navegação iniciada no ${prov} para ${dest || 'o destino'}. Ouça as orientações no aplicativo.`
-          : 'Não consegui iniciar a navegação GPS.';
-        break;
-      }
-      case 'fetchNews': {
-        const items = resultData?.items || [];
-        if (success && items.length > 0) {
-          const headlines = items.slice(0, 3).map((i: any) => i.title).join('. ');
-          speech = `Aqui estão as principais notícias: ${headlines}`;
-        } else {
-          speech = resultData?.userFriendlyMessage || 'Não consegui acessar as notícias agora.';
-        }
-        break;
-      }
-      case 'calculate_route': {
-        speech = success
-          ? `Rota calculada: ${resultData?.distanceKm} quilômetros, aproximadamente ${resultData?.durationMinutes} minutos.`
-          : (resultData?.userFriendlyMessage || 'Não consegui calcular a rota agora.');
-        break;
-      }
-      case 'triggerAutomation': {
-        speech = success
-          ? `Automação executada: ${resultData?.ruleName || 'concluída'}.`
-          : `A automação falhou: ${resultData?.error || 'verifique o log de atividades'}.`;
-        break;
-      }
-      default:
-        // Ferramentas sem voz dedicada: fala o resumo honesto apenas se for falha
-        if (!success) speech = `A ferramenta ${toolName} falhou: ${resultSummary || 'erro desconhecido'}.`;
-        break;
+if (canRegisterBusListeners) {
+  // P0b (paridade voz x chat): ferramentas executadas no canal Gemini Live (/ws/voice)
+  // são publicadas pelo voiceLiveClient no eventBus e registradas aqui no log de
+  // atividade exatamente como o data.toolExecuted do chat de texto.
+  eventBus.subscribe('liora:voice_tool_executed', (payload: any) => {
+    if (payload.toolName === 'navigateToTab' && (payload.data?.activeTab || payload.parameters?.tab)) {
+      const targetTab = payload.data?.activeTab || payload.parameters?.tab;
+      useLioraStore.getState().setActiveTab(targetTab as any);
+    } else if (payload.toolName === 'openSettings') {
+      useLioraStore.getState().setActiveTab('settings');
     }
-  } catch { /* nunca quebrar o pipeline de voz por erro de formatação */ }
 
-  if (speech) {
-    speechService.speak(sanitizeTextForSpeech(speech), () => {}, () => {});
-  }
-});
+    useLioraStore.getState().addActivityLog({
+      category: 'tool',
+      summary: `Ferramenta executada por voz: ${payload.toolName}`,
+      details: payload.resultSummary || (payload.success ? 'Execução real confirmada pelo canal Live.' : 'Falhou.'),
+      riskLevel: (payload.riskLevel || 'R1') as any,
+      status: payload.success ? 'success' : 'error',
+      simulated: Boolean(payload.simulated)
+    });
+  });
+
+  // CORREÇÃO (sincronização tool→TTS): transforma o resultado REAL da ferramenta
+  // em fala quando o modo de voz está ativo. Elimina a alucinação de 'não ter
+  // localização' — a LIORA fala o que a ferramenta REALMENTE retornou.
+  eventBus.subscribe('liora:tool_result', (payload: any) => {
+    const state = useLioraStore.getState();
+    if (!state.isVoiceActive) return;
+
+    const { toolName, success, resultData, resultSummary } = payload;
+    let speech: string | null = null;
+
+    try {
+      switch (toolName) {
+        case 'maps_search_places': {
+          const q = resultData?.query || resultSummary;
+          speech = success
+            ? `Abrindo a busca por ${q || 'locais'} no Google Maps. Os resultados estão na tela.`
+            : 'Não consegui abrir a busca no Google Maps.';
+          break;
+        }
+        case 'open_gps_navigation': {
+          const dest = resultData?.destination;
+          const prov = resultData?.provider === 'waze' ? 'Waze' : 'Google Maps';
+          speech = success
+            ? `Navegação iniciada no ${prov} para ${dest || 'o destino'}. Ouça as orientações no aplicativo.`
+            : 'Não consegui iniciar a navegação GPS.';
+          break;
+        }
+        case 'fetchNews': {
+          const items = resultData?.items || [];
+          if (success && items.length > 0) {
+            const headlines = items.slice(0, 3).map((i: any) => i.title).join('. ');
+            speech = `Aqui estão as principais notícias: ${headlines}`;
+          } else {
+            speech = resultData?.userFriendlyMessage || 'Não consegui acessar as notícias agora.';
+          }
+          break;
+        }
+        case 'calculate_route': {
+          speech = success
+            ? `Rota calculada: ${resultData?.distanceKm} quilômetros, aproximadamente ${resultData?.durationMinutes} minutos.`
+            : (resultData?.userFriendlyMessage || 'Não consegui calcular a rota agora.');
+          break;
+        }
+        case 'triggerAutomation': {
+          speech = success
+            ? `Automação executada: ${resultData?.ruleName || 'concluída'}.`
+            : `A automação falhou: ${resultData?.error || 'verifique o log de atividades'}.`;
+          break;
+        }
+        case 'open_application':
+        case 'pc_manage_apps': {
+          // Blindagem contra voz duplicada: se a abertura de app foi bem-sucedida,
+          // o canal de voz determinístico já emitiu o feedback imediato ("Abrindo Bloco de Notas, Mestre.").
+          // Não repete a fala de sucesso para evitar falar 2x. Apenas reporta se falhou.
+          const app = resultData?.appPath || resultData?.resolvedProcessName || resultData?.processName || 'aplicativo';
+          speech = success
+            ? null
+            : `Não consegui abrir o aplicativo ${app}: ${resultData?.error || 'verifique se está instalado'}.`;
+          break;
+        }
+        default:
+          // Ferramentas sem voz dedicada: fala o resumo honesto apenas se for falha
+          if (!success) speech = `A ferramenta ${toolName} falhou: ${resultSummary || 'erro desconhecido'}.`;
+          break;
+      }
+    } catch { /* nunca quebrar o pipeline de voz por erro de formatação */ }
+
+    if (speech && !speechService.isSpeaking()) {
+      speechService.speak(sanitizeTextForSpeech(speech), () => {}, () => {});
+    }
+  });
+}
 

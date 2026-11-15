@@ -81,7 +81,15 @@ class StorageAdapter {
       try {
         const results = await invokeTauri<Array<{ payloadJson: string }>>('load_sqlite_records', { table });
         if (Array.isArray(results)) {
-          return results.map(r => JSON.parse(r.payloadJson) as T);
+          const list: T[] = [];
+          for (const r of results) {
+            try {
+              if (r?.payloadJson) {
+                list.push(JSON.parse(r.payloadJson) as T);
+              }
+            } catch {}
+          }
+          return list;
         }
       } catch (err) {
         console.warn(`[StorageAdapter] Erro ao ler SQLite na tabela '${table}':`, err);
@@ -95,7 +103,9 @@ class StorageAdapter {
         const raw = localStorage.getItem(storageKey);
         if (raw) {
           const records: Record<string, StorageRecord<T>> = JSON.parse(raw);
-          return Object.values(records).map(r => r.payload);
+          return Object.values(records)
+            .map(r => r?.payload)
+            .filter((p): p is T => p !== undefined && p !== null);
         }
       } catch (e) {
         console.warn(`[StorageAdapter] Erro ao ler tabela '${table}':`, e);
@@ -167,6 +177,42 @@ class StorageAdapter {
     }
 
     return JSON.stringify(backup, null, 2);
+  }
+
+  /**
+   * CORREÇÃO (bug de falsa promessa — havia export mas NUNCA import): restaura
+   * um backup JSON completo gerado por exportFullBackup. Estratégia por tabela:
+   * Desktop (SQLite) → grava cada registro; Web → reescreve localStorage;
+   * sempre atualiza o cache em memória.
+   */
+  public async restoreFromBackup(backupJson: string): Promise<{ success: boolean; restored: Record<string, number>; error?: string }> {
+    const restored: Record<string, number> = {};
+    try {
+      const backup = JSON.parse(backupJson);
+      if (!backup || typeof backup !== 'object' || !backup.tables) {
+        return { success: false, restored, error: 'BACKUP_INVALID: arquivo sem a estrutura esperada { tables: {...} }.' };
+      }
+
+      for (const [table, records] of Object.entries(backup.tables as Record<string, any[]>)) {
+        if (!Array.isArray(records)) continue;
+        let count = 0;
+        for (const payload of records) {
+          if (payload === null || payload === undefined) continue;
+          // ID: usa o id embutido no payload se houver, senão gera
+          const id = (payload as any)?.id || `restore-${table}-${count}`;
+          try {
+            await this.save(table, String(id), payload);
+            count++;
+          } catch { /* registro individual falho não aborta o restore */ }
+        }
+        restored[table] = count;
+      }
+
+      const total = Object.values(restored).reduce((a, b) => a + b, 0);
+      return { success: true, restored };
+    } catch (err: any) {
+      return { success: false, restored, error: err?.message || 'BACKUP_PARSE_FAILED: JSON inválido.' };
+    }
   }
 }
 

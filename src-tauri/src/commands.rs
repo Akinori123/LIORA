@@ -254,16 +254,13 @@ pub async fn workspace_list_files(subpath: Option<String>, workspace_root: Optio
     let entries = fs::read_dir(&safe_path)
         .map_err(|e| format!("Falha ao ler diretório no disco: {}", e))?;
 
-    for entry in entries {
-        if let Ok(entry) = entry {
+    for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if !name.starts_with('.') || name == ".env.example" {
                     files.push(name.to_string());
                 }
             }
         }
-    }
-
     Ok(files)
 }
 
@@ -401,7 +398,7 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
             let args_vec = params.get("args")
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                .unwrap_or_else(Vec::new);
+                .unwrap_or_default();
             match system_exec_sandbox(cmd, args_vec, params.clone()).await {
                 Ok(out) => (true, Some(serde_json::json!({ "output": out })), None, "R3"),
                 Err(e) => (false, None, Some(e), "R3"),
@@ -439,6 +436,75 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
             match capture_screen().await {
                 Ok(data) => (true, Some(serde_json::json!({ "imageData": data })), None, "R1"),
                 Err(e) => (false, None, Some(format!("[SIMULADO/INDISPONÍVEL] {}", e)), "R1"),
+            }
+        }
+        "open_application" | "pc_manage_apps" => {
+            let target = params.get("target")
+                .or_else(|| params.get("appName"))
+                .or_else(|| params.get("command"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            match open_application(target).await {
+                Ok(_) => (true, Some(serde_json::json!({ "opened": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "list_processes" => {
+            match list_processes().await {
+                Ok(procs) => (true, Some(serde_json::to_value(procs).unwrap_or(serde_json::Value::Null)), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
+            }
+        }
+        "kill_process" => {
+            let pid = params.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let token = consent_token.unwrap_or("").to_string();
+            match kill_process(pid, token).await {
+                Ok(_) => (true, Some(serde_json::json!({ "killed": true, "pid": pid })), None, "R2"),
+                Err(e) => (false, None, Some(e), "R2"),
+            }
+        }
+        "system_set_volume" | "set_volume" => {
+            let level = params.get("level").and_then(|v| v.as_u64()).unwrap_or(50) as u8;
+            match set_volume(level).await {
+                Ok(v) => (true, Some(v), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "get_volume" => {
+            match get_volume().await {
+                Ok(v) => (true, Some(v), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
+            }
+        }
+        "system_lock_session" | "lock_session" => {
+            match lock_session().await {
+                Ok(_) => (true, Some(serde_json::json!({ "locked": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "save_sqlite_record" => {
+            let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let payload_json = params.get("payloadJson").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+            match save_sqlite_record(table, id, payload_json).await {
+                Ok(_) => (true, Some(serde_json::json!({ "saved": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "load_sqlite_records" => {
+            let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            match load_sqlite_records(table).await {
+                Ok(records) => (true, Some(serde_json::to_value(records).unwrap_or(serde_json::Value::Null)), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
+            }
+        }
+        "delete_sqlite_record" => {
+            let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            match delete_sqlite_record(table, id).await {
+                Ok(_) => (true, Some(serde_json::json!({ "deleted": true })), None, "R2"),
+                Err(e) => (false, None, Some(e), "R2"),
             }
         }
         _ => (false, None, Some(format!("Ferramenta desconhecida ou não suportada no Tauri: {}", tool_name)), "R0"),
@@ -727,11 +793,10 @@ pub async fn open_application(target: String) -> Result<bool, String> {
 
         std::process::Command::new("cmd")
             .args(["/C", "start", "", &target])
-            .creation_flags(0x00000008) // DETACHED_PROCESS: não vaza handle
             .spawn()
             .map_err(|e| format!("Falha ao abrir '{}': {}", target, e))?
             .wait()
-            .ok(); // Reap imediato do wrapper cmd (o programa alvo fica independente)
+            .ok(); // Reap imediato do wrapper cmd (o programa alvo fica independente e com janela visível)
         Ok(true)
     }
 
@@ -873,11 +938,11 @@ pub async fn get_volume() -> Result<serde_json::Value, String> {
         // Tenta obter volume via wmic/nircmd fallback
         let _ = (output, output2, output3);
 
-        return Ok(serde_json::json!({
+        Ok(serde_json::json!({
             "volume": null,
             "simulated": false,
             "note": "NOT_IMPLEMENTED_WINDOWS: Leitura de volume requer módulo AudioDeviceCmdlets ou winapi binding. Use set_volume para ajustar."
-        }));
+        }))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -901,9 +966,7 @@ pub async fn set_volume(level: u8) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "windows")]
     {
         // Tenta via PowerShell + WScript (sem dependências externas)
-        let script = format!(
-            r"$wsh = New-Object -ComObject WScript.Shell; 1..50 | ForEach-Object {{ $wsh.SendKeys([char]174) }}; Start-Sleep -Milliseconds 50"
-        );
+        let script = r"$wsh = New-Object -ComObject WScript.Shell; 1..50 | ForEach-Object { $wsh.SendKeys([char]174) }; Start-Sleep -Milliseconds 50".to_string();
         // Abordagem real: usa nircmd se disponível, senão informa limitação
         let nircmd = std::process::Command::new("nircmd")
             .args(["setsysvolume", &format!("{}", (level as u32 * 655))])
@@ -922,12 +985,12 @@ pub async fn set_volume(level: u8) -> Result<serde_json::Value, String> {
 
         // Fallback PowerShell via COM (ajusta keystrokes — impreciso mas funciona)
         let _ = script;
-        return Ok(serde_json::json!({
+        Ok(serde_json::json!({
             "success": false,
             "level": level,
             "simulated": false,
             "note": "NOT_FULLY_IMPLEMENTED: nircmd não encontrado. Instale nircmd.exe no PATH para controle preciso de volume."
-        }));
+        }))
     }
 
     #[cfg(target_os = "linux")]

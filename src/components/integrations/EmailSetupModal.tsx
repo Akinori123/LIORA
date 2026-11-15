@@ -36,12 +36,12 @@ const PROVIDER_PRESETS: Array<{
   smtpHost: string;
   smtpPort: number;
 }> = [
-  { id: 'gmail', label: 'Gmail', imapHost: 'imap.gmail.com', imapPort: 993, smtpHost: 'smtp.gmail.com', smtpPort: 465 },
-  { id: 'outlook', label: 'Outlook / Hotmail', imapHost: 'outlook.office365.com', imapPort: 993, smtpHost: 'smtp.office365.com', smtpPort: 587 },
-  { id: 'yahoo', label: 'Yahoo Mail', imapHost: 'imap.mail.yahoo.com', imapPort: 993, smtpHost: 'smtp.mail.yahoo.com', smtpPort: 465 },
-  { id: 'icloud', label: 'iCloud', imapHost: 'imap.mail.me.com', imapPort: 993, smtpHost: 'smtp.mail.me.com', smtpPort: 587 },
-  { id: 'custom', label: 'Outro provedor (personalizado)', imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 587 }
-];
+    { id: 'gmail', label: 'Gmail', imapHost: 'imap.gmail.com', imapPort: 993, smtpHost: 'smtp.gmail.com', smtpPort: 465 },
+    { id: 'outlook', label: 'Outlook / Hotmail', imapHost: 'outlook.office365.com', imapPort: 993, smtpHost: 'smtp.office365.com', smtpPort: 587 },
+    { id: 'yahoo', label: 'Yahoo Mail', imapHost: 'imap.mail.yahoo.com', imapPort: 993, smtpHost: 'smtp.mail.yahoo.com', smtpPort: 465 },
+    { id: 'icloud', label: 'iCloud', imapHost: 'imap.mail.me.com', imapPort: 993, smtpHost: 'smtp.mail.me.com', smtpPort: 587 },
+    { id: 'custom', label: 'Outro provedor (personalizado)', imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 587 }
+  ];
 
 export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClose, onConnect, serviceName }) => {
   const [presetId, setPresetId] = useState('gmail');

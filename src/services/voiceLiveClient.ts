@@ -76,6 +76,17 @@ export class VoiceLiveClient {
   private lastUserTranscript = '';
   private isSimulatedMode = false;
   private lastLogTime = 0;
+  // Flag: quando um comando determinístico é interceptado no onTranscription,
+  // suprime o áudio do modelo que chega em seguida (evita voz dupla).
+  private suppressAudioUntil = 0;
+
+  /**
+   * Estende dinamicamente a janela de supressão de áudio do Live
+   * para blindar contra voz dupla enquanto a fala local/determinística está ativa.
+   */
+  public extendSuppression(ms = 6000) {
+    this.suppressAudioUntil = Math.max(this.suppressAudioUntil, Date.now() + ms);
+  }
 
   // R3 (resiliência): estado de reconexão do canal Live. Quedas breves de rede
   // reconectam automaticamente com backoff exponencial (máx 3 tentativas,
@@ -196,18 +207,45 @@ export class VoiceLiveClient {
       const connectionPromise = new Promise<void>((resolve, reject) => {
         if (!this.ws) return reject(new Error('WebSocket não inicializado.'));
 
+        let settled = false;
+        const cleanupListeners = () => {
+          if (this.ws) {
+            this.ws.onopen = null;
+            this.ws.onerror = null;
+            this.ws.onclose = null;
+          }
+        };
+
         const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanupListeners();
+          try { this.ws?.close(); } catch {}
           reject(new Error('Tempo limite de conexão ao canal de voz excedido.'));
         }, 10000);
 
         this.ws.onopen = () => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          cleanupListeners();
           resolve();
         };
 
-        this.ws.onerror = (e) => {
+        this.ws.onerror = () => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          cleanupListeners();
           reject(new Error('Falha ao conectar no WebSocket de voz (/ws/voice).'));
+        };
+
+        this.ws.onclose = (ev) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          cleanupListeners();
+          reject(new Error(`WebSocket fechado antes de abrir (código: ${ev.code || 'desconhecido'}).`));
         };
       });
 
@@ -222,6 +260,10 @@ export class VoiceLiveClient {
       // 3. Inicializar saída de áudio (AudioContext 24kHz)
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtxClass) {
+        if (this.outputAudioCtx) {
+          try { this.outputAudioCtx.close(); } catch {}
+          this.outputAudioCtx = null;
+        }
         this.outputAudioCtx = new AudioCtxClass({ sampleRate: 24000 });
         if (this.outputAudioCtx.state === 'suspended') {
           await this.outputAudioCtx.resume();
@@ -260,23 +302,68 @@ export class VoiceLiveClient {
       maxCharacterBudget: 400
     });
     const memoryContextBlock = formatMemoryContextBlock(rankedMemories, 400);
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const temporalEnforcer = `[HORÁRIO LOCAL DO BRASIL: Hoje é ${dateStr}, e são ${timeStr}. Responda perguntas sobre data e hora com base estritamente nesta data e hora real.] `;
     const baseInstruction = this.config.systemInstruction || LIORA_SYSTEM_INSTRUCTION;
+    const languageEnforcer = "IDIOMA OBRIGATÓRIO: Responda SEMPRE e EXCLUSIVAMENTE em Português do Brasil (pt-BR). É terminantemente proibido falar em espanhol, inglês ou outro idioma. Ao cumprimentar o Mestre, use sempre português brasileiro. ";
     const liveSystemInstruction = memoryContextBlock
-      ? `${baseInstruction}${memoryContextBlock}`
-      : baseInstruction;
+      ? `${languageEnforcer}${temporalEnforcer}${baseInstruction}${memoryContextBlock}`
+      : `${languageEnforcer}${temporalEnforcer}${baseInstruction}`;
 
     // R3: chave SEMPRE re-resolvida do cofre (nunca cacheada entre sessões —
     // o usuário pode ter rotacionado a chave enquanto a sessão estava aberta)
     const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
+
+    // Injeção de Memória de Curto Prazo (Histórico de Diálogos e Comandos Recentes)
+    const storeState = useLioraStore.getState();
+    const recentMessages = (storeState.messages || []).slice(-8);
+    let shortTermHistory = '';
+    if (recentMessages.length > 0) {
+      shortTermHistory = '\n\n[MEMÓRIA DE CURTO PRAZO - HISTÓRICO RECENTE]:\n' +
+        recentMessages.map(m => `- ${m.sender === 'user' ? 'Mestre pediu' : 'LIORA respondeu/executou'}: "${(m.text || '').slice(0, 160)}"`).join('\n') +
+        '\n[FIM DO HISTÓRICO RECENTE. Se o Mestre perguntar "qual foi meu comando anterior?", "o que acabei de pedir?", cite o último comando com exatidão.]\n';
+    }
+
+    const recentLogs = (storeState.activityLogs || []).slice(0, 6);
+    let recentActions = '';
+    if (recentLogs.length > 0) {
+      recentActions = '\n[ÚLTIMAS AÇÕES EXECUTADAS NO SISTEMA]:\n' +
+        recentLogs.map(l => `- [${l.category.toUpperCase()}] ${l.summary}: ${l.details.slice(0, 120)} (${l.status})`).join('\n') +
+        '\n[FIM DAS AÇÕES RECENTES.]\n';
+    }
+
+    const enrichedInstruction = `${liveSystemInstruction}${shortTermHistory}${recentActions}`;
 
     this.ws.send(JSON.stringify({
       type: 'START_LIVE',
       model: this.config.model || 'gemini-3.8-live',
       voice: this.config.voice || 'Aoede',
       apiKey: geminiKey || undefined,
-      systemInstruction: liveSystemInstruction,
+      systemInstruction: enrichedInstruction,
       tools: toolRegistry.listTools()
     }));
+  }
+
+  /**
+   * Envia uma atualização de contexto de curto prazo para a sessão Live ativa.
+   * Permite que comandos executados localmente (ex: abrir app, consulta de horário)
+   * sejam imediatamente conhecidos pelo modelo caso o operador pergunte "qual foi meu comando anterior?".
+   */
+  public sendContextUpdate(userText: string, assistantReply: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({
+          type: 'CONTEXT_UPDATE',
+          userText,
+          assistantReply,
+          timestamp: new Date().toISOString()
+        }));
+      } catch (err) {
+        console.warn('[VoiceLiveClient] Falha ao enviar context update:', err);
+      }
+    }
   }
 
   /**
@@ -451,6 +538,10 @@ export class VoiceLiveClient {
       }
 
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (this.inputAudioCtx) {
+        try { this.inputAudioCtx.close(); } catch {}
+        this.inputAudioCtx = null;
+      }
       this.inputAudioCtx = new AudioCtxClass({ sampleRate: 16000 });
       if (this.inputAudioCtx.state === 'suspended') {
         await this.inputAudioCtx.resume();
@@ -503,7 +594,11 @@ export class VoiceLiveClient {
         // Despachar chunk de áudio binário respeitando o limite seguro (< 64KB)
         if (binaryChunk.byteLength <= 64 * 1024) {
           try {
-            this.ws.send(binaryChunk.buffer as ArrayBuffer);
+            const chunkBuffer = binaryChunk.buffer.slice(
+              binaryChunk.byteOffset,
+              binaryChunk.byteOffset + binaryChunk.byteLength
+            ) as ArrayBuffer;
+            this.ws.send(chunkBuffer);
           } catch (sendErr) {
             console.error('[VoiceLiveClient] Falha ao enviar chunk binário de áudio:', sendErr);
           }
@@ -532,6 +627,9 @@ export class VoiceLiveClient {
    */
   private playAudioOutputChunk(base64Pcm: string) {
     if (!this.outputAudioCtx) return;
+    // Suprime áudio quando um comando determinístico foi interceptado ou a LIORA local já está falando
+    if (Date.now() < this.suppressAudioUntil) return;
+    if (speechService.isSpeaking()) return;
 
     try {
       this.setStatus('SPEAKING');
@@ -585,6 +683,8 @@ export class VoiceLiveClient {
    */
   public interrupt() {
     this.stopAudioPlayback();
+    // Suprime áudio residual em voo por 6s (evita vazamento de turnos e voz dupla com comandos locais)
+    this.suppressAudioUntil = Date.now() + 6000;
     if (this.status === 'SPEAKING') {
       this.setStatus('LISTENING');
     }

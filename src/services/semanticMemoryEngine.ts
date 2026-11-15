@@ -168,6 +168,10 @@ class SemanticMemoryEngine {
       ? vector.map(v => v / norm)
       : new Array<number>(VECTOR_DIMENSIONS).fill(1 / Math.sqrt(VECTOR_DIMENSIONS));
 
+    if (this.embeddingCache.size > 500) {
+      const keys = Array.from(this.embeddingCache.keys()).slice(0, 100);
+      for (const k of keys) this.embeddingCache.delete(k);
+    }
     this.embeddingCache.set(cacheKey, normalizedVector);
     return normalizedVector;
   }

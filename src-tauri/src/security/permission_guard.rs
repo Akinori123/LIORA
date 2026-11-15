@@ -134,7 +134,7 @@ pub fn evaluate_native_tool(
     // 1. Determina o nível de risco nativo
     let risk_level = match tool_name {
         "get_system_info" | "get_system_hardware_telemetry" | "get_vehicle_telemetry" | "list_processes" | "get_volume" => NativeRiskLevel::R0,
-        "workspace_read_file" | "workspace_list_files" | "code_search_symbols" | "code_grep" | "code_read_file" | "git_status" | "git_diff" | "iot_list_devices" | "device_command" | "open_gps_navigation" | "maps_search_places" | "resolve_place_alias" => NativeRiskLevel::R0,
+        "workspace_read_file" | "workspace_list_files" | "code_search_symbols" | "code_grep" | "code_read_file" | "git_status" | "git_diff" | "iot_list_devices" | "device_command" | "open_gps_navigation" | "maps_search_places" | "resolve_place_alias" | "save_place_alias" | "fetchNews" | "calculate_route" | "pc_take_screenshot" | "file_search_and_read" => NativeRiskLevel::R0,
         "workspace_write_file" | "code_run_tests" => NativeRiskLevel::R1,
         "open_application" | "lock_session" | "set_volume" => NativeRiskLevel::R1,
         "read_keychain_secret" => NativeRiskLevel::R1,

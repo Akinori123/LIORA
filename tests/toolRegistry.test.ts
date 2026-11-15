@@ -31,7 +31,7 @@ test('1. Tool Registry - Initial state and default simulated tools', async (t) =
   // mestre (Fases 1-4) executam efeitos reais no SO/rede — isSimulated false é
   // proposital. As simuladas herdadas do preview continuam true.
   const REAL_TOOLS = new Set([
-    'open_gps_navigation', 'maps_search_places', 'resolve_place_alias',
+    'open_gps_navigation', 'maps_search_places', 'resolve_place_alias', 'save_place_alias',
     'triggerAutomation', 'calculate_route', 'fetchNews',
     'pc_take_screenshot', 'pc_manage_apps', 'pc_simulate_input',
     'file_search_and_read', 'file_write_and_modify',

@@ -20,6 +20,7 @@ import { CockpitHUDView } from './components/views/CockpitHUDView';
 import { QuickOverlay } from './components/QuickOverlay';
 import { GlobalVoiceBar } from './components/GlobalVoiceBar';
 import { GlobalConsentOverlay } from './components/chat/GlobalConsentOverlay';
+import { automationsEngine } from './services/automationsEngine';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -76,7 +77,32 @@ export default function App() {
     loadSettings();
   }, [loadSettings]);
 
-  // Global shortcut (Alt + Space or Option + Space) to toggle Quick Launcher
+  // Ciclo autônomo do motor de automações (avalia regras temporais a cada 15 segundos)
+  React.useEffect(() => {
+    let isCancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const logs = await automationsEngine.tick();
+        if (!isCancelled && logs.length > 0) {
+          useLioraStore.setState({
+            automations: automationsEngine.getRules(),
+            automationLogs: automationsEngine.getLogs()
+          });
+        }
+      } catch (err) {
+        console.warn('[Automations] Falha no tick:', err);
+      }
+    }, 15000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Global shortcuts:
+  // - Alt + Space (or Option + Space) to toggle Quick Launcher
+  // - Ctrl + Shift + L (or Cmd + Shift + L) to toggle Continuous Voice / Live Mode
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.altKey || e.metaKey) && (e.code === 'Space' || e.key === ' ')) {
@@ -84,6 +110,10 @@ export default function App() {
         setIsQuickOverlayOpen((prev) => !prev);
       } else if (e.key === 'Escape' && isQuickOverlayOpen) {
         setIsQuickOverlayOpen(false);
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.code === 'KeyL' || e.key.toLowerCase() === 'l')) {
+        e.preventDefault();
+        const store = useLioraStore.getState();
+        store.toggleVoice();
       }
     };
 

@@ -103,7 +103,7 @@ export async function executeLocalTool(
     // exige URL absoluta — caminhos relativos como '/api/tools/execute' falham
     // com "Failed to parse URL". No browser, o caminho relativo é o correto.
     const toolsUrl = (typeof window === 'undefined')
-      ? `http://localhost:${process.env.PORT || 3000}/api/tools/execute`
+      ? `http://localhost:${(typeof process !== 'undefined' && process.env?.PORT) || 3000}/api/tools/execute`
       : '/api/tools/execute';
 
     const response = await fetch(toolsUrl, {

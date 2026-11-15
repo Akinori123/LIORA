@@ -154,13 +154,21 @@ export async function launchGpsNavigation(
       const os = await import('os');
       const platform = os.platform();
 
-      if (platform === 'win32') {
-        exec(`rundll32.exe url.dll,FileProtocolHandler "${url}"`);
-      } else if (platform === 'darwin') {
-        exec(`open "${url}"`);
-      } else {
-        exec(`xdg-open "${url}"`);
-      }
+      // CORREÇÃO (auditoria): exec SEM callback → erro de spawn vira
+      // 'unhandled error event' e DERRUBA o servidor Express inteiro.
+      // Callback captura e reporta. JSON.stringify escapado para shell Unix.
+      const openCmd = platform === 'win32'
+        ? `rundll32.exe url.dll,FileProtocolHandler "${url.replace(/["\\]/g, '')}"`
+        : platform === 'darwin'
+          ? `open ${JSON.stringify(url)}`
+          : `xdg-open ${JSON.stringify(url)}`;
+
+      await new Promise<void>((resolveOpen) => {
+        exec(openCmd, { timeout: 10000, windowsHide: true }, (err) => {
+          if (err) console.warn('[NavigationTool] exec retornou erro:', err.message);
+          resolveOpen();
+        });
+      });
       return { success: true, url, provider: resolvedProvider, originMode };
     } catch (nodeErr) {
       console.warn('[NavigationTool] Falha ao abrir via Node child_process:', nodeErr);
@@ -386,13 +394,20 @@ export async function launchPlacesSearch(
       const os = await import('os');
       const platform = os.platform();
 
-      if (platform === 'win32') {
-        exec(`rundll32.exe url.dll,FileProtocolHandler "${url}"`);
-      } else if (platform === 'darwin') {
-        exec(`open "${url}"`);
-      } else {
-        exec(`xdg-open "${url}"`);
-      }
+      // CORREÇÃO (auditoria): mesmo padrão do launchGpsNavigation — exec SEM
+      // callback derruba o servidor; JSON.stringify + timeout + windowsHide.
+      const openCmd = platform === 'win32'
+        ? `rundll32.exe url.dll,FileProtocolHandler "${url.replace(/["\\]/g, '')}"`
+        : platform === 'darwin'
+          ? `open ${JSON.stringify(url)}`
+          : `xdg-open ${JSON.stringify(url)}`;
+
+      await new Promise<void>((resolveOpen) => {
+        exec(openCmd, { timeout: 10000, windowsHide: true }, (err) => {
+          if (err) console.warn('[PlacesTool] exec retornou erro:', err.message);
+          resolveOpen();
+        });
+      });
       return { success: true, url, query: resolvedQuery };
     } catch (nodeErr) {
       console.warn('[PlacesTool] Falha ao abrir via Node child_process:', nodeErr);

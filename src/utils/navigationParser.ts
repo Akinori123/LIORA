@@ -177,13 +177,20 @@ export const TAB_NAVIGATION_CONFIGS: Record<NavTab, TabSynonymConfig> = {
  */
 export function normalizeNavigationText(text: string): string {
   if (!text) return '';
-  return text
+  let norm = text
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^\w\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // Remove invocações da assistente e preâmbulos de cortesia
+  norm = norm.replace(/\b(?:e\s+|ei\s+|ola\s+|ok\s+)?liora\b/g, ' ');
+  norm = norm.replace(/\b(?:por\s+favor|por\s+gentileza|faca\s+o\s+favor|faz\s+favor|favor)\b/g, ' ');
+  norm = norm.replace(/\b(?:voce\s+pode|pode|consegue|poderia|seria\s+possivel|quero\s+que\s+voce|quero\s+que|preciso\s+que|da\s+pra)\b/g, ' ');
+  norm = norm.replace(/\b(?:pra\s+mim|para\s+mim)\b/g, ' ');
+  return norm.replace(/\s+/g, ' ').trim();
 }
 
 /**

@@ -4,6 +4,7 @@
  */
 
 import { IAuditLogger, AuditQueryFilter, SecurityAuditEvent } from './types';
+import { storageAdapter } from '../services/storageAdapter';
 
 export const MAX_AUDIT_LOG_CAPACITY = 200;
 export const DEFAULT_QUERY_LIMIT = 50;
@@ -92,6 +93,9 @@ export class AuditLogger implements IAuditLogger {
     });
 
     this.events.push(immutableEvent);
+
+    // Persiste no storageAdapter soberano de forma assíncrona (tabela 'audit_logs')
+    storageAdapter.save('audit_logs', immutableEvent.auditId, immutableEvent).catch(() => {});
 
     // Política FIFO: se ultrapassar a capacidade máxima, descarta o evento mais antigo
     if (this.events.length > this.maxCapacity) {
