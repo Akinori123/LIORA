@@ -76,35 +76,13 @@ export const resolvePlaceAliasTool: ToolDefinition<{
 
       // 2. Busca abrangente para locais personalizados ilimitados (amigos, família, favoritos)
       if (!resolvedAddress) {
-        // BUG CORRIGIDO (falso match): antes 'norm.includes(k) || k.includes(norm)'
-        // casava com QUALQUER memória contendo o apelido — apelido 'a' (1 letra)
-        // retornava a primeira memória da lista, e 'trabalho' casava com
-        // 'projeto_trabalho' (endereço errado). Agora: match EXATO após remover
-        // prefixos, com mínimo de 3 caracteres, e o valor DEVE parecer endereço.
         const direct = memoryEntries.find(m => {
-          const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^(local_|endereco_|endereco_de_)/, '');
-          return k.length >= 3 && k === norm;
+          const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          return k === norm || k.includes(norm);
         });
-        if (direct?.value && direct.value.trim().length > 3 && /\d|rua|avenida|av\.|travessa|estrada|rodovia|bairro|cidade/i.test(direct.value)) {
-          resolvedAddress = direct.value.trim();
+        if (direct?.value && /\d|rua|avenida|av\.|travessa|estrada|rodovia/i.test(direct.value)) {
+          resolvedAddress = direct.value;
           matchedKey = direct.key;
-        }
-      }
-
-      // 3. Fuzzy APENAS com palavra distinta de pelo menos 4 letras que apareça
-      //    no INÍCIO de uma chave de local — evita 'projeto_trabalho' quando o
-      //    usuário pede 'trabalho' (o match exato acima já pegou se existir).
-      if (!resolvedAddress) {
-        const words = norm.split(/\s+/).filter(w => w.length >= 4 && !['para', 'onde', 'minha', 'meu', 'casa', 'fica', 'rua', 'vou'].includes(w));
-        if (words.length > 0) {
-          const fuzzy = memoryEntries.find(m => {
-            const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^(local_|endereco_|endereco_de_)/, '');
-            return words.some(w => k.startsWith(w)) && /^(local_|endereco_)/i.test(m.key);
-          });
-          if (fuzzy?.value && /\d|rua|avenida|av\.|travessa|estrada|rodovia/i.test(fuzzy.value)) {
-            resolvedAddress = fuzzy.value.trim();
-            matchedKey = fuzzy.key;
-          }
         }
       }
     } catch {

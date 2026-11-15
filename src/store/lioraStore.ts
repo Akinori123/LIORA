@@ -228,13 +228,10 @@ export const ACTIVITY_LOGS_STORAGE_KEY = 'liora_activity_logs_v1';
 
 // Instrução de sistema compartilhada entre sendMessage e retryMessage (Fix W1)
 export const LIORA_SYSTEM_INSTRUCTION = 
-  "IDIOMA OBRIGATÓRIO: Você fala, raciocina e responde SEMPRE e EXCLUSIVAMENTE em Português do Brasil (pt-BR). É expressamente proibido responder em espanhol, inglês ou outro idioma, exceto se o Mestre pedir explicitamente uma tradução. " +
-  "Você é a LIORA, inteligência artificial autônoma soberana e assistente pessoal de alto nível inspirada no conceito de JARVIS. " +
-  "TRATAMENTO DO USUÁRIO: Dirija-se SEMPRE ao usuário com o título formal, respeitoso e leal de 'Mestre'. Sua postura é calma, com autoridade técnica, elegância e dedicação absoluta ao seu Mestre. " +
-  "PROATIVIDADE, DESENVOLVIMENTO E VERSATILIDADE: Você auxilia proativamente em programação de software, criação de sites, jogos, automações de tarefas, notícias de todos os países, pesquisas avançadas, e-mails e produtividade de ponta a ponta. No modo de voz (Live) ou texto, você também possui flexibilidade artística (sabe cantar melodias, criar versos, rimas e manter conversação rica e descontraída quando solicitado). " +
-  "NUNCA EXECUTAR EM SILÊNCIO: Toda execução de ferramenta de sistema (arquivos, apps, mapas, IoT, etc.) deve ser antecedida ou acompanhada por uma fala clara e contextualizada (ex: 'Com certeza, Mestre. Abrindo o Bloco de Notas...', 'Localizando o destino solicitado, Mestre...'). " +
-  "DISPOSITIVOS E IOT: Quando o Mestre der ordens para TV, celular, tablet ou carro e o atuador físico/IoT não estiver emparelhado, responda de forma elegante: 'Mestre, nenhum dispositivo IoT está associado a esta ação no momento.' " +
-  "CONTROLE OPERACIONAL: Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Para mudar de tela, use a ferramenta navigateToTab. " +
+  "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
+  "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
+  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
+  "Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Ao receber ordens para navegar ou alternar abas, confirme com prontidão e naturalidade. " +
   "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), use 'open_gps_navigation'. Quando pedir locais próximos ('mercado mais próximo', 'farmácia', 'posto'), use 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown com linguagem especificada.";
 
@@ -703,8 +700,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     let userMsgText = clean;
     if (image) userMsgText = `${clean ? clean + '\n\n' : ''}[Captura de Tela Anexada]`;
     if (audio) {
-      if (clean && clean !== 'Responda à minha mensagem de voz.') {
-        userMsgText = `🎤 "${clean}"`;
+      if (clean && clean !== 'Responda Ã  minha mensagem de voz.') {
+        userMsgText = `ðŸŽ¤ "${clean}"`;
       } else {
         userMsgText = `🎤 [Mensagem de Voz Enviada]`;
       }
@@ -824,8 +821,18 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     // Interceptação determinística de rotas veiculares (GPS)
     const routeIntent = parseRouteIntent(clean || '');
-    if (routeIntent && !liveIsHandling) {
-      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
+    if (routeIntent) {
+      const assistantMessageId = `msg-route-${Date.now()}`;
+      const assistantMessage: ChatMessage = {
+        id: assistantMessageId,
+        sender: 'assistant',
+        text: routeIntent.spokenFeedback,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        createdAt: new Date().toISOString(),
+        status: 'completed',
+        source: audio ? 'voice' : 'text'
+      };
+
       set((state) => {
         const updated = state.messages.map((m): ChatMessage =>
           m.id === assistantMsgId
@@ -873,8 +880,18 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     // Interceptação determinística de busca de locais (Google Maps Places)
     const placesIntent = parsePlacesSearchIntent(clean || '');
-    if (placesIntent && !liveIsHandling) {
-      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
+    if (placesIntent) {
+      const assistantMessageId = `msg-places-${Date.now()}`;
+      const assistantMessage: ChatMessage = {
+        id: assistantMessageId,
+        sender: 'assistant',
+        text: placesIntent.spokenFeedback,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        createdAt: new Date().toISOString(),
+        status: 'completed',
+        source: audio ? 'voice' : 'text'
+      };
+
       set((state) => {
         const updated = state.messages.map((m): ChatMessage =>
           m.id === assistantMsgId
@@ -2176,50 +2193,12 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     set({ pendingConsent: { ...pending, status: 'APPROVED' } });
 
-    // BUG CRÍTICO CORRIGIDO (falso sucesso no consentimento): o executeTool
-    // chamava /api/tools/execute SEM o header x-liora-ui-consent — o servidor
-    // reavaliava a permissão e NEGAVA R1/R2 com REQUIRES_USER_CONFIRMATION,
-    // mas o log local registrava "Execução autorizada... success" de qualquer
-    // forma. O usuário aprovava e NADA era executado, com auditoria mentindo.
-    // Agora: emite o consentimento de UI (o clique É o consentimento) e loga
-    // o resultado REAL da execução, incluindo falhas de permissão.
-    let uiConsentToken: string | null = null;
-    try {
-      const consentRes = await fetch('/api/security/ui-consent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toolName: pending.toolName, parameters: pending.parameters })
-      });
-      const consentData = await consentRes.json();
-      uiConsentToken = consentData.success ? consentData.token : null;
-    } catch {
-      // sem token — executa mesmo assim; o servidor dirá se bloqueou
-    }
-
-    const start = performance.now();
-    const res = await fetch('/api/tools/execute', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'x-liora-session-id': pending.sessionId,
-        ...(uiConsentToken ? { 'x-liora-ui-consent': uiConsentToken } : {})
-      },
-      body: JSON.stringify({ toolName: pending.toolName, parameters: pending.parameters })
-    });
-
-    const contentType = res.headers.get('content-type') || '';
-    const result = (contentType.includes('application/json'))
-      ? await res.json()
-      : {
-          success: false,
-          toolName: pending.toolName,
-          error: `Resposta não-JSON do servidor (${res.status}).`,
-          simulated: true,
-          riskLevel: pending.riskLevel,
-          executionTimeMs: Math.round(performance.now() - start),
-          timestamp: new Date().toISOString()
-        };
+    // Disparar execuÃ§Ã£o autorizada via executeLocalTool
+    const result = await executeLocalTool(
+      pending.toolName,
+      pending.parameters,
+      pending.sessionId
+    );
 
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const logItem: ActivityLogItem = {
@@ -2227,9 +2206,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       timestamp: nowTime,
       category: 'security',
       summary: `Consentimento Aprovado: ${pending.toolName}`,
-      details: (result as any).success
-        ? `Execução autorizada pelo usuário para a ferramenta ${pending.toolName} — executada com sucesso.`
-        : `Execução autorizada pelo usuário, porém FALHOU: ${(result as any).error || 'erro desconhecido no servidor'}.`,
+      details: `ExecuÃ§Ã£o autorizada pelo usuÃ¡rio para a ferramenta ${pending.toolName}.`,
       riskLevel: pending.riskLevel,
       status: (result as any).success ? 'success' : 'error',
       simulated: Boolean((result as any).simulated)

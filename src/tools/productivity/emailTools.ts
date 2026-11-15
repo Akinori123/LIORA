@@ -450,21 +450,6 @@ export const emailSendOrReplyTool: ToolDefinition<{
 
     // ── Sessão SMTP real (Node puro) ──
     return new Promise((resolve) => {
-      let stage = 'greeting';
-      let buffer = '';
-      let rcptIndex = 0;
-      let settled = false;
-
-      let socket: net.Socket;
-
-      // CORREÇÃO (TLS): a porta 465 usa TLS implícito e a 587 usa texto puro que
-      // exige STARTTLS antes de AUTH — antes usávamos net puro SEMPRE, o que
-      // (a) falhava em toda porta 465 (handshake TLS esperado) e (b) enviava
-      // credenciais em texto claro na 587. Agora: 465 → tls.connect direto;
-      // outras portas → net puro com upgrade STARTTLS após EHLO.
-      const useImplicitTls = cred.smtp.port === 465;
-      let upgradedToTls = false;
-
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
@@ -477,9 +462,10 @@ export const emailSendOrReplyTool: ToolDefinition<{
         });
       }, 20000);
 
-      socket = (useImplicitTls ? tls.connect({ host: cred.smtp.host, port: cred.smtp.port, rejectUnauthorized: false }, () => {
-        stage = 'greeting';
-      }) : net.createConnection({ host: cred.smtp.host, port: cred.smtp.port }, () => {
+      let stage = 'greeting';
+      let buffer = '';
+
+      const socket = net.createConnection({ host: cred.smtp.host, port: cred.smtp.port }, () => {
         stage = 'greeting';
       })) as net.Socket;
 

@@ -401,35 +401,8 @@ export const pcManageAppsTool: ToolDefinition<{
       if (/[;&|`$<>]/.test(rawApp)) return { success: false, error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos no appPath.', simulated: false, timestamp: new Date().toISOString() };
       const app = platform === 'win32' ? resolveWindowsAppExecutable(rawApp) : rawApp;
       if (platform === 'win32') {
-        if (isOsDryRun()) {
-          return { success: true, action: 'launch', app, message: `Aplicativo '${app}' iniciado.`, simulated: false, timestamp: new Date().toISOString() };
-        }
-        try {
-          // Lançamento com shell desvinculada (detached + windowsHide: false):
-          // O comando 'cmd /c start "" app' cria o processo com janela gráfica real
-          // no Desktop interativo da sessão do usuário, sem herdar flags de background.
-          const child = spawn('cmd.exe', ['/c', 'start', '', app], {
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: false
-          });
-          child.unref();
-
-          // Garante foco em primeiro plano na janela criada
-          setTimeout(async () => {
-            try {
-              const baseName = app.replace(/\.[^/.]+$/, '').replace(/.*[/\\]/, '');
-              const psFocus = `\ufeff(New-Object -ComObject WScript.Shell).AppActivate('${baseName}')`;
-              await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psFocus], 3000);
-            } catch {
-              // ignore focus retry
-            }
-          }, 450);
-
-          return { success: true, action: 'launch', app, message: `Aplicativo '${app}' iniciado e focado.`, simulated: false, timestamp: new Date().toISOString() };
-        } catch (err: any) {
-          return { success: false, action: 'launch', app, message: `Falha ao iniciar '${app}': ${err?.message || 'erro de execução'}`, simulated: false, timestamp: new Date().toISOString() };
-        }
+        const res = await runFile('cmd.exe', ['/C', 'start', '', app], 8000);
+        return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
       }
       const res = await runFile(platform === 'darwin' ? 'open' : 'xdg-open', [app], 8000);
       return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}'.`, simulated: false, timestamp: new Date().toISOString() };
@@ -710,16 +683,7 @@ const ALLOWED_SEARCH_ROOTS = [
 function checkSafePath(p: string, allowHomeRoot = false): string | null {
   try {
     const resolved = path.resolve(p);
-    const home = os.homedir();
-    const isExactHome = resolved.toLowerCase() === home.toLowerCase();
-    // Prefixo simples (startsWith) permitiria pastas irmãs (ex: Documents vs Documents-evil);
-    // exigimos que o restante comece com o separador do SO ou que seja a própria raiz.
-    const allowed = (allowHomeRoot && isExactHome) || ALLOWED_SEARCH_ROOTS.some(root => {
-      const r = path.resolve(root);
-      const lower = resolved.toLowerCase();
-      const rootLower = r.toLowerCase();
-      return lower === rootLower || lower.startsWith(rootLower + path.sep.toLowerCase());
-    });
+    const allowed = ALLOWED_SEARCH_ROOTS.some(root => resolved.toLowerCase().startsWith(root.toLowerCase()));
     if (!allowed) {
       return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raízes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
     }

@@ -49,23 +49,6 @@ export const GlobalVoiceBar: React.FC = () => {
   const [showDiagnosticModal, setShowDiagnosticModal] = useState(false);
   const [windowWidth, setWindowWidth] = useState<number>(typeof window !== 'undefined' ? window.innerWidth : 1280);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const vadSpeakingRef = useRef<boolean>(false);
-  const vadStartTimeRef = useRef<number>(0);
-  const isDispatchingRef = useRef<boolean>(false);
-  const transcriptRef = useRef(transcript);
-  useEffect(() => {
-    transcriptRef.current = transcript;
-  }, [transcript]);
-
-  // Ref de deduplicação temporal para comandos determinísticos (evita duplo disparo em interim/final)
-  const lastExecutedCommandRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
-
-  // Refs estáveis para funções do store para evitar desmontagem e remontagem do microfone
-  const sendMessageRef = useRef(sendMessage);
-  useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
-
-  const setOrbStateRef = useRef(setOrbState);
-  useEffect(() => { setOrbStateRef.current = setOrbState; }, [setOrbState]);
 
   // FIX C2: espelho do orbState em ref para o ciclo de vida da voz NÃO depender
   // de estados que mudam durante a sessão (orbState). Sem isso, o effect de voz
@@ -128,19 +111,10 @@ export const GlobalVoiceBar: React.FC = () => {
     // 3. Feedback falado curto e elegante
     setOrbState('SPEAKING');
     speechService.unlockAudio();
-    speechService.speak(
-      navMatch.spokenFeedback,
-      undefined,
-      () => {
-        voiceLiveClient.extendSuppression(2000);
-        const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-        setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-        if (currentVoiceActive) speechService.ensureAudioMeterRunning();
-      }
-    );
+    speechService.speak(navMatch.spokenFeedback);
 
-    // 4. Timer de segurança máximo
-    scheduleVoiceTimer(() => {
+    // 4. Retorno limpo para estado de escuta, impedindo travamento em THINKING/EXECUTING
+    setTimeout(() => {
       const currentVoiceActive = useLioraStore.getState().isVoiceActive;
       setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
     }, 4000);
