@@ -1,5 +1,6 @@
 import { integrationsVault } from './integrationsVault';
 import { audioGate } from './audioGate';
+import { voiceManager } from './voiceManager';
 
 // Interface para o Web Speech Recognition API
 interface SpeechRecognitionEventLike extends Event {
@@ -1028,6 +1029,7 @@ class SpeechService {
       onEnd?.();
       return;
     }
+    voiceManager.prepareForStreamPlayback();
 
     const isDeterministicOverride = Boolean(options?.isDeterministicOverride ?? audioGate.isLiveSuppressed());
 
@@ -1228,6 +1230,7 @@ class SpeechService {
       return;
     }
 
+    voiceManager.prepareForLocalPlayback();
     // Gate de exclusão mútua: se API/Live estiver ativo, TTS offline é estritamente silenciado
     if (!audioGate.acquireChannel('offline_tts', { isDeterministicOverride })) {
       window.speechSynthesis.cancel();
