@@ -15,7 +15,6 @@ import { isTauriEnvironment } from '../../security/localBridge';
 import { speechService } from '../../services/speechService';
 import { integrationsVault } from '../../services/integrationsVault';
 import { VaultManagerPanel } from '../security/VaultManagerPanel';
-import { AudioDiagnosticPanel } from '../voice/AudioDiagnosticPanel';
 
 export const SettingsView: React.FC = () => {
   const { settings, updateSettings, resetSettingsToDefault } = useLioraStore();
@@ -691,10 +690,7 @@ export const SettingsView: React.FC = () => {
         </div>
       </details>
 
-      {/* Painel de Diagnóstico em Tempo Real do Subsistema de Áudio */}
-      <div className="pt-2">
-        <AudioDiagnosticPanel />
-      </div>
+
     </div>
   );
 };

@@ -1,4 +1,5 @@
 import { integrationsVault } from './integrationsVault';
+import { audioGate } from './audioGate';
 
 // Interface para o Web Speech Recognition API
 interface SpeechRecognitionEventLike extends Event {
@@ -59,6 +60,7 @@ class SpeechService {
   private mediaRecorder: MediaRecorder | null = null;
   private recordedAudioChunks: Blob[] = [];
   private scriptProcessor: ScriptProcessorNode | null = null;
+  private silentGainNode: GainNode | null = null;
   private rawAudioSamples: Float32Array[] = [];
   private animFrameId: number | null = null;
   // CORREÇÃO (Etapa 7): loop do medidor por setInterval (sobrevive à minimização)
@@ -74,11 +76,20 @@ class SpeechService {
 
   private currentAudioElement: HTMLAudioElement | null = null;
   private currentAudioSource: AudioBufferSourceNode | null = null;
+  private ttsAbortController: AbortController | null = null;
   private ttsAudioCache = new Map<string, AudioBuffer>();
   private activeNeuralVoice: string = 'Aoede';
+  private activeSpeakId: number = 0;
+  private streamingEpoch: number = 0;
 
   constructor() {
     this.initRecognition();
+    audioGate.registerAbortHandler('neural_tts', () => {
+      this.cancelNeuralPlayback();
+    });
+    audioGate.registerAbortHandler('offline_tts', () => {
+      this.cancelOfflinePlayback();
+    });
     if (typeof window !== 'undefined') {
       if (window.speechSynthesis) {
         window.speechSynthesis.onvoiceschanged = () => {
@@ -194,6 +205,8 @@ class SpeechService {
 
   public playInstantAcknowledgment(): boolean {
     if (typeof window === 'undefined' || this.isSpeaking()) return false;
+    if (!audioGate.acquireChannel('neural_tts')) return false;
+
     const phrases = ['entendido.', 'certo.', 'analisando.', 'processando.'];
     for (const p of phrases) {
       const cached = this.ttsAudioCache.get(p);
@@ -212,6 +225,7 @@ class SpeechService {
             if (this.currentAudioSource === source) {
               this.currentAudioSource = null;
             }
+            audioGate.releaseChannel('neural_tts');
           };
           source.start(0);
           return true;
@@ -219,6 +233,7 @@ class SpeechService {
       }
     }
 
+    audioGate.releaseChannel('neural_tts');
     // Erradicação total de voz robótica: Nunca utilizar síntese nativa do navegador aqui
     return false;
   }
@@ -294,7 +309,16 @@ class SpeechService {
   private selectedDeviceId: string | null = null;
 
   public setSelectedAudioDevice(id: string) {
+    if (this.selectedDeviceId === id) return;
     this.selectedDeviceId = id;
+    if (typeof window !== 'undefined' && (this.mediaStream || this.micSourceNode || this.shouldBeListening)) {
+      const wasListening = this.shouldBeListening;
+      this.stopAudioMeter(true);
+      if (wasListening) {
+        this.shouldBeListening = true;
+        void this.startAudioMeter();
+      }
+    }
   }
 
   public getSelectedAudioDevice(): string | null {
@@ -450,10 +474,12 @@ class SpeechService {
           }
         };
         this.micGainNode.connect(this.scriptProcessor);
-        const silentGain = audioCtx.createGain();
-        silentGain.gain.value = 0;
-        this.scriptProcessor.connect(silentGain);
-        silentGain.connect(audioCtx.destination);
+        if (!this.silentGainNode) {
+          this.silentGainNode = audioCtx.createGain();
+          this.silentGainNode.gain.value = 0;
+        }
+        this.scriptProcessor.connect(this.silentGainNode);
+        this.silentGainNode.connect(audioCtx.destination);
       }
 
       // CORREÇÃO (Etapa 7 — microfone morre ao minimizar): o requestAnimationFrame
@@ -741,6 +767,13 @@ class SpeechService {
       this.scriptProcessor = null;
     }
 
+    if (this.silentGainNode) {
+      try {
+        this.silentGainNode.disconnect();
+      } catch {}
+      this.silentGainNode = null;
+    }
+
     // Apenas destrói hardware em caso de desmontagem completa (fullTeardown = true)
     if (fullTeardown) {
       this.rawAudioSamples = [];
@@ -950,6 +983,7 @@ class SpeechService {
   }
 
   private async processStreamingQueue() {
+    const epoch = this.streamingEpoch;
     if (this.streamingQueue.length === 0) {
       this.isProcessingQueue = false;
       if (this.isStreamDone) {
@@ -963,6 +997,7 @@ class SpeechService {
     const item = this.streamingQueue.shift()!;
 
     await this.speakSingleChunk(item.text, item.onStart);
+    if (epoch !== this.streamingEpoch) return;
 
     this.processStreamingQueue();
   }
@@ -974,7 +1009,8 @@ class SpeechService {
         onStart,
         () => {
           resolve();
-        }
+        },
+        { preserveStreamingQueue: true }
       );
     });
   }
@@ -982,11 +1018,33 @@ class SpeechService {
   /**
    * Fala em voz alta um texto usando a síntese de voz (TTS) neural do Gemini ou nativa do navegador
    */
-  public async speak(text: string, onStart?: () => void, onEnd?: () => void) {
-    if (typeof window === 'undefined') return;
+  public async speak(
+    text: string,
+    onStart?: () => void,
+    onEnd?: () => void,
+    options?: { isDeterministicOverride?: boolean; preserveStreamingQueue?: boolean }
+  ) {
+    if (typeof window === 'undefined') {
+      onEnd?.();
+      return;
+    }
 
-    // Cancela qualquer fala ou áudio anterior
-    this.stopSpeaking();
+    const isDeterministicOverride = Boolean(options?.isDeterministicOverride ?? audioGate.isLiveSuppressed());
+
+    // Gate estrito de exclusão mútua: se o canal Live WS está ativo e não foi suprimido,
+    // nunca empilha uma segunda voz paralela via TTS.
+    if (!audioGate.canAcquire('neural_tts', { isDeterministicOverride })) {
+      onEnd?.();
+      return;
+    }
+
+    // Cancela qualquer fala, fetch ou buffer de áudio anterior antes de emitir nova voz
+    if (options?.preserveStreamingQueue) {
+      this.cancelActiveAudio();
+    } else {
+      this.stopSpeaking();
+    }
+    const speakId = ++this.activeSpeakId;
 
     // Remove markdown e caracteres especiais para fala fluida
     const cleanText = text
@@ -996,6 +1054,11 @@ class SpeechService {
       .trim();
 
     if (!cleanText) {
+      onEnd?.();
+      return;
+    }
+
+    if (!audioGate.acquireChannel('neural_tts', { isDeterministicOverride })) {
       onEnd?.();
       return;
     }
@@ -1010,6 +1073,11 @@ class SpeechService {
         if (audioCtx.state === 'suspended') {
           await audioCtx.resume();
         }
+        if (speakId !== this.activeSpeakId) {
+          audioGate.releaseChannel('neural_tts');
+          onEnd?.();
+          return;
+        }
 
         const source = audioCtx.createBufferSource();
         source.buffer = cachedBuffer;
@@ -1019,6 +1087,7 @@ class SpeechService {
           if (this.currentAudioSource === source) {
             this.currentAudioSource = null;
           }
+          audioGate.releaseChannel('neural_tts');
           onEnd?.();
         };
 
@@ -1032,7 +1101,16 @@ class SpeechService {
       }
     }
 
+    if (speakId !== this.activeSpeakId) {
+      audioGate.releaseChannel('neural_tts');
+      onEnd?.();
+      return;
+    }
+
     // 2. Se não estiver em cache, tenta síntese de voz neural via backend Gemini TTS
+    const abortCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    this.ttsAbortController = abortCtrl;
+
     try {
       const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1045,14 +1123,29 @@ class SpeechService {
       const res = await fetch('/api/gemini/tts', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ text: cleanText, voice: this.activeNeuralVoice, model: storeModel })
+        body: JSON.stringify({ text: cleanText, voice: this.activeNeuralVoice, model: storeModel }),
+        signal: abortCtrl?.signal
       });
+      if (this.ttsAbortController === abortCtrl) {
+        this.ttsAbortController = null;
+      }
+      if (speakId !== this.activeSpeakId) {
+        audioGate.releaseChannel('neural_tts');
+        onEnd?.();
+        return;
+      }
 
       if (res.ok) {
         const data = await res.json();
+        if (speakId !== this.activeSpeakId) {
+          audioGate.releaseChannel('neural_tts');
+          onEnd?.();
+          return;
+        }
         if (data.fallbackToNative || data.code === 'QUOTA_EXHAUSTED' || !data.success) {
-          console.warn('[SpeechService] Gemini TTS indisponível ou cota esgotada. Alternando para voz nativa do navegador (pt-BR).');
-          this.speakFallbackBrowser(cleanText, onStart, onEnd);
+          audioGate.releaseChannel('neural_tts');
+          console.warn('[SpeechService] Gemini TTS indisponível ou cota esgotada. Concluindo de forma limpa (sem voz robótica nativa em conflito).');
+          onEnd?.();
           return;
         }
 
@@ -1068,8 +1161,18 @@ class SpeechService {
           if (audioCtx.state === 'suspended') {
             await audioCtx.resume();
           }
+          if (speakId !== this.activeSpeakId) {
+            audioGate.releaseChannel('neural_tts');
+            onEnd?.();
+            return;
+          }
 
           const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+          if (speakId !== this.activeSpeakId) {
+            audioGate.releaseChannel('neural_tts');
+            onEnd?.();
+            return;
+          }
 
           // Guarda em cache frases de até 150 caracteres para reuso instantâneo
           if (cleanText.length <= 150) {
@@ -1088,6 +1191,7 @@ class SpeechService {
             if (this.currentAudioSource === source) {
               this.currentAudioSource = null;
             }
+            audioGate.releaseChannel('neural_tts');
             onEnd?.();
           };
 
@@ -1097,16 +1201,36 @@ class SpeechService {
           return;
         }
       }
-    } catch (e) {
-      console.warn('[SpeechService] Falha na síntese Gemini TTS, acionando síntese nativa:', e);
+    } catch (e: any) {
+      if (this.ttsAbortController === abortCtrl) {
+        this.ttsAbortController = null;
+      }
+      if (e?.name === 'AbortError' || speakId !== this.activeSpeakId) {
+        audioGate.releaseChannel('neural_tts');
+        onEnd?.();
+        return;
+      }
+      console.warn('[SpeechService] Falha na síntese Gemini TTS:', e);
     }
 
-    // 3. Fallback garantido para a voz nativa do navegador (Web Speech Synthesis pt-BR)
-    this.speakFallbackBrowser(cleanText, onStart, onEnd);
+    audioGate.releaseChannel('neural_tts');
+    onEnd?.();
   }
 
-  private speakFallbackBrowser(cleanText: string, onStart?: () => void, onEnd?: () => void) {
+  private speakFallbackBrowser(
+    cleanText: string,
+    onStart?: () => void,
+    onEnd?: () => void,
+    isDeterministicOverride = false
+  ) {
     if (typeof window === 'undefined' || !window.speechSynthesis) {
+      onEnd?.();
+      return;
+    }
+
+    // Gate de exclusão mútua: se API/Live estiver ativo, TTS offline é estritamente silenciado
+    if (!audioGate.acquireChannel('offline_tts', { isDeterministicOverride })) {
+      window.speechSynthesis.cancel();
       onEnd?.();
       return;
     }
@@ -1136,6 +1260,7 @@ class SpeechService {
         if (this.currentUtterance === utterance) {
           this.currentUtterance = null;
         }
+        audioGate.releaseChannel('offline_tts');
         onEnd?.();
       };
 
@@ -1144,6 +1269,7 @@ class SpeechService {
         if (this.currentUtterance === utterance) {
           this.currentUtterance = null;
         }
+        audioGate.releaseChannel('offline_tts');
         onEnd?.();
       };
 
@@ -1151,19 +1277,23 @@ class SpeechService {
       window.speechSynthesis.speak(utterance);
     } catch (err) {
       console.warn('[SpeechService Fallback TTS Exception]:', err);
+      audioGate.releaseChannel('offline_tts');
       onEnd?.();
     }
   }
 
-  public stopSpeaking() {
-    this.streamingQueue = [];
-    this.isProcessingQueue = false;
-    this.isStreamDone = false;
-    this.onAllStreamingFinished = null;
-
+  private cancelNeuralPlayback() {
+    this.activeSpeakId += 1;
+    if (this.ttsAbortController) {
+      try {
+        this.ttsAbortController.abort();
+      } catch {}
+      this.ttsAbortController = null;
+    }
     if (typeof window !== 'undefined') {
       if (this.currentAudioSource) {
         try {
+          this.currentAudioSource.onended = null;
           this.currentAudioSource.stop();
           this.currentAudioSource.disconnect();
         } catch {}
@@ -1176,11 +1306,33 @@ class SpeechService {
         } catch {}
         this.currentAudioElement = null;
       }
-      if (window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-        this.currentUtterance = null;
-      }
     }
+    audioGate.releaseChannel('neural_tts');
+  }
+
+  private cancelOfflinePlayback() {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+      this.currentUtterance = null;
+    }
+    audioGate.releaseChannel('offline_tts');
+  }
+
+  private cancelActiveAudio() {
+    this.cancelNeuralPlayback();
+    this.cancelOfflinePlayback();
+  }
+
+  public stopSpeaking() {
+    this.streamingEpoch += 1;
+    this.streamingQueue = [];
+    this.isProcessingQueue = false;
+    this.isStreamDone = false;
+    this.onAllStreamingFinished = null;
+
+    this.cancelActiveAudio();
   }
 
   public isSpeaking(): boolean {

@@ -76,11 +76,35 @@ export const resolvePlaceAliasTool: ToolDefinition<{
 
       // 2. Busca abrangente para locais personalizados ilimitados (amigos, família, favoritos)
       if (!resolvedAddress) {
-        const direct = memoryEntries.find(m => {
-          const k = m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          return k === norm || k.includes(norm);
-        });
-        if (direct?.value && /\d|rua|avenida|av\.|travessa|estrada|rodovia/i.test(direct.value)) {
+        const normSlug = norm.replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        const normWords = norm.replace(/[^a-z0-9]+/g, ' ').trim();
+        const normalizeMemKey = (key: string) => {
+          const raw = key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          const stripped = raw.replace(/^local_/, '').replace(/_+/g, '_').replace(/^_|_$/g, '');
+          const words = stripped.replace(/[^a-z0-9]+/g, ' ').trim();
+          return { raw, stripped, words };
+        };
+
+        // Prioriza correspondência exata antes de busca parcial (substring)
+        const direct =
+          memoryEntries.find(m => {
+            const { raw, stripped, words } = normalizeMemKey(m.key);
+            return raw === norm || stripped === normSlug || (normWords.length > 0 && words === normWords);
+          }) ||
+          memoryEntries.find(m => {
+            const { raw, stripped, words } = normalizeMemKey(m.key);
+            return (
+              raw.includes(norm) ||
+              (normSlug.length > 0 && stripped.includes(normSlug)) ||
+              (normWords.length > 0 && words.includes(normWords))
+            );
+          });
+
+        if (
+          direct?.value &&
+          (direct.key.startsWith('local_') ||
+            /\d|rua|avenida|av\.|travessa|estrada|rodovia/i.test(direct.value))
+        ) {
           resolvedAddress = direct.value;
           matchedKey = direct.key;
         }

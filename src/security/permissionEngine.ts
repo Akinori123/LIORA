@@ -59,6 +59,14 @@ export class PermissionEngine implements IPermissionEngine {
     // Consentimento HMAC opcional (R1/R2): passado via toolMetadata pela chamada
     const consentToken = toolMetadata?.consentToken;
 
+    console.log('[PermissionEngine] [HANDSHAKE: requested]', {
+      toolName,
+      riskLevel: toolMetadata?.riskLevel || 'R0',
+      sessionId: context.sessionId,
+      hasConsentToken: Boolean(consentToken),
+      rawParametersKeys: typeof rawParameters === 'object' && rawParameters !== null ? Object.keys(rawParameters) : []
+    });
+
     // 0. Validação de integridade do perfil ativo
     if (!isValidSecurityProfile(this.activeProfile)) {
       const result: PermissionEvaluationResult = {
@@ -193,9 +201,15 @@ export class PermissionEngine implements IPermissionEngine {
         timestamp,
         auditId
       };
+      console.log('[PermissionEngine] [HANDSHAKE: pending]', {
+        toolName,
+        riskLevel: 'R2',
+        code: 'REQUIRES_USER_CONFIRMATION',
+        sessionId: context.sessionId,
+        parametersHash
+      });
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
-
     // 7. R1 — AÇÃO LOCAL REVERSÍVEL: idem, exige consentimento HMAC (não mais DENY categorico).
     if (resolvedRiskLevel === 'R1') {
       const consented = consentToken
@@ -227,6 +241,13 @@ export class PermissionEngine implements IPermissionEngine {
         timestamp,
         auditId
       };
+      console.log('[PermissionEngine] [HANDSHAKE: pending]', {
+        toolName,
+        riskLevel: 'R1',
+        code: 'REQUIRES_USER_CONFIRMATION',
+        sessionId: context.sessionId,
+        parametersHash
+      });
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
 
@@ -342,6 +363,12 @@ export class PermissionEngine implements IPermissionEngine {
       // Ignora erro em emissão de consentimento para não quebrar contrato analítico
     }
 
+    console.log('[PermissionEngine] [HANDSHAKE: user_action - TOKEN_ISSUED]', {
+      toolName,
+      sessionId,
+      consentAuditId,
+      expiresAt
+    });
     return {
       token: rawToken,
       consentAuditId,
@@ -359,6 +386,13 @@ export class PermissionEngine implements IPermissionEngine {
     parametersHash: string,
     sessionId: string
   ): { success: boolean; denialCode?: PermissionDenialCode; consentAuditId?: string } {
+    console.log('[PermissionEngine] [HANDSHAKE: user_action - TOKEN_CONSUMING]', {
+      toolName,
+      sessionId,
+      hasToken: Boolean(token),
+      tokenPrefix: token ? token.slice(0, 8) : 'none'
+    });
+
     if (!token || typeof token !== 'string') {
       return { success: false, denialCode: 'CONSENT_TOKEN_MISSING' };
     }

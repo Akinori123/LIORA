@@ -87,9 +87,11 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
       return;
     }
 
-    const imapPortNum = parseInt(imapPort, 10) || 993;
-    const smtpPortNum = parseInt(smtpPort, 10) || 587;
-    if (imapPortNum < 1 || imapPortNum > 65535 || smtpPortNum < 1 || smtpPortNum > 65535) {
+    const imapPortStr = imapPort.trim();
+    const smtpPortStr = smtpPort.trim();
+    const imapPortNum = /^\d+$/.test(imapPortStr) ? Number(imapPortStr) : NaN;
+    const smtpPortNum = /^\d+$/.test(smtpPortStr) ? Number(smtpPortStr) : NaN;
+    if (!Number.isInteger(imapPortNum) || !Number.isInteger(smtpPortNum) || imapPortNum < 1 || imapPortNum > 65535 || smtpPortNum < 1 || smtpPortNum > 65535) {
       setError('As portas devem estar entre 1 e 65535.');
       return;
     }

@@ -438,9 +438,10 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
                 Err(e) => (false, None, Some(format!("[SIMULADO/INDISPONÍVEL] {}", e)), "R1"),
             }
         }
-        "open_application" | "pc_manage_apps" => {
+        "open_application" => {
             let target = params.get("target")
                 .or_else(|| params.get("appName"))
+                .or_else(|| params.get("appPath"))
                 .or_else(|| params.get("command"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -448,6 +449,36 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
             match open_application(target).await {
                 Ok(_) => (true, Some(serde_json::json!({ "opened": true })), None, "R1"),
                 Err(e) => (false, None, Some(e), "R1"),
+            }
+        }
+        "pc_manage_apps" => {
+            let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("launch");
+            match action {
+                "list" => match list_processes().await {
+                    Ok(procs) => (true, Some(serde_json::to_value(procs).unwrap_or(serde_json::Value::Null)), None, "R0"),
+                    Err(e) => (false, None, Some(e), "R0"),
+                },
+                "kill" => {
+                    let pid = params.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let token = consent_token.unwrap_or("").to_string();
+                    match kill_process(pid, token).await {
+                        Ok(_) => (true, Some(serde_json::json!({ "killed": true, "pid": pid })), None, "R2"),
+                        Err(e) => (false, None, Some(e), "R2"),
+                    }
+                },
+                _ => {
+                    let target = params.get("target")
+                        .or_else(|| params.get("appPath"))
+                        .or_else(|| params.get("appName"))
+                        .or_else(|| params.get("command"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    match open_application(target).await {
+                        Ok(_) => (true, Some(serde_json::json!({ "opened": true })), None, "R1"),
+                        Err(e) => (false, None, Some(e), "R1"),
+                    }
+                }
             }
         }
         "list_processes" => {
@@ -656,9 +687,20 @@ pub struct SqliteRecordResult {
     pub payloadJson: String,
 }
 
+fn validate_table_name(table: &str) -> Result<(), String> {
+    if table.is_empty()
+        || table.len() > 64
+        || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("Nome de tabela inválido: use apenas caracteres alfanuméricos, '_' ou '-'.".to_string());
+    }
+    Ok(())
+}
+
 /// Grava um registro de forma atômica e transacional no disco com garantia contra corrupção
 #[command]
 pub async fn save_sqlite_record(table: String, id: String, payload_json: String) -> Result<bool, String> {
+    validate_table_name(&table)?;
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
@@ -689,6 +731,7 @@ pub async fn save_sqlite_record(table: String, id: String, payload_json: String)
 /// Carrega todos os registros de uma tabela persistente
 #[command]
 pub async fn load_sqlite_records(table: String) -> Result<Vec<SqliteRecordResult>, String> {
+    validate_table_name(&table)?;
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
@@ -715,6 +758,7 @@ pub async fn load_sqlite_records(table: String) -> Result<Vec<SqliteRecordResult
 /// Remove um registro da tabela persistente
 #[command]
 pub async fn delete_sqlite_record(table: String, id: String) -> Result<bool, String> {
+    validate_table_name(&table)?;
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());

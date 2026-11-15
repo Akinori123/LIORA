@@ -22,6 +22,7 @@ import fsp from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { ToolDefinition } from './types';
+import { shouldUseWebPreviewDesktopFallback } from '../utils/runtimeEnvironment';
 
 /**
  * GUARDA ANTI-EFEITOS-COLATERAIS (Etapa E da auditoria UI/testes):
@@ -250,6 +251,12 @@ const WINDOWS_APP_MAP: Record<string, string> = {
   'epic games': 'com.epicgames.launcher'
 };
 
+const WINDOWS_APP_MAP_SORTED = Object.entries(WINDOWS_APP_MAP).sort((a, b) => b[0].length - a[0].length);
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function resolveWindowsAppExecutable(appName: string): string {
   if (!appName) return '';
   const clean = appName
@@ -271,8 +278,9 @@ function resolveWindowsAppExecutable(appName: string): string {
     return WINDOWS_APP_MAP[stripped];
   }
 
-  for (const [key, exe] of Object.entries(WINDOWS_APP_MAP)) {
-    if (clean.includes(key) || stripped.includes(key)) {
+  for (const [key, exe] of WINDOWS_APP_MAP_SORTED) {
+    const boundaryRe = new RegExp(`(?:^|\\s)${escapeRegExp(key)}(?:\\s|$)`);
+    if (boundaryRe.test(clean) || boundaryRe.test(stripped)) {
       return exe;
     }
   }
@@ -400,18 +408,63 @@ export const pcManageAppsTool: ToolDefinition<{
       // Bloqueio de injeção: sem metacaracteres de shell
       if (/[;&|`$<>]/.test(rawApp)) return { success: false, error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos no appPath.', simulated: false, timestamp: new Date().toISOString() };
       const app = platform === 'win32' ? resolveWindowsAppExecutable(rawApp) : rawApp;
+
+      // Adaptabilidade Cloud Web Preview (Linux headless sem display gráfico)
+      if (!isOsDryRun() && shouldUseWebPreviewDesktopFallback()) {
+        return {
+          success: true,
+          action: 'launch',
+          app,
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Abertura de '${app}' simulada (ambiente em nuvem sem interface gráfica de desktop).`,
+          timestamp: new Date().toISOString()
+        };
+      }
+
       if (platform === 'win32') {
         const res = await runFile('cmd.exe', ['/C', 'start', '', app], 8000);
-        return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
+        return {
+          success: res.code === 0,
+          action: 'launch',
+          app,
+          message: res.code === 0
+            ? `Aplicativo '${app}' iniciado.`
+            : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150) || 'executável não encontrado'}`,
+          error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || `Falha ao iniciar '${app}' (código ${res.code}).`),
+          simulated: false,
+          timestamp: new Date().toISOString()
+        };
       }
       const res = await runFile(platform === 'darwin' ? 'open' : 'xdg-open', [app], 8000);
-      return { success: res.code === 0, action: 'launch', app, message: res.code === 0 ? `Aplicativo '${app}' iniciado.` : `Falha ao iniciar '${app}'.`, simulated: false, timestamp: new Date().toISOString() };
+      return {
+        success: res.code === 0,
+        action: 'launch',
+        app,
+        message: res.code === 0
+          ? `Aplicativo '${app}' iniciado.`
+          : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150) || `código ${res.code}`}.`,
+        error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || `Falha ao iniciar '${app}' (código ${res.code}).`),
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
     }
 
     // ---- focus (R1 — traz janela para frente via AppleScript/powershell) ----
     if (params.action === 'focus') {
       const title = (params.windowTitle || '').trim();
       if (!title) return { success: false, error: 'MISSING_TITLE: informe windowTitle para focar a janela.', simulated: false, timestamp: new Date().toISOString() };
+      if (!isOsDryRun() && shouldUseWebPreviewDesktopFallback()) {
+        return {
+          success: true,
+          action: 'focus',
+          windowTitle: title,
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Foco na janela '${title}' simulado em ambiente sem desktop.`,
+          timestamp: new Date().toISOString()
+        };
+      }
       if (platform === 'win32') {
         // BOM UTF-8 (ver PCVIEW nota acima): preserva acentos em títulos de janela
         const ps = `\ufeff(New-Object -ComObject WScript.Shell).AppActivate('${title.replace(/'/g, "''")}')`;
@@ -670,25 +723,34 @@ while ((Get-Date) -lt $deadline) {
 // MÓDULO 3 — GERENCIAMENTO UNIVERSAL DE ARQUIVOS
 // ============================================================================
 
-const ALLOWED_SEARCH_ROOTS = [
+const USER_SEARCH_ROOTS = [
   path.join(os.homedir(), 'Desktop'),
   path.join(os.homedir(), 'Documents'),
   path.join(os.homedir(), 'Downloads'),
   path.join(os.homedir(), 'Pictures'),
-  path.join(os.homedir(), '.liora', 'workspace'),
+  path.join(os.homedir(), '.liora', 'workspace')
+];
+
+const ALLOWED_SEARCH_ROOTS = [
+  ...USER_SEARCH_ROOTS,
   os.tmpdir()
 ];
 
 /** Garante que o caminho está dentro das raízes permitidas. Retorna null se OK, mensagem de erro se bloqueado. */
-function checkSafePath(p: string, allowHomeRoot = false): string | null {
+function checkSafePath(p: string): string | null {
   try {
     const resolved = path.resolve(p);
-    const allowed = ALLOWED_SEARCH_ROOTS.some(root => resolved.toLowerCase().startsWith(root.toLowerCase()));
-    if (!allowed) {
-      return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raízes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
-    }
     if (resolved.split(path.sep).includes('..')) {
       return 'PATH_TRAVERSAL_BLOCKED: caminhos com ".." não são permitidos.';
+    }
+    const resolvedNorm = resolved.toLowerCase();
+    const allowed = ALLOWED_SEARCH_ROOTS.some(root => {
+      const rootResolved = path.resolve(root).toLowerCase();
+      const rootWithSep = rootResolved.endsWith(path.sep) ? rootResolved : `${rootResolved}${path.sep}`;
+      return resolvedNorm === rootResolved || resolvedNorm.startsWith(rootWithSep);
+    });
+    if (!allowed) {
+      return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raízes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
     }
     return null;
   } catch {
@@ -702,9 +764,15 @@ function assertSafePath(p: string): void {
   if (err) throw new Error(err);
 }
 
-/** Raiz de busca padrão: pastas do usuário (Desktop/Docs/Downloads) */
-function defaultSearchRoot(): string {
-  return os.homedir();
+/** Raízes de busca padrão permitidas (pastas do usuário existentes) */
+function defaultSearchRoots(): string[] {
+  return USER_SEARCH_ROOTS.filter((r) => {
+    try {
+      return fs.existsSync(r);
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -739,40 +807,53 @@ export const fileSearchAndReadTool: ToolDefinition<{
   execute: async (params) => {
     try {
       const maxResults = Math.max(1, Math.min(100, params.maxResults || 20));
-      const root = params.rootPath ? path.resolve(params.rootPath) : defaultSearchRoot();
-      const scopeErr = checkSafePath(root, true);
-      if (scopeErr) {
-        return { success: false, error: scopeErr, results: [], simulated: false, timestamp: new Date().toISOString() };
-      }
+      let rootsToWalk: string[];
+      let searchedRootLabel: string;
 
-    const exts = (params.extensions || []).map(e => e.toLowerCase().startsWith('.') ? e.toLowerCase() : `.${e.toLowerCase()}`);
-    const queryLower = (params.query || '').toLowerCase();
-    const results: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; content?: string | null; truncated?: boolean; note?: string }> = [];
-
-    const walk = async (dir: string, depth: number): Promise<void> => {
-      if (depth > 6 || results.length >= maxResults) return;
-      let entries;
-      try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
-      for (const entry of entries) {
-        if (results.length >= maxResults) return;
-        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '$RECYCLE.BIN') continue;
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          await walk(full, depth + 1);
-        } else {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (exts.length > 0 && !exts.includes(ext)) continue;
-          if (queryLower && !entry.name.toLowerCase().includes(queryLower)) continue;
-          try {
-            const stat = await fsp.stat(full);
-            const item: any = { path: full, name: entry.name, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() };
-            results.push(item);
-          } catch { /* arquivo travado/sem permissão — ignora */ }
+      if (params.rootPath) {
+        const resolvedRoot = path.resolve(params.rootPath);
+        const scopeErr = checkSafePath(resolvedRoot);
+        if (scopeErr) {
+          return { success: false, error: scopeErr, results: [], simulated: false, timestamp: new Date().toISOString() };
         }
+        rootsToWalk = [resolvedRoot];
+        searchedRootLabel = resolvedRoot;
+      } else {
+        rootsToWalk = defaultSearchRoots();
+        searchedRootLabel = rootsToWalk.length > 0 ? rootsToWalk.join(', ') : USER_SEARCH_ROOTS.join(', ');
       }
-    };
 
-    await walk(root, 0);
+      const exts = (params.extensions || []).map(e => e.toLowerCase().startsWith('.') ? e.toLowerCase() : `.${e.toLowerCase()}`);
+      const queryLower = (params.query || '').toLowerCase();
+      const results: Array<{ path: string; name: string; sizeBytes: number; modifiedAt: string; content?: string | null; truncated?: boolean; note?: string }> = [];
+
+      const walk = async (dir: string, depth: number): Promise<void> => {
+        if (depth > 6 || results.length >= maxResults) return;
+        let entries;
+        try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+          if (results.length >= maxResults) return;
+          if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '$RECYCLE.BIN') continue;
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await walk(full, depth + 1);
+          } else {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (exts.length > 0 && !exts.includes(ext)) continue;
+            if (queryLower && !entry.name.toLowerCase().includes(queryLower)) continue;
+            try {
+              const stat = await fsp.stat(full);
+              const item: any = { path: full, name: entry.name, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() };
+              results.push(item);
+            } catch { /* arquivo travado/sem permissão — ignora */ }
+          }
+        }
+      };
+
+      for (const rootDir of rootsToWalk) {
+        if (results.length >= maxResults) break;
+        await walk(rootDir, 0);
+      }
 
     // Ordena por modificação mais recente
     results.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
@@ -796,7 +877,7 @@ export const fileSearchAndReadTool: ToolDefinition<{
       }
     }
 
-    return { success: true, searchedRoot: root, query: queryLower || '(todos)', extensions: exts, results, count: results.length, simulated: false, timestamp: new Date().toISOString() };
+    return { success: true, searchedRoot: searchedRootLabel, query: queryLower || '(todos)', extensions: exts, results, count: results.length, simulated: false, timestamp: new Date().toISOString() };
     } catch (err: any) {
       return { success: false, error: `SEARCH_FAILED: ${err?.message || 'falha na varredura'}`, results: [], simulated: false, timestamp: new Date().toISOString() };
     }
@@ -959,5 +1040,156 @@ export const openApplicationTool: ToolDefinition<{
       action: 'launch',
       appPath: target
     });
+  }
+};
+
+/**
+ * open_browser (R2) — abre o navegador web real do usuário (Chrome, Edge, Opera ou padrão)
+ * opcionalmente carregando uma URL HTTP/HTTPS segura, com adaptabilidade para Cloud Web Preview.
+ */
+export const openBrowserTool: ToolDefinition<{
+  url?: string;
+  browser?: 'default' | 'chrome' | 'msedge' | 'opera' | 'firefox';
+}, any> = {
+  name: 'open_browser',
+  description: 'Abre o navegador web padrão (ou Chrome/Edge/Opera) no computador do usuário, com URL opcional HTTP/HTTPS. Risco R2.',
+  category: 'system',
+  riskLevel: 'R2',
+  isSimulated: false,
+  parameters: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'URL HTTP/HTTPS opcional para abrir no navegador (padrão: https://www.google.com).' },
+      browser: { type: 'string', enum: ['default', 'chrome', 'msedge', 'opera', 'firefox'], description: 'Navegador preferido (padrão: default).' }
+    },
+    additionalProperties: false
+  },
+  outputSchema: { type: 'object', requiredFields: ['success', 'url', 'browser', 'simulated'] },
+  execute: async (params) => {
+    const rawUrl = (params?.url || 'https://www.google.com').trim();
+    const browser = (params?.browser || 'default').toLowerCase().trim() as 'default' | 'chrome' | 'msedge' | 'opera' | 'firefox';
+    const ALLOWED_BROWSERS = new Set(['default', 'chrome', 'msedge', 'opera', 'firefox']);
+    const safeBrowser = ALLOWED_BROWSERS.has(browser) ? browser : 'default';
+
+    if (/[;&|`$<>]/.test(rawUrl)) {
+      return {
+        success: false,
+        url: rawUrl,
+        browser: safeBrowser,
+        error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos detectados na URL.',
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const candidateUrl = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(candidateUrl);
+    } catch {
+      return {
+        success: false,
+        url: rawUrl,
+        browser: safeBrowser,
+        error: 'INVALID_URL: URL fornecida é inválida.',
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return {
+        success: false,
+        url: rawUrl,
+        browser: safeBrowser,
+        error: `UNSAFE_URL_PROTOCOL: protocolo '${parsedUrl.protocol}' não permitido. Use http:// ou https://.`,
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const safeUrl = parsedUrl.toString();
+
+    if (isOsDryRun()) {
+      return {
+        success: true,
+        url: safeUrl,
+        browser: safeBrowser,
+        dryRun: true,
+        simulated: true,
+        message: `[DRY-RUN] Navegador '${safeBrowser}' validado para URL '${safeUrl}'.`,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    if (shouldUseWebPreviewDesktopFallback()) {
+      return {
+        success: true,
+        url: safeUrl,
+        browser: safeBrowser,
+        simulated: true,
+        runtimeMode: 'web-preview-simulated',
+        message: `[MODO WEB PREVIEW - SIMULADO] Abertura do navegador '${safeBrowser}' com URL '${safeUrl}' simulada no ambiente headless.`,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const platform = os.platform();
+    if (platform === 'win32') {
+      const res = safeBrowser === 'default'
+        ? await runFile('rundll32.exe', ['url.dll,FileProtocolHandler', safeUrl], 8000)
+        : await runFile('cmd.exe', ['/C', 'start', '', safeBrowser, safeUrl], 8000);
+      return {
+        success: res.code === 0,
+        url: safeUrl,
+        browser: safeBrowser,
+        message: res.code === 0
+          ? `Navegador (${safeBrowser}) aberto em '${safeUrl}'.`
+          : `Falha ao abrir navegador (${safeBrowser}): ${res.stderr.slice(0, 150) || `código ${res.code}`}`,
+        error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || `Falha ao iniciar navegador '${safeBrowser}'.`),
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    if (platform === 'darwin') {
+      const macAppMap: Record<string, string> = {
+        chrome: 'Google Chrome',
+        msedge: 'Microsoft Edge',
+        opera: 'Opera',
+        firefox: 'Firefox'
+      };
+      const args = safeBrowser !== 'default' && macAppMap[safeBrowser]
+        ? ['-a', macAppMap[safeBrowser], safeUrl]
+        : [safeUrl];
+      const res = await runFile('open', args, 8000);
+      return {
+        success: res.code === 0,
+        url: safeUrl,
+        browser: safeBrowser,
+        message: res.code === 0 ? `Navegador aberto em '${safeUrl}'.` : `Falha ao abrir navegador: ${res.stderr.slice(0, 150)}`,
+        error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || 'Falha ao iniciar navegador no macOS.'),
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const linuxCmd = safeBrowser === 'default'
+      ? 'xdg-open'
+      : safeBrowser === 'chrome'
+        ? 'google-chrome'
+        : safeBrowser === 'msedge'
+          ? 'microsoft-edge'
+          : safeBrowser;
+    const res = await runFile(linuxCmd, [safeUrl], 8000);
+    return {
+      success: res.code === 0,
+      url: safeUrl,
+      browser: safeBrowser,
+      message: res.code === 0 ? `Navegador aberto em '${safeUrl}'.` : `Falha ao abrir navegador: ${res.stderr.slice(0, 150) || `código ${res.code}`}`,
+      error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || 'Falha ao iniciar navegador no Linux.'),
+      simulated: false,
+      timestamp: new Date().toISOString()
+    };
   }
 };

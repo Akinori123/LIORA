@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -6,14 +6,14 @@
 import { SecurityProfileConfig, SecurityProfileName } from './types';
 
 /**
- * Perfil padrÃ£o inicial STRICT:
+ * Perfil padrão inicial STRICT:
  * - Ferramentas R0 de leitura/consulta na lista branca, incluindo as nativas reais
  *   instaladas pelo servidor (system_info, env_safe) e a rota real via OSRM.
  * - 'workspace_read_file' permanece expressamente fora da lista branca nesta fase.
- * - R1 e R2: NÃƒO executÃ¡veis sem consentimento â€” mas autorizÃ¡veis com token HMAC
- *   de consentimento explÃ­cito (consumeConsentToken anti-replay), conforme o fluxo
+ * - R1 e R2: NÃO executáveis sem consentimento — mas autorizáveis com token HMAC
+ *   de consentimento explícito (consumeConsentToken anti-replay), conforme o fluxo
  *   do ConsentCard. allowR2=false significa "nunca executar R2 sem consentimento",
- *   nÃ£o "nunca executar R2". R3 permanece categoricamente bloqueado.
+ *   não "nunca executar R2". R3 permanece categoricamente bloqueado.
  */
 export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
   profileName: 'STRICT',
@@ -24,6 +24,8 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
     'fetchNews',
     'list_processes',
     'pc_manage_apps',
+    'open_application',
+    'open_browser',
     'workspace_search_files',
     'browser_extract_text',
     'browser_screenshot',
@@ -41,29 +43,29 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
     'open_gps_navigation',
     'maps_search_places',
     'resolve_place_alias',
-    // NÃšCLEO DE CONTROLE TOTAL DO PC (leitura real)
+    // NÚCLEO DE CONTROLE TOTAL DO PC (leitura real)
     'pc_take_screenshot',
     'file_search_and_read',
-    // FASE 2: PRODUTIVIDADE â€” leitura (R1)
+    // FASE 2: PRODUTIVIDADE — leitura (R1)
     'email_fetch_and_read',
     'calendar_list_events',
-    // Escrita (R2 â€” executa apenas com consentimento HMAC)
+    // Escrita (R2 — executa apenas com consentimento HMAC)
     'email_send_or_reply',
     'calendar_create_event',
-    // FASE 3: SUB-AGENTES â€” consulta (R1)
+    // FASE 3: SUB-AGENTES — consulta (R1)
     'check_background_task_status',
     'list_background_tasks',
-    // FASE 3: SUB-AGENTES â€” start/cancel (R2 â€” executa apenas com consentimento HMAC)
+    // FASE 3: SUB-AGENTES — start/cancel (R2 — executa apenas com consentimento HMAC)
     'start_background_task',
     'cancel_background_task',
-    // FASE 4: COFRE CRIPTOGRAFADO â€” listagem/health (R1, sem expor valores)
+    // FASE 4: COFRE CRIPTOGRAFADO — listagem/health (R1, sem expor valores)
     'vault_list_keys',
     'vault_health_check',
-    // FASE 4: COFRE CRIPTOGRAFADO â€” chave/valor (R2 â€” apenas com consentimento HMAC)
+    // FASE 4: COFRE CRIPTOGRAFADO — chave/valor (R2 — apenas com consentimento HMAC)
     'vault_store_credential',
     'vault_get_credential',
     'vault_delete_credential',
-    // AGENTE WEB AUTÃ“NOMO (R2 â€” executa apenas com consentimento HMAC)
+    // AGENTE WEB AUTÔNOMO (R2 — executa apenas com consentimento HMAC)
     'web_browser_agent'
   ]),
   deniedTools: Object.freeze(['workspace_read_file']),
@@ -74,8 +76,8 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
 
 /**
  * Perfil STANDARD (Inativo para despacho no Marco 6.2):
- * - Mantido com as mesmas restriÃ§Ãµes de execuÃ§Ã£o de R1, R2 e R3 do perfil STRICT.
- * - NÃ£o concede privilÃ©gios implÃ­citos.
+ * - Mantido com as mesmas restrições de execução de R1, R2 e R3 do perfil STRICT.
+ * - Não concede privilégios implícitos.
  */
 export const STANDARD_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
   profileName: 'STANDARD',
@@ -86,6 +88,8 @@ export const STANDARD_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
     'fetchNews',
     'list_processes',
     'pc_manage_apps',
+    'open_application',
+    'open_browser',
     'workspace_search_files',
     'browser_extract_text',
     'browser_screenshot',
@@ -110,8 +114,8 @@ export const STANDARD_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
 
 /**
  * Perfil DEVELOPER (Inativo para despacho no Marco 6.2):
- * - Utilizado estritamente para inspeÃ§Ã£o de esquemas e testes de diagnÃ³stico.
- * - NÃ£o concede privilÃ©gios implÃ­citos nem bypass de seguranÃ§a.
+ * - Utilizado estritamente para inspeção de esquemas e testes de diagnóstico.
+ * - Não concede privilégios implícitos nem bypass de segurança.
  */
 export const DEVELOPER_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
   profileName: 'DEVELOPER',
@@ -122,6 +126,8 @@ export const DEVELOPER_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze(
     'fetchNews',
     'list_processes',
     'pc_manage_apps',
+    'open_application',
+    'open_browser',
     'workspace_search_files',
     'browser_extract_text',
     'browser_screenshot',
@@ -151,8 +157,8 @@ export const AVAILABLE_PROFILES: Readonly<Record<SecurityProfileName, Readonly<S
 });
 
 /**
- * Validador de integridade estrutural de um perfil de seguranÃ§a.
- * Retorna true apenas se a configuraÃ§Ã£o estiver completa e em conformidade.
+ * Validador de integridade estrutural de um perfil de segurança.
+ * Retorna true apenas se a configuração estiver completa e em conformidade.
  */
 export function isValidSecurityProfile(profile: unknown): profile is SecurityProfileConfig {
   if (!profile || typeof profile !== 'object') {
@@ -177,7 +183,7 @@ export function isValidSecurityProfile(profile: unknown): profile is SecurityPro
     return false;
   }
 
-  // Invariantes estritas de seguranÃ§a
+  // Invariantes estritas de segurança
   if (p.allowR2 !== false || p.allowR3 !== false) {
     return false;
   }
@@ -186,8 +192,8 @@ export function isValidSecurityProfile(profile: unknown): profile is SecurityPro
 }
 
 /**
- * Resolve e valida um perfil de seguranÃ§a pelo nome ou objeto.
- * Em caso de perfil ausente, malformado ou desconhecido, retorna o perfil seguro padrÃ£o STRICT.
+ * Resolve e valida um perfil de segurança pelo nome ou objeto.
+ * Em caso de perfil ausente, malformado ou desconhecido, retorna o perfil seguro padrão STRICT.
  */
 export function resolveSecurityProfile(input?: unknown): Readonly<SecurityProfileConfig> {
   if (typeof input === 'string') {

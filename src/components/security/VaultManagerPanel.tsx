@@ -147,6 +147,7 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         setFeedback(data.error || 'Falha ao remover.');
       }
     } catch (err: any) {
+      setConfirmDelete(null);
       setFeedback(err?.message || 'Falha de rede.');
     }
   };

@@ -49,7 +49,8 @@ export const DevicesView: React.FC = () => {
     setActiveTab
   } = useLioraStore();
 
-  const [selectedDevice, setSelectedDevice] = useState<DeviceEntity | null>(devices[0] || null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(devices[0]?.id || null);
+  const selectedDevice = devices.find(d => d.id === selectedDeviceId) || devices[0] || null;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isPairingModalOpen, setIsPairingModalOpen] = useState(false);
   const [commandFeedback, setCommandFeedback] = useState<string | null>(null);
@@ -196,7 +197,7 @@ export const DevicesView: React.FC = () => {
             className="px-4 py-2 bg-[var(--accent-primary)] hover:opacity-90 rounded-xl text-xs font-bold text-white flex items-center gap-2 transition-all shadow-md shadow-[var(--accent-glow)] shrink-0"
           >
             <Plus className="w-4 h-4" />
-            <span>+ Conectar Dispositivo</span>
+            <span>Conectar Dispositivo</span>
           </button>
 
           <button 
@@ -336,9 +337,15 @@ export const DevicesView: React.FC = () => {
                 </div>
                 <div>
                   <span className="text-xs text-[#888888] uppercase font-mono">Bateria / Energia</span>
-                  <h3 className="text-xl font-bold text-white mt-0.5 font-mono">{tel.batteryLevel ?? 100}%</h3>
+                  <h3 className="text-xl font-bold text-white mt-0.5 font-mono">
+                    {tel.batteryLevel !== null && tel.batteryLevel !== undefined ? `${tel.batteryLevel}%` : 'N/A'}
+                  </h3>
                   <span className="text-[10px] text-emerald-400 font-mono">
-                    {tel.isCharging ? 'Conectado à tomada (AC)' : 'Em bateria'}
+                    {tel.isCharging === null || tel.isCharging === undefined
+                      ? 'Energia AC / Desktop'
+                      : tel.isCharging
+                        ? 'Conectado à tomada (AC)'
+                        : 'Em bateria'}
                   </span>
                 </div>
               </div>
@@ -369,7 +376,7 @@ export const DevicesView: React.FC = () => {
           return (
             <div 
               key={dev.id} 
-              onClick={() => setSelectedDevice(dev)}
+              onClick={() => setSelectedDeviceId(dev.id)}
               className={`bg-[#111111] border rounded-2xl p-5 flex flex-col justify-between cursor-pointer transition-all shadow-lg relative group ${
                 isSelected ? 'border-[var(--accent-primary)] shadow-lg shadow-[var(--accent-glow)]' : 'border-[#222222] hover:border-[#333333]'
               }`}
@@ -425,7 +432,7 @@ export const DevicesView: React.FC = () => {
                         const nextDev = devices.find(d => d.id !== dev.id) || null;
                         removeDevice(dev.id);
                         if (selectedDevice?.id === dev.id) {
-                          setSelectedDevice(nextDev);
+                          setSelectedDeviceId(nextDev?.id || null);
                         }
                       }}
                       title="Desconectar e remover dispositivo"
@@ -493,7 +500,7 @@ export const DevicesView: React.FC = () => {
                   onClick={() => {
                     const nextDev = devices.find(d => d.id !== selectedDevice.id) || null;
                     removeDevice(selectedDevice.id);
-                    setSelectedDevice(nextDev);
+                    setSelectedDeviceId(nextDev?.id || null);
                   }}
                   className="px-3 py-2 bg-red-950/50 hover:bg-red-900/70 border border-red-800/60 rounded-xl text-xs font-mono text-red-300 flex items-center gap-1.5 transition-colors"
                   title="Encerrar vínculo e remover do registro PULO"

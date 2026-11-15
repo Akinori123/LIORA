@@ -81,10 +81,14 @@ export const Sidebar: React.FC = () => {
         }`}
       >
         {/* Brand Header */}
-        <div className="flex items-center justify-between px-4 py-5 border-b border-[#222222] shrink-0">
-          <div className="flex items-center gap-3 overflow-hidden">
+        <div className={`flex items-center justify-between py-5 border-b border-[#222222] shrink-0 ${
+          isSidebarExpanded || isMobileDrawerOpen ? 'px-4 gap-2' : 'px-2.5 gap-1'
+        }`}>
+          <div className="flex items-center gap-3 min-w-0">
             <div 
-              className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 shadow-lg"
+              className={`rounded-lg flex items-center justify-center shrink-0 shadow-lg transition-all ${
+                isSidebarExpanded || isMobileDrawerOpen ? 'w-9 h-9' : 'w-8 h-8'
+              }`}
               style={{ background: 'linear-gradient(to bottom right, var(--accent-primary), rgba(0, 0, 0, 0.7))', boxShadow: '0 10px 25px -5px var(--accent-glow)' }}
             >
               <span className="font-bold text-white tracking-wider text-sm">L</span>
@@ -100,7 +104,7 @@ export const Sidebar: React.FC = () => {
           {/* Visible Close Button on Mobile */}
           <button 
             onClick={closeMobileDrawer}
-            className="md:hidden p-1.5 rounded-md hover:bg-[#1A1A1A] text-[#A8A8A8] hover:text-white transition-colors focus:outline-none"
+            className="md:hidden p-1.5 rounded-md hover:bg-[#1A1A1A] text-[#A8A8A8] hover:text-white transition-colors focus:outline-none shrink-0"
             style={{ '--tw-ring-color': 'var(--accent-primary)' } as any}
             aria-label="Fechar menu de navegação"
             data-testid="close-drawer-button"
@@ -111,7 +115,9 @@ export const Sidebar: React.FC = () => {
           {/* Desktop Collapse Toggle */}
           <button 
             onClick={toggleSidebar}
-            className="hidden md:block p-1.5 rounded-md hover:bg-[#1A1A1A] text-[#A8A8A8] hover:text-white transition-colors focus:outline-none"
+            className={`hidden md:flex items-center justify-center rounded-md hover:bg-[#1A1A1A] text-[#A8A8A8] hover:text-white transition-colors focus:outline-none shrink-0 ${
+              isSidebarExpanded ? 'p-1.5' : 'p-1'
+            }`}
             title={isSidebarExpanded ? "Recolher menu" : "Expandir menu"}
             aria-label={isSidebarExpanded ? "Recolher menu lateral" : "Expandir menu lateral"}
             data-testid="desktop-sidebar-toggle"

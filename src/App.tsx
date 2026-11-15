@@ -70,12 +70,13 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 }
 
 export default function App() {
-  const { activeTab, loadSettings, setActiveTab, sendMessage } = useLioraStore();
+  const { activeTab, loadSettings, loadServices, setActiveTab, sendMessage } = useLioraStore();
   const [isQuickOverlayOpen, setIsQuickOverlayOpen] = React.useState(false);
 
   React.useEffect(() => {
     loadSettings();
-  }, [loadSettings]);
+    loadServices();
+  }, [loadSettings, loadServices]);
 
   // Ciclo autônomo do motor de automações (avalia regras temporais a cada 15 segundos)
   React.useEffect(() => {

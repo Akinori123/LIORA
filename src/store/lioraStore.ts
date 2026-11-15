@@ -20,7 +20,7 @@ import {
 } from '../types';
 import { formatGeminiHistory, sanitizeInput, classifyChatError } from '../utils/chatContext';
 import { loadHistory, saveHistory } from '../utils/historyStorage';
-import { executeLocalTool, LocalExecutionResult } from '../security/localBridge';
+import { executeLocalTool, LocalExecutionResult, isTauriEnvironment } from '../security/localBridge';
 import { rankMemories, formatMemoryContextBlock } from '../utils/memoryRanker';
 import { AutomationRule, AutomationExecutionLog, SYSTEM_EVENTS } from '../types/automations';
 import { automationsEngine } from '../services/automationsEngine';
@@ -36,6 +36,7 @@ import { settingsManager } from '../services/settingsManager';
 import { toolRegistry } from '../tools/registry';
 import { tokenAnalytics } from '../services/tokenAnalytics';
 import { speechService } from '../services/speechService';
+import { audioGate } from '../services/audioGate';
 import { voiceLiveClient } from '../services/voiceLiveClient';
 import { storageAdapter } from '../services/storageAdapter';
 import { notificationSystem } from '../notifications/notificationSystem';
@@ -155,6 +156,7 @@ export interface LioraState {
   vaultDiagnosticMessage: string | null;
   runVaultDiagnostics: () => Promise<boolean>;
   loadServices: () => void;
+  syncServicesFromEnv: () => Promise<void>;
   connectService: (serviceId: string, rawKey: string, options?: { endpointUrl?: string; scopes?: string[] }) => Promise<boolean>;
   disconnectService: (serviceId: string) => void;
   testServiceConnection: (serviceId: string) => Promise<number>;
@@ -233,6 +235,7 @@ export const LIORA_SYSTEM_INSTRUCTION =
   "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
   "Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Ao receber ordens para navegar ou alternar abas, confirme com prontidão e naturalidade. " +
   "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), use 'open_gps_navigation'. Quando pedir locais próximos ('mercado mais próximo', 'farmácia', 'posto'), use 'maps_search_places'. " +
+  "EXECUÇÃO DE FERRAMENTAS DO SISTEMA: NUNCA afirme que abriu o Bloco de Notas, navegador, programa ou executou uma ação física no computador antes de receber o retorno da ferramenta confirmando 'success: true'. Se a ferramenta falhar ou exigir confirmação humana, informe o erro ou peça confirmação ao Mestre explicitamente. Se 'simulated: true' estiver presente no retorno, informe claramente que a ação foi simulada no modo Web Preview. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown com linguagem especificada.";
 
 const defaultActivityLogs: ActivityLogItem[] = [
@@ -700,8 +703,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     let userMsgText = clean;
     if (image) userMsgText = `${clean ? clean + '\n\n' : ''}[Captura de Tela Anexada]`;
     if (audio) {
-      if (clean && clean !== 'Responda Ã  minha mensagem de voz.') {
-        userMsgText = `ðŸŽ¤ "${clean}"`;
+      if (clean && clean !== 'Responda à minha mensagem de voz.') {
+        userMsgText = `🎤 "${clean}"`;
       } else {
         userMsgText = `🎤 [Mensagem de Voz Enviada]`;
       }
@@ -771,36 +774,42 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // NOTA: quando o modo Live está ativo, o GlobalVoiceBar já intercepta via onTranscription/STT.
     // Aqui só executa se a chamada veio do chat de TEXTO (não de voz com Live ativo).
     const liveIsHandling = get().isVoiceActive && audio;
-    
-    const navMatch = parseNavigationIntent(clean || '');
-    if (navMatch && !liveIsHandling) {
-      get().setActiveTab(navMatch.tab);
-      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
+    const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
 
+    const updateDeterministicReply = (replyText: string, status: 'completed' | 'error' = 'completed') => {
       set((state) => {
-        const updated = state.messages.map((m): ChatMessage =>
-          m.id === assistantMsgId
-            ? { ...m, text: navMatch.spokenFeedback, status: 'completed', source: msgSource }
-            : m
-        );
+        let updatedTargetMessages: ChatMessage[] | null = null;
         const updatedSessions = state.sessions.map((sess) => {
           if (sess.id === targetSessionId) {
+            const nextMessages = sess.messages.map((m): ChatMessage =>
+              m.id === assistantMsgId
+                ? { ...m, text: replyText, status, source: msgSource }
+                : m
+            );
+            updatedTargetMessages = nextMessages;
             return {
               ...sess,
-              messages: updated,
+              messages: nextMessages,
               updatedAt: new Date().toISOString()
             };
           }
           return sess;
         });
         saveHistory(updatedSessions, state.activeSessionId);
+        const shouldUpdateActive = state.activeSessionId === targetSessionId && updatedTargetMessages !== null;
         return {
-          messages: updated,
+          messages: shouldUpdateActive ? updatedTargetMessages! : state.messages,
           sessions: updatedSessions,
           isGenerating: false,
           orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
         };
       });
+    };
+
+    const navMatch = parseNavigationIntent(clean || '');
+    if (navMatch && !liveIsHandling) {
+      get().setActiveTab(navMatch.tab);
+      updateDeterministicReply(navMatch.spokenFeedback, 'completed');
 
       get().addActivityLog({
         category: 'system',
@@ -822,58 +831,38 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Interceptação determinística de rotas veiculares (GPS)
     const routeIntent = parseRouteIntent(clean || '');
     if (routeIntent) {
-      const assistantMessageId = `msg-route-${Date.now()}`;
-      const assistantMessage: ChatMessage = {
-        id: assistantMessageId,
-        sender: 'assistant',
-        text: routeIntent.spokenFeedback,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        createdAt: new Date().toISOString(),
-        status: 'completed',
-        source: audio ? 'voice' : 'text'
-      };
-
-      set((state) => {
-        const updated = state.messages.map((m): ChatMessage =>
-          m.id === assistantMsgId
-            ? { ...m, text: routeIntent.spokenFeedback, status: 'completed', source: msgSource }
-            : m
-        );
-        const updatedSessions = state.sessions.map((sess) => {
-          if (sess.id === targetSessionId) {
-            return {
-              ...sess,
-              messages: updated,
-              updatedAt: new Date().toISOString()
-            };
-          }
-          return sess;
-        });
-        saveHistory(updatedSessions, state.activeSessionId);
-        return {
-          messages: updated,
-          sessions: updatedSessions,
-          isGenerating: false,
-          orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
-        };
-      });
-
       const appName = routeIntent.provider === 'waze' ? 'Waze' : 'Google Maps';
-      get().addActivityLog({
-        category: 'tool',
-        summary: `Navegação GPS Ativa (${appName})`,
-        details: `Destino: "${routeIntent.destination}"${routeIntent.origin ? ` | Origem: "${routeIntent.origin}"` : ' | Origem: GPS Atual'}.`,
-        riskLevel: 'R0',
-        status: 'success',
-        simulated: false
-      });
+      try {
+        const navResult = await launchGpsNavigation(routeIntent.destination, routeIntent.provider, routeIntent.origin);
+        const feedback = navResult.success
+          ? (navResult.dryRun ? `[Modo Simulado] ${routeIntent.spokenFeedback}` : routeIntent.spokenFeedback)
+          : `Mestre, não consegui abrir o ${appName} para traçar a rota até "${routeIntent.destination}".`;
 
-      if (get().isVoiceActive) {
-        speechService.unlockAudio();
-        speechService.speak(routeIntent.spokenFeedback);
+        updateDeterministicReply(feedback, navResult.success ? 'completed' : 'error');
+
+        get().addActivityLog({
+          category: 'tool',
+          summary: navResult.success ? `Navegação GPS Ativa (${appName})` : `Falha na Navegação GPS (${appName})`,
+          details: `Destino: "${routeIntent.destination}"${routeIntent.origin ? ` | Origem: "${routeIntent.origin}"` : ' | Origem: GPS Atual'}. URL: ${navResult.url}`,
+          riskLevel: 'R0',
+          status: navResult.success ? 'success' : 'error',
+          simulated: Boolean(navResult.dryRun)
+        });
+
+        if (get().isVoiceActive) {
+          voiceLiveClient.extendSuppression(6000);
+          speechService.unlockAudio();
+          speechService.speak(feedback, undefined, undefined, { isDeterministicOverride: true });
+        }
+      } catch (err: any) {
+        const errText = `Mestre, falhou o acionamento da rota GPS: ${err?.message || 'erro desconhecido'}.`;
+        updateDeterministicReply(errText, 'error');
+        if (get().isVoiceActive) {
+          voiceLiveClient.extendSuppression(5000);
+          speechService.unlockAudio();
+          speechService.speak(errText, undefined, undefined, { isDeterministicOverride: true });
+        }
       }
-
-      void launchGpsNavigation(routeIntent.destination, routeIntent.provider, routeIntent.origin);
 
       return;
     }
@@ -881,57 +870,37 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Interceptação determinística de busca de locais (Google Maps Places)
     const placesIntent = parsePlacesSearchIntent(clean || '');
     if (placesIntent) {
-      const assistantMessageId = `msg-places-${Date.now()}`;
-      const assistantMessage: ChatMessage = {
-        id: assistantMessageId,
-        sender: 'assistant',
-        text: placesIntent.spokenFeedback,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        createdAt: new Date().toISOString(),
-        status: 'completed',
-        source: audio ? 'voice' : 'text'
-      };
+      try {
+        const searchResult = await launchPlacesSearch(placesIntent.query, placesIntent.nearLocation);
+        const feedback = searchResult.success
+          ? (searchResult.dryRun ? `[Modo Simulado] ${placesIntent.spokenFeedback}` : placesIntent.spokenFeedback)
+          : `Mestre, não consegui abrir a busca por "${placesIntent.query}" no Google Maps.`;
 
-      set((state) => {
-        const updated = state.messages.map((m): ChatMessage =>
-          m.id === assistantMsgId
-            ? { ...m, text: placesIntent.spokenFeedback, status: 'completed', source: msgSource }
-            : m
-        );
-        const updatedSessions = state.sessions.map((sess) => {
-          if (sess.id === targetSessionId) {
-            return {
-              ...sess,
-              messages: updated,
-              updatedAt: new Date().toISOString()
-            };
-          }
-          return sess;
+        updateDeterministicReply(feedback, searchResult.success ? 'completed' : 'error');
+
+        get().addActivityLog({
+          category: 'tool',
+          summary: searchResult.success ? 'Busca de Locais (Google Maps)' : 'Falha na Busca de Locais',
+          details: `Termo: "${placesIntent.query}"${placesIntent.nearLocation ? ` | Referência: "${placesIntent.nearLocation}"` : ' | Perto da localização atual'}. URL: ${searchResult.url}`,
+          riskLevel: 'R0',
+          status: searchResult.success ? 'success' : 'error',
+          simulated: Boolean(searchResult.dryRun)
         });
-        saveHistory(updatedSessions, state.activeSessionId);
-        return {
-          messages: updated,
-          sessions: updatedSessions,
-          isGenerating: false,
-          orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
-        };
-      });
 
-      get().addActivityLog({
-        category: 'tool',
-        summary: 'Busca de Locais (Google Maps)',
-        details: `Termo: "${placesIntent.query}"${placesIntent.nearLocation ? ` | Referência: "${placesIntent.nearLocation}"` : ' | Perto da localização atual'}.`,
-        riskLevel: 'R0',
-        status: 'success',
-        simulated: false
-      });
-
-      if (get().isVoiceActive) {
-        speechService.unlockAudio();
-        speechService.speak(placesIntent.spokenFeedback);
+        if (get().isVoiceActive) {
+          voiceLiveClient.extendSuppression(6000);
+          speechService.unlockAudio();
+          speechService.speak(feedback, undefined, undefined, { isDeterministicOverride: true });
+        }
+      } catch (err: any) {
+        const errText = `Mestre, ocorreu um erro ao buscar locais: ${err?.message || 'erro desconhecido'}.`;
+        updateDeterministicReply(errText, 'error');
+        if (get().isVoiceActive) {
+          voiceLiveClient.extendSuppression(5000);
+          speechService.unlockAudio();
+          speechService.speak(errText, undefined, undefined, { isDeterministicOverride: true });
+        }
       }
-
-      void launchPlacesSearch(placesIntent.query, placesIntent.nearLocation);
 
       return;
     }
@@ -939,31 +908,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Interceptação determinística de data e hora local
     const timeMatch = parseTimeCommandIntent(clean || '');
     if (timeMatch && !liveIsHandling) {
-      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
-      set((state) => {
-        const updated = state.messages.map((m): ChatMessage =>
-          m.id === assistantMsgId
-            ? { ...m, text: timeMatch.spokenFeedback, status: 'completed', source: msgSource }
-            : m
-        );
-        const updatedSessions = state.sessions.map((sess) => {
-          if (sess.id === targetSessionId) {
-            return {
-              ...sess,
-              messages: updated,
-              updatedAt: new Date().toISOString()
-            };
-          }
-          return sess;
-        });
-        saveHistory(updatedSessions, state.activeSessionId);
-        return {
-          messages: updated,
-          sessions: updatedSessions,
-          isGenerating: false,
-          orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
-        };
-      });
+      updateDeterministicReply(timeMatch.spokenFeedback, 'completed');
 
       get().addActivityLog({
         category: 'ai',
@@ -975,8 +920,9 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       });
 
       if (get().isVoiceActive) {
+        voiceLiveClient.extendSuppression(5000);
         speechService.unlockAudio();
-        speechService.speak(timeMatch.spokenFeedback);
+        speechService.speak(timeMatch.spokenFeedback, undefined, undefined, { isDeterministicOverride: true });
       }
 
       return;
@@ -985,53 +931,69 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Interceptação determinística de comandos de PC (abrir apps, volume, bloqueio)
     const pcMatch = parsePcCommandIntent(clean || '');
     if (pcMatch && !liveIsHandling) {
-      const msgSource: 'text' | 'voice' = audio ? 'voice' : 'text';
-      
-      // Executa de verdade antes de responder
-      executePcAction(pcMatch).then((result) => {
-        const responseText = result.success
-          ? `${pcMatch.spokenFeedback}`
-          : `Mestre, não consegui executar o comando: ${result.error || 'verifique se o aplicativo está instalado'}.`;
+      try {
+        // Executa no backend antes de confirmar ao usuário (zero falso positivo)
+        const result = await executePcAction(pcMatch);
 
-        set((state) => {
-          const updated = state.messages.map((m): ChatMessage =>
-            m.id === assistantMsgId
-              ? { ...m, text: responseText, status: result.success ? 'completed' : 'error', source: msgSource }
-              : m
-          );
-          const updatedSessions = state.sessions.map((sess) => {
-            if (sess.id === targetSessionId) {
-              return {
-                ...sess,
-                messages: updated,
-                updatedAt: new Date().toISOString()
-              };
+        if (!result.success && result.requiresConsent && result.consentToolName) {
+          const now = Date.now();
+          set({
+            pendingConsent: {
+              auditId: `consent-${now}`,
+              ruleId: 'ui-consent',
+              toolName: result.consentToolName,
+              riskLevel: 'R1',
+              parameters: result.consentParams || {},
+              consentToken: '',
+              sessionId: get().activeSessionId || 'operator-voice-session',
+              expiresAt: now + 60000,
+              reason: result.message || 'Confirme para executar esta ação no computador.',
+              status: 'PENDING'
             }
-            return sess;
           });
-          saveHistory(updatedSessions, state.activeSessionId);
-          return {
-            messages: updated,
-            sessions: updatedSessions,
-            isGenerating: false,
-            orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
-          };
-        });
+        }
+
+        const responseText = result.success
+          ? (result.simulated
+              ? `Modo Web Preview simulado: ${result.message}`
+              : pcMatch.spokenFeedback)
+          : (result.requiresConsent
+              ? `Mestre, aguardo sua confirmação na tela para executar: ${result.message}`
+              : `Mestre, não consegui executar o comando: ${result.error || result.message || 'verifique se o aplicativo está instalado'}.`);
+
+        updateDeterministicReply(responseText, result.success ? 'completed' : 'error');
 
         get().addActivityLog({
           category: 'system',
           summary: pcMatch.type === 'app_launch' ? `Executar App: ${pcMatch.appName}` : `Ação de Sistema: ${pcMatch.action}`,
           details: result.message,
           riskLevel: 'R1',
-          status: result.success ? 'success' : 'error',
-          simulated: false
+          status: result.success ? 'success' : result.requiresConsent ? 'warning' : 'error',
+          simulated: Boolean(result.simulated)
         });
 
-        if (get().isVoiceActive) {
+        if (get().isVoiceActive && !result.requiresConsent) {
+          voiceLiveClient.extendSuppression(6000);
           speechService.unlockAudio();
-          speechService.speak(responseText);
+          speechService.speak(responseText, undefined, undefined, { isDeterministicOverride: true });
         }
-      });
+      } catch (pcErr: any) {
+        const errText = `Mestre, ocorreu um erro ao executar o comando no PC: ${pcErr?.message || 'erro desconhecido'}.`;
+        updateDeterministicReply(errText, 'error');
+        get().addActivityLog({
+          category: 'system',
+          summary: pcMatch.type === 'app_launch' ? `Falha App: ${pcMatch.appName}` : `Falha Sistema: ${pcMatch.action}`,
+          details: errText,
+          riskLevel: 'R1',
+          status: 'error',
+          simulated: false
+        });
+        if (get().isVoiceActive) {
+          voiceLiveClient.extendSuppression(5000);
+          speechService.unlockAudio();
+          speechService.speak(errText, undefined, undefined, { isDeterministicOverride: true });
+        }
+      }
 
       return;
     }
@@ -1143,7 +1105,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                 modelUsedRef = data.modelUsed;
               }
               if (data.failover) {
-                const failoverNotice = `\n\n> âš ï¸ *[Alternado para OpenRouter: ${data.message || 'Cota do Gemini excedida'}]*\n\n`;
+                const failoverNotice = `\n\n> ⚠️ *[Alternado para OpenRouter: ${data.message || 'Cota do Gemini excedida'}]*\n\n`;
                 accumulatedText += failoverNotice;
                 // BUG FIX (raiz — métricas): o provider usado nas métricas de tokens
                 // nunca era atualizado no failover — todas as respostas do OpenRouter
@@ -1171,6 +1133,24 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                   simulated: Boolean(data.simulated)
                 });
 
+                if (!data.success && (data.requiresConsent || data.code === 'REQUIRES_USER_CONFIRMATION' || data.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
+                  const now = Date.now();
+                  set({
+                    pendingConsent: {
+                      auditId: data.auditId || `sse-consent-${now}`,
+                      ruleId: 'sse-tool-consent',
+                      toolName: data.toolExecuted,
+                      riskLevel: (data.riskLevel || 'R1') as ToolRiskLevel,
+                      parameters: data.parameters || {},
+                      consentToken: '',
+                      sessionId: targetSessionId || 'operator-voice-session',
+                      expiresAt: now + 60000,
+                      reason: data.resultSummary || `A execução de '${data.toolExecuted}' requer sua confirmação explícita.`,
+                      status: 'PENDING'
+                    }
+                  });
+                }
+
                 // CORREÇÃO (sincronização tool→TTS): publica o resultado REAL da
                 // ferramenta no eventBus — o pipeline de voz injeta o dado na fila
                 // de fala, eliminando a alucinação de 'não ter localização' quando
@@ -1178,6 +1158,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                 eventBus.publish('liora:tool_result', {
                   toolName: data.toolExecuted,
                   success: Boolean(data.success),
+                  requiresConsent: Boolean(data.requiresConsent),
+                  simulated: Boolean(data.simulated),
                   resultSummary: data.resultSummary,
                   resultData: data.resultData
                 });
@@ -2112,8 +2094,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
       set((state) => ({ activityLogs: [logItem, ...state.activityLogs] }));
 
-      // Execução de Ações Reais de Interface e Navegação na Store
-      if (data.success || !isBlocked) {
+      // Execução de Ações Reais de Interface e Navegação na Store somente quando autorizada e bem-sucedida
+      if (data.success) {
         if (toolName === 'navigateToTab' && parameters?.tab) {
           get().setActiveTab(parameters.tab as any);
         } else if (toolName === 'openSettings') {
@@ -2193,26 +2175,129 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     set({ pendingConsent: { ...pending, status: 'APPROVED' } });
 
-    // Disparar execuÃ§Ã£o autorizada via executeLocalTool
+    let uiConsentToken: string | undefined = undefined;
+    if (!isTauriEnvironment() && typeof fetch === 'function') {
+      try {
+        const tokenRes = await fetch('/api/security/ui-consent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            toolName: pending.toolName,
+            parameters: pending.parameters || {}
+          })
+        });
+        const tokenData = await tokenRes.json().catch(() => ({}));
+        if (!tokenRes.ok || !tokenData?.token) {
+          const errMsg = tokenData?.error || `Falha ao emitir token de consentimento (${tokenRes.status}).`;
+          const failResult: LocalExecutionResult = {
+            success: false,
+            toolName: pending.toolName,
+            riskLevel: pending.riskLevel,
+            error: errMsg,
+            executionTimeMs: 0,
+            simulated: false,
+            timestamp: new Date().toISOString()
+          };
+          const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          set(state => ({
+            activityLogs: [{
+              id: `log-${Date.now()}`,
+              timestamp: nowTime,
+              category: 'security',
+              summary: `Falha no Consentimento: ${pending.toolName}`,
+              details: errMsg,
+              riskLevel: pending.riskLevel,
+              status: 'error',
+              simulated: false
+            }, ...state.activityLogs]
+          }));
+          if (get().isVoiceActive) {
+            voiceLiveClient.extendSuppression(5000);
+            speechService.unlockAudio();
+            speechService.speak(
+              `Mestre, não foi possível validar o consentimento: ${errMsg}`,
+              undefined,
+              undefined,
+              { isDeterministicOverride: true }
+            );
+          }
+          return failResult;
+        }
+        uiConsentToken = tokenData.token;
+      } catch (err: any) {
+        const errMsg = err?.message || 'Erro de rede ao validar consentimento no servidor.';
+        if (get().isVoiceActive) {
+          voiceLiveClient.extendSuppression(5000);
+          speechService.unlockAudio();
+          speechService.speak(
+            `Mestre, não consegui validar a permissão com o servidor local: ${errMsg}`,
+            undefined,
+            undefined,
+            { isDeterministicOverride: true }
+          );
+        }
+        return {
+          success: false,
+          toolName: pending.toolName,
+          riskLevel: pending.riskLevel,
+          error: errMsg,
+          executionTimeMs: 0,
+          simulated: false,
+          timestamp: new Date().toISOString()
+        } as LocalExecutionResult;
+      }
+    }
+
+    // Disparar execução autorizada via executeLocalTool com token auditável
     const result = await executeLocalTool(
       pending.toolName,
       pending.parameters,
-      pending.sessionId
+      pending.sessionId,
+      uiConsentToken
     );
+
+    const isSuccess = Boolean((result as any).success);
+    const isSimulated = Boolean((result as any).simulated);
+
+    if (isSuccess) {
+      if (pending.toolName === 'navigateToTab' && pending.parameters?.tab) {
+        get().setActiveTab(pending.parameters.tab as any);
+      } else if (pending.toolName === 'openSettings') {
+        get().setActiveTab('settings');
+      } else if (pending.toolName === 'triggerAutomation' && pending.parameters?.ruleId) {
+        automationsEngine.triggerRule(pending.parameters.ruleId, { isManual: true });
+      }
+    }
 
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const logItem: ActivityLogItem = {
       id: `log-${Date.now()}`,
       timestamp: nowTime,
       category: 'security',
-      summary: `Consentimento Aprovado: ${pending.toolName}`,
-      details: `ExecuÃ§Ã£o autorizada pelo usuÃ¡rio para a ferramenta ${pending.toolName}.`,
+      summary: isSuccess
+        ? `Consentimento Aprovado: ${pending.toolName}`
+        : `Consentimento Aprovado, mas Execução Falhou: ${pending.toolName}`,
+      details: isSuccess
+        ? `Execução ${isSimulated ? 'simulada (Web Preview)' : 'nativa'} autorizada pelo usuário para '${pending.toolName}'.`
+        : `Erro após aprovação: ${(result as any).error || 'falha desconhecida na execução'}.`,
       riskLevel: pending.riskLevel,
-      status: (result as any).success ? 'success' : 'error',
-      simulated: Boolean((result as any).simulated)
+      status: isSuccess ? 'success' : 'error',
+      simulated: isSimulated
     };
 
     set(state => ({ activityLogs: [logItem, ...state.activityLogs] }));
+
+    if (get().isVoiceActive) {
+      voiceLiveClient.extendSuppression(5000);
+      speechService.unlockAudio();
+      const spokenFeedback = isSuccess
+        ? (isSimulated
+            ? `Autorizado em modo Web Preview simulado para ${pending.toolName}.`
+            : `Autorização confirmada e executada, Mestre.`)
+        : `Autorizei a ação, mas ocorreu uma falha: ${(result as any).error || 'verifique o aplicativo'}.`;
+      speechService.speak(spokenFeedback, undefined, undefined, { isDeterministicOverride: true });
+    }
+
     return result as ToolExecutionResult;
   },
 
@@ -2323,7 +2408,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     });
 
     if (log.status === 'SUCCESS') {
-      const successText = `âš™ï¸ **Automação Executada:** "${rule.name}" executada com sucesso (${log.durationMs}ms).\n\n*Ação:* \`${rule.action.toolName || rule.action.description}\` realizada com risco **${rule.action.expectedRiskLevel}**.`;
+      const successText = `⚙️ **Automação Executada:** "${rule.name}" executada com sucesso (${log.durationMs}ms).\n\n*Ação:* \`${rule.action.toolName || rule.action.description}\` realizada com risco **${rule.action.expectedRiskLevel}**.`;
       
       const targetSessionId = get().activeSessionId;
       if (targetSessionId) {
@@ -2636,7 +2721,45 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       webhookLogs: integrationsVault.getWebhookLogs(),
       keychainFallbackActive: integrationsVault.isKeychainFallbackActive()
     });
-    get().runVaultDiagnostics();
+    void get().syncServicesFromEnv();
+  },
+
+  syncServicesFromEnv: async () => {
+    await integrationsVault.syncWithBackendEnv();
+    const updatedServices = integrationsVault.getServices();
+    const vaultCredentials = integrationsVault.getCredentials();
+
+    set((state) => {
+      const mergedCredentials = [...state.credentials];
+      for (const vc of vaultCredentials) {
+        const legacyProvider = (['gemini', 'openrouter', 'github', 'homeassistant'].includes(vc.provider)
+          ? vc.provider
+          : 'custom') as 'gemini' | 'openrouter' | 'github' | 'homeassistant' | 'custom';
+        const svc = updatedServices.find((s) => s.id === vc.associatedServiceId);
+        const mapped: CredentialItem = {
+          id: vc.id,
+          provider: legacyProvider,
+          label: svc?.name || vc.label,
+          maskedKey: vc.maskedKey,
+          status: vc.status === 'valid' ? 'valid' : 'invalid',
+          models: svc?.featuresSupported || []
+        };
+        const idx = mergedCredentials.findIndex((c) => c.provider === legacyProvider);
+        if (idx >= 0) {
+          mergedCredentials[idx] = mapped;
+        } else {
+          mergedCredentials.push(mapped);
+        }
+      }
+      return {
+        services: updatedServices,
+        webhookLogs: integrationsVault.getWebhookLogs(),
+        keychainFallbackActive: integrationsVault.isKeychainFallbackActive(),
+        credentials: mergedCredentials
+      };
+    });
+
+    await get().runVaultDiagnostics();
   },
 
   connectService: async (serviceId: string, rawKey: string, options) => {
@@ -2712,6 +2835,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       set({
         services: integrationsVault.getServices()
       });
+      void get().runVaultDiagnostics();
 
       if (svc) {
         get().addActivityLog({
@@ -2928,31 +3052,59 @@ if (canRegisterBusListeners) {
   // são publicadas pelo voiceLiveClient no eventBus e registradas aqui no log de
   // atividade exatamente como o data.toolExecuted do chat de texto.
   eventBus.subscribe('liora:voice_tool_executed', (payload: any) => {
-    if (payload.toolName === 'navigateToTab' && (payload.data?.activeTab || payload.parameters?.tab)) {
+    const storeState = useLioraStore.getState();
+    if (payload.success && payload.toolName === 'navigateToTab' && (payload.data?.activeTab || payload.parameters?.tab)) {
       const targetTab = payload.data?.activeTab || payload.parameters?.tab;
-      useLioraStore.getState().setActiveTab(targetTab as any);
-    } else if (payload.toolName === 'openSettings') {
-      useLioraStore.getState().setActiveTab('settings');
+      storeState.setActiveTab(targetTab as any);
+    } else if (payload.success && payload.toolName === 'openSettings') {
+      storeState.setActiveTab('settings');
     }
 
-    useLioraStore.getState().addActivityLog({
+    if (!payload.success && (payload.requiresConsent || payload.code === 'REQUIRES_USER_CONFIRMATION' || payload.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
+      const now = Date.now();
+      storeState.setPendingConsent({
+        auditId: `voice-consent-${now}`,
+        ruleId: 'voice-tool-consent',
+        toolName: payload.toolName,
+        riskLevel: (payload.riskLevel || 'R1') as ToolRiskLevel,
+        parameters: payload.parameters || {},
+        consentToken: '',
+        sessionId: storeState.activeSessionId || 'operator-voice-session',
+        expiresAt: now + 60000,
+        reason: payload.resultSummary || `A execução por voz de '${payload.toolName}' requer confirmação explícita.`,
+        status: 'PENDING'
+      });
+    }
+
+    storeState.addActivityLog({
       category: 'tool',
       summary: `Ferramenta executada por voz: ${payload.toolName}`,
       details: payload.resultSummary || (payload.success ? 'Execução real confirmada pelo canal Live.' : 'Falhou.'),
       riskLevel: (payload.riskLevel || 'R1') as any,
-      status: payload.success ? 'success' : 'error',
+      status: payload.success ? 'success' : payload.requiresConsent ? 'warning' : 'error',
       simulated: Boolean(payload.simulated)
     });
   });
 
   // CORREÇÃO (sincronização tool→TTS): transforma o resultado REAL da ferramenta
-  // em fala quando o modo de voz está ativo. Elimina a alucinação de 'não ter
-  // localização' — a LIORA fala o que a ferramenta REALMENTE retornou.
+  // em fala quando o modo de voz está ativo, respeitando o Audio Gate para nunca
+  // falar por cima da voz 24kHz do Gemini Live quando a sessão Live já está respondendo.
   eventBus.subscribe('liora:tool_result', (payload: any) => {
     const state = useLioraStore.getState();
     if (!state.isVoiceActive) return;
 
-    const { toolName, success, resultData, resultSummary } = payload;
+    // Se o próprio Gemini Live executou com sucesso e não está suprimido, ele mesmo
+    // já emite o áudio 24kHz da resposta — não duplicar com TTS paralelo.
+    if (payload.fromLiveSession && payload.success && audioGate.isLiveSessionActive() && !audioGate.isLiveSuppressed()) {
+      return;
+    }
+
+    // Se falhou apenas aguardando consentimento, o GlobalConsentOverlay emite o prompt único.
+    if (!payload.success && payload.requiresConsent) {
+      return;
+    }
+
+    const { toolName, success, resultData, resultSummary, simulated } = payload;
     let speech: string | null = null;
 
     try {
@@ -2995,14 +3147,16 @@ if (canRegisterBusListeners) {
           break;
         }
         case 'open_application':
+        case 'open_browser':
         case 'pc_manage_apps': {
-          // Blindagem contra voz duplicada: se a abertura de app foi bem-sucedida,
-          // o canal de voz determinístico já emitiu o feedback imediato ("Abrindo Bloco de Notas, Mestre.").
-          // Não repete a fala de sucesso para evitar falar 2x. Apenas reporta se falhou.
-          const app = resultData?.appPath || resultData?.resolvedProcessName || resultData?.processName || 'aplicativo';
-          speech = success
-            ? null
-            : `Não consegui abrir o aplicativo ${app}: ${resultData?.error || 'verifique se está instalado'}.`;
+          const app = resultData?.appPath || resultData?.browser || resultData?.resolvedProcessName || resultData?.processName || 'aplicativo';
+          if (success) {
+            speech = simulated
+              ? `Modo Web Preview simulado: abertura de ${app} registrada sem sistema desktop local.`
+              : null;
+          } else {
+            speech = `Não consegui abrir ${app}: ${resultData?.error || resultSummary || 'verifique se está instalado'}.`;
+          }
           break;
         }
         default:
@@ -3013,7 +3167,8 @@ if (canRegisterBusListeners) {
     } catch { /* nunca quebrar o pipeline de voz por erro de formatação */ }
 
     if (speech && !speechService.isSpeaking()) {
-      speechService.speak(sanitizeTextForSpeech(speech), () => {}, () => {});
+      voiceLiveClient.extendSuppression(5000);
+      speechService.speak(sanitizeTextForSpeech(speech), () => {}, () => {}, { isDeterministicOverride: true });
     }
   });
 }

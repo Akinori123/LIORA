@@ -249,7 +249,7 @@ export class DevicesManager {
             memoryTotalBytes: hw.memory_total_bytes,
             diskUsagePercent: typeof hw.disk_usage_percent === 'number' ? Number(hw.disk_usage_percent.toFixed(1)) : undefined,
             batteryLevel: typeof hw.battery_level === 'number' ? Math.round(hw.battery_level) : undefined,
-            isCharging: hw.is_charging ?? true,
+            isCharging: typeof hw.is_charging === 'boolean' ? hw.is_charging : undefined,
             temperatureCelsius: hw.temperature_celsius,
             uptimeSeconds: hw.uptime_seconds,
             lastUpdated: nowIso,
@@ -286,8 +286,8 @@ export class DevicesManager {
             memoryFreeBytes: hw.memory_free_bytes,
             memoryTotalBytes: hw.memory_total_bytes,
             diskUsagePercent: hw.disk_usage_percent,
-            batteryLevel: hw.battery_level !== null ? hw.battery_level : undefined,
-            isCharging: hw.is_charging ?? true,
+            batteryLevel: typeof hw.battery_level === 'number' ? hw.battery_level : undefined,
+            isCharging: typeof hw.is_charging === 'boolean' ? hw.is_charging : undefined,
             temperatureCelsius: hw.temperature_celsius,
             uptimeSeconds: hw.uptime_seconds,
             lastUpdated: hw.timestamp || new Date().toISOString(),
@@ -355,7 +355,7 @@ export class DevicesManager {
     payload: Record<string, any> = {}
   ): Promise<DeviceCommand> {
     const timestamp = new Date().toISOString();
-    const cmdId = `cmd-${Date.now()}-${Date.now().toString(36)}`;
+    const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     const dev = this.devices.get(deviceId);
     const deviceName = dev?.name || 'Dispositivo Desconhecido';

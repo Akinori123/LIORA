@@ -419,6 +419,7 @@ export class IntegrationsVault {
   private providerMutex = new ProviderMutex();
   private keychainFallbackActive = false;
   private validOAuthStates: Map<string, { provider: IntegrationProviderId; expiresAt: number }> = new Map();
+  private manuallyDisconnectedIds: Set<string> = new Set();
 
   constructor(bus: EventBus = eventBus) {
     this.bus = bus;
@@ -460,6 +461,8 @@ export class IntegrationsVault {
       const gem = this.services.get('svc-gemini');
       if (gem && gem.status === 'DISCONNECTED') {
         gem.status = 'CONNECTED';
+        gem.isSimulated = false;
+        gem.scopes = gem.scopes.map(s => ({ ...s, granted: true }));
         gem.updatedAt = new Date().toISOString();
       }
     }
@@ -467,8 +470,101 @@ export class IntegrationsVault {
       const or = this.services.get('svc-openrouter');
       if (or && or.status === 'DISCONNECTED') {
         or.status = 'CONNECTED';
+        or.isSimulated = false;
+        or.scopes = or.scopes.map(s => ({ ...s, granted: true }));
         or.updatedAt = new Date().toISOString();
       }
+    }
+  }
+
+  /**
+   * Hidrata o estado do Cofre em memória/UI a partir do status real do .env do backend.
+   * Evita que Gemini / OpenRouter exibam status DESCONECTADO no browser ao iniciar.
+   */
+  public hydrateFromBackendEnv(envStatus: {
+    gemini?: { isConfigured?: boolean; masked?: string };
+    openrouter?: { isConfigured?: boolean; masked?: string };
+  }): boolean {
+    if (!envStatus || typeof envStatus !== 'object') return false;
+
+    let changed = false;
+    const timestamp = new Date().toISOString();
+
+    const applyEnvProvider = (
+      serviceId: 'svc-gemini' | 'svc-openrouter',
+      provider: 'gemini' | 'openrouter',
+      info?: { isConfigured?: boolean; masked?: string }
+    ) => {
+      const svc = this.services.get(serviceId);
+      if (!svc) return;
+      if (this.manuallyDisconnectedIds.has(serviceId)) return;
+
+      if (info?.isConfigured) {
+        const masked = info.masked || svc.maskedKey || `${provider}***env`;
+        const needsUpdate =
+          svc.status === 'DISCONNECTED' ||
+          svc.status === 'ERROR' ||
+          svc.maskedKey !== masked ||
+          svc.isSimulated !== false;
+
+        if (needsUpdate) {
+          svc.status = 'CONNECTED';
+          svc.maskedKey = masked;
+          svc.keyFingerprint = svc.keyFingerprint || computeKeyFingerprint(`env:${provider}:${masked}`);
+          svc.isSimulated = false;
+          svc.errorMessage = undefined;
+          svc.lastPingAt = svc.lastPingAt || timestamp;
+          svc.updatedAt = timestamp;
+          svc.scopes = svc.scopes.map(s => ({ ...s, granted: true }));
+          changed = true;
+        }
+
+        if (!this.credentials.has(serviceId)) {
+          this.credentials.set(serviceId, {
+            id: `cred-${provider}-env`,
+            provider,
+            label: svc.name,
+            maskedKey: masked,
+            fingerprint: svc.keyFingerprint || computeKeyFingerprint(`env:${provider}:${masked}`),
+            status: 'valid',
+            associatedServiceId: serviceId,
+            lastValidatedAt: timestamp
+          });
+          changed = true;
+        }
+      }
+    };
+
+    applyEnvProvider('svc-gemini', 'gemini', envStatus.gemini);
+    applyEnvProvider('svc-openrouter', 'openrouter', envStatus.openrouter);
+
+    if (changed) {
+      this.saveVaultToStorage();
+      this.bus.publish('VAULT_ENV_HYDRATED', {
+        timestamp,
+        geminiConfigured: Boolean(envStatus.gemini?.isConfigured),
+        openRouterConfigured: Boolean(envStatus.openrouter?.isConfigured)
+      });
+    }
+
+    return changed;
+  }
+
+  public async syncWithBackendEnv(fetchFn: typeof fetch = fetch): Promise<boolean> {
+    if (typeof fetchFn !== 'function') return false;
+    try {
+      const res = await fetchFn('/api/env/keys/status', {
+        headers: { Accept: 'application/json' }
+      });
+      const contentType = res.headers?.get?.('content-type') || '';
+      if (!res.ok || (contentType && !contentType.includes('application/json'))) {
+        return false;
+      }
+      const data = await res.json();
+      if (!data || typeof data !== 'object') return false;
+      return this.hydrateFromBackendEnv(data);
+    } catch {
+      return false;
     }
   }
 
@@ -525,6 +621,12 @@ export class IntegrationsVault {
       }
     }
     if (provider === 'openrouter') {
+      const envKey = (typeof process !== 'undefined' && process.env?.OPENROUTER_API_KEY) as string | undefined;
+      if (envKey && envKey.trim().length >= 5) {
+        const clean = envKey.trim();
+        this.rawKeys.set('svc-openrouter', clean);
+        return clean;
+      }
       const direct = this.rawKeys.get('svc-openrouter') || this.rawKeys.get('openrouter');
       if (direct && direct.trim().length >= 5) return direct.trim();
       if (typeof localStorage !== 'undefined') {
@@ -587,6 +689,7 @@ export class IntegrationsVault {
       const masked = maskCredential(cleanKey, svc.provider);
       const fingerprint = computeKeyFingerprint(cleanKey);
 
+      this.manuallyDisconnectedIds.delete(serviceId);
       this.rawKeys.set(serviceId, cleanKey);
 
       if (svc.provider === 'gemini') {
@@ -700,8 +803,18 @@ export class IntegrationsVault {
     svc.scopes = svc.scopes.map(s => ({ ...s, granted: false }));
     svc.updatedAt = new Date().toISOString();
 
+    this.manuallyDisconnectedIds.add(serviceId);
     this.credentials.delete(serviceId);
     this.rawKeys.delete(serviceId);
+    if (typeof localStorage !== 'undefined') {
+      if (svc.provider === 'gemini') {
+        localStorage.removeItem('GEMINI_API_KEY');
+        localStorage.removeItem('liora_gemini_key');
+      } else if (svc.provider === 'openrouter') {
+        localStorage.removeItem('OPENROUTER_API_KEY');
+        localStorage.removeItem('liora_openrouter_key');
+      }
+    }
     writeKeychainSecret(serviceId, '').catch(() => {});
 
     this.saveVaultToStorage();
@@ -1266,7 +1379,8 @@ export class IntegrationsVault {
       const exportable = {
         services: Array.from(this.services.values()),
         credentials: Array.from(this.credentials.values()),
-        rawKeys: Array.from(this.rawKeys.entries())
+        rawKeys: Array.from(this.rawKeys.entries()),
+        manuallyDisconnectedIds: Array.from(this.manuallyDisconnectedIds)
       };
       const json = JSON.stringify(exportable);
       const signature = computeHmacSha256Sync('liora_os_keychain_secret_v1', json);
@@ -1307,12 +1421,22 @@ export class IntegrationsVault {
       }
 
       const data = JSON.parse(decodedJson);
+      if (Array.isArray(data.manuallyDisconnectedIds)) {
+        this.manuallyDisconnectedIds = new Set(data.manuallyDisconnectedIds);
+      }
       if (Array.isArray(data.services)) {
         for (const s of data.services) {
           s.mcpConsecutiveFailures = 0;
           s.backoffAttempt = 0;
           s.nextAllowedPingAt = undefined;
           this.services.set(s.id, s);
+        }
+      }
+      if (Array.isArray(data.credentials)) {
+        for (const c of data.credentials) {
+          if (c?.associatedServiceId) {
+            this.credentials.set(c.associatedServiceId, c);
+          }
         }
       }
       if (Array.isArray(data.rawKeys)) {
@@ -1329,8 +1453,10 @@ export class IntegrationsVault {
       // (ex: via .env no backend), o serviço reflete a realidade funcional em vez
       // do status DISCONNECTED congelado do snapshot antigo.
       for (const [svcId, svc] of this.services.entries()) {
-        if (svc.status === 'DISCONNECTED' && svc.provider && this.getApiKeyByProvider(svc.provider)) {
+        if (!this.manuallyDisconnectedIds.has(svcId) && svc.status === 'DISCONNECTED' && svc.provider && this.getApiKeyByProvider(svc.provider)) {
           svc.status = 'CONNECTED';
+          svc.isSimulated = false;
+          svc.scopes = svc.scopes.map(s => ({ ...s, granted: true }));
           svc.updatedAt = new Date().toISOString();
         }
       }

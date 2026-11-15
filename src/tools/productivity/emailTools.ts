@@ -450,10 +450,19 @@ export const emailSendOrReplyTool: ToolDefinition<{
 
     // ── Sessão SMTP real (Node puro) ──
     return new Promise((resolve) => {
+      let settled = false;
+      const useImplicitTls = cred.smtp.port === 465;
+      let upgradedToTls = false;
+      let rcptIndex = 0;
+      let stage = 'greeting';
+      let buffer = '';
+
+      let socket: net.Socket | tls.TLSSocket;
+
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try { socket.destroy(); } catch {}
+        try { socket?.destroy(); } catch {}
         resolve({
           success: false,
           error: `SMTP_TIMEOUT: servidor ${cred.smtp.host}:${cred.smtp.port} não respondeu em 20s.`,
@@ -462,12 +471,13 @@ export const emailSendOrReplyTool: ToolDefinition<{
         });
       }, 20000);
 
-      let stage = 'greeting';
-      let buffer = '';
-
-      const socket = net.createConnection({ host: cred.smtp.host, port: cred.smtp.port }, () => {
-        stage = 'greeting';
-      })) as net.Socket;
+      socket = (useImplicitTls
+        ? tls.connect({ host: cred.smtp.host, port: cred.smtp.port, rejectUnauthorized: false }, () => {
+            stage = 'greeting';
+          })
+        : net.createConnection({ host: cred.smtp.host, port: cred.smtp.port }, () => {
+            stage = 'greeting';
+          })) as net.Socket | tls.TLSSocket;
 
       socket.setEncoding('utf8');
       socket.on('error', (err) => {

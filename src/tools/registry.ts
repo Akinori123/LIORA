@@ -148,6 +148,12 @@ export class ToolRegistry {
     rawParams: any = {}, 
     context?: ToolExecutionContext
   ): Promise<ToolExecutionResult> {
+    console.log('[ToolRegistry] [HANDSHAKE: requested]', {
+      toolName,
+      sessionId: context?.sessionId || 'unknown',
+      rawParamsKeys: typeof rawParams === 'object' && rawParams !== null ? Object.keys(rawParams) : []
+    });
+
     const start = performance.now();
     const timestamp = new Date().toISOString();
 
@@ -225,7 +231,7 @@ export class ToolRegistry {
       }
 
       const executionTimeMs = Math.round(performance.now() - start);
-      return {
+      const resResult: ToolExecutionResult = {
         toolName,
         success: true,
         data,
@@ -235,11 +241,17 @@ export class ToolRegistry {
         timestamp,
         verification: verification.evidence
       };
+      console.log('[ToolRegistry] [HANDSHAKE: resolved]', {
+        toolName,
+        success: true,
+        executionTimeMs
+      });
+      return resResult;
     } catch (err: any) {
       if (timer) clearTimeout(timer);
       const executionTimeMs = Math.round(performance.now() - start);
       const cleanError = sanitizeErrorMessage(err);
-      return {
+      const errResult: ToolExecutionResult = {
         toolName,
         success: false,
         error: cleanError,
@@ -248,6 +260,13 @@ export class ToolRegistry {
         executionTimeMs,
         timestamp
       };
+      console.log('[ToolRegistry] [HANDSHAKE: resolved]', {
+        toolName,
+        success: false,
+        error: cleanError,
+        executionTimeMs
+      });
+      return errResult;
     }
   }
 

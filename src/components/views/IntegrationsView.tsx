@@ -37,6 +37,7 @@ export const IntegrationsView: React.FC = () => {
     services, 
     webhookLogs, 
     keychainFallbackActive,
+    syncServicesFromEnv,
     connectService, 
     disconnectService, 
     testServiceConnection, 
@@ -69,11 +70,12 @@ export const IntegrationsView: React.FC = () => {
   const webhookTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   React.useEffect(() => {
+    void syncServicesFromEnv();
     return () => {
       if (pingTimerRef.current) clearTimeout(pingTimerRef.current);
       if (webhookTimerRef.current) clearTimeout(webhookTimerRef.current);
     };
-  }, []);
+  }, [syncServicesFromEnv]);
 
   const filteredServices = selectedCategory === 'all' 
     ? services 

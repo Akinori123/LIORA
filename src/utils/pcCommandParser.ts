@@ -214,7 +214,16 @@ export function parsePcCommandIntent(input: string): PcCommandMatch | null {
       rawInput: rawClean
     };
   }
-  if (normalized.includes('mutar som') || normalized.includes('silenciar som') || normalized.includes('mudo') || normalized.includes('sem som')) {
+  if (
+    normalized.includes('mutar som') ||
+    normalized.includes('mutar audio') ||
+    normalized.includes('silenciar som') ||
+    normalized.includes('silenciar audio') ||
+    normalized.includes('sem som') ||
+    normalized.includes('tirar o som') ||
+    /^(?:no\s+)?mudo$/.test(normalized) ||
+    /\b(?:colocar|coloque|deixar|deixe|ficar|ativar|por|botar|bote)\s+(?:no\s+|o\s+som\s+)?mudo\b/.test(normalized)
+  ) {
     return {
       type: 'volume_mute',
       action: 'volume_mute',
@@ -236,33 +245,41 @@ export function parsePcCommandIntent(input: string): PcCommandMatch | null {
     .replace(/^(?:o|a)\s+/, '')
     .trim();
 
+  // Constrói candidatos ordenados do nome mais longo ao mais curto para evitar que sinônimos curtos capturem antes de compostos
+  const appCandidates: Array<{ app: AppDefinition; normName: string }> = [];
   for (const app of KNOWN_WINDOWS_APPS) {
     for (const name of app.names) {
-      const normName = normalizeText(name);
-      // Casamento exato, substring com prefixo de abertura ou menção direta da ferramenta
-      if (
-        targetAppPhrase === normName || 
-        targetAppPhrase.startsWith(`${normName} `) ||
-        targetAppPhrase.endsWith(` ${normName}`) ||
-        (hasLaunchPrefix && targetAppPhrase.includes(normName)) ||
-        normalized === normName ||
-        normalized === `abrir ${normName}` ||
-        normalized === `abra ${normName}` ||
-        normalized === `abre ${normName}` ||
-        normalized === `iniciar ${normName}` ||
-        normalized === `inicie ${normName}` ||
-        (normalized.includes('abrir') && normalized.includes(normName)) ||
-        (normalized.includes('abra') && normalized.includes(normName)) ||
-        (normalized.includes('abre') && normalized.includes(normName))
-      ) {
-        return {
-          type: 'app_launch',
-          appName: app.label,
-          executable: app.executable,
-          spokenFeedback: `Abrindo ${app.label}, Mestre.`,
-          rawInput: rawClean
-        };
-      }
+      appCandidates.push({ app, normName: normalizeText(name) });
+    }
+  }
+  appCandidates.sort((a, b) => b.normName.length - a.normName.length);
+
+  for (const { app, normName } of appCandidates) {
+    if (!normName) continue;
+    const escapedName = normName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const boundaryRe = new RegExp(`(?:^|\\s)${escapedName}(?:\\s|$)`);
+    const hasLaunchVerb = /\b(?:abrir|abra|abre|iniciar|inicie|executar|execute|rodar|rode)\b/.test(normalized);
+
+    if (
+      targetAppPhrase === normName ||
+      targetAppPhrase.startsWith(`${normName} `) ||
+      targetAppPhrase.endsWith(` ${normName}`) ||
+      (hasLaunchPrefix && boundaryRe.test(targetAppPhrase)) ||
+      normalized === normName ||
+      normalized === `abrir ${normName}` ||
+      normalized === `abra ${normName}` ||
+      normalized === `abre ${normName}` ||
+      normalized === `iniciar ${normName}` ||
+      normalized === `inicie ${normName}` ||
+      (hasLaunchVerb && boundaryRe.test(normalized))
+    ) {
+      return {
+        type: 'app_launch',
+        appName: app.label,
+        executable: app.executable,
+        spokenFeedback: `Abrindo ${app.label}, Mestre.`,
+        rawInput: rawClean
+      };
     }
   }
 

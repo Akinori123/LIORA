@@ -56,7 +56,8 @@ export async function invokeTauri<T>(cmd: string, args?: Record<string, any>): P
 export async function executeLocalTool(
   toolName: string,
   parameters: Record<string, any> = {},
-  sessionId: string = 'default-session'
+  sessionId: string = 'default-session',
+  uiConsentToken?: string
 ): Promise<LocalExecutionResult> {
   const startTime = Date.now();
   if (!toolName || typeof toolName !== 'string') {
@@ -79,7 +80,7 @@ export async function executeLocalTool(
     try {
       // Invocação nativa Tauri invoke()
       const result = await invokeTauri<LocalExecutionResult>('execute_local_tool', {
-        payload: { toolName, parameters, sessionId }
+        payload: { toolName, parameters, sessionId, consentToken: uiConsentToken }
       });
       return result;
     } catch (err: any) {
@@ -106,13 +107,18 @@ export async function executeLocalTool(
       ? `http://localhost:${(typeof process !== 'undefined' && process.env?.PORT) || 3000}/api/tools/execute`
       : '/api/tools/execute';
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'x-liora-session-id': sessionId
+    };
+    if (uiConsentToken) {
+      headers['x-liora-ui-consent'] = uiConsentToken;
+    }
+
     const response = await fetch(toolsUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'x-liora-session-id': sessionId
-      },
+      headers,
       body: JSON.stringify({ toolName, parameters })
     });
 
@@ -131,7 +137,7 @@ export async function executeLocalTool(
       code: data.code,
       parametersHash: data.parametersHash,
       auditId: data.auditId,
-      simulated: Boolean(data.simulated ?? true),
+      simulated: Boolean(data.simulated ?? data.data?.simulated ?? true),
       executionTimeMs: Date.now() - startTime,
       timestamp: data.timestamp || new Date().toISOString()
     };

@@ -33,39 +33,13 @@ export function parseTimeCommandIntent(input: string): TimeQueryMatch | null {
     .replace(/\s+/g, ' ')
     .trim();
 
-  const isDateQuery = 
-    normalized.includes('que dia e hoje') ||
-    normalized.includes('que dia e') ||
-    normalized.includes('que dia estamos') ||
-    normalized.includes('que dia') ||
-    normalized.includes('qual dia') ||
-    normalized.includes('qual o dia de hoje') ||
-    normalized.includes('qual o dia') ||
-    normalized.includes('qual e o dia') ||
-    normalized.includes('qual e a data de hoje') ||
-    normalized.includes('qual a data de hoje') ||
-    normalized.includes('qual e a data') ||
-    normalized.includes('qual a data') ||
-    normalized.includes('qual data') ||
-    normalized.includes('data de hoje') ||
-    normalized.includes('dia da semana') ||
-    normalized.includes('hoje e que dia') ||
-    normalized === 'que dia estamos' ||
-    normalized === 'dia de hoje';
+  const isDateQuery =
+    /\b(?:que dia e hoje|que dia e|que dia estamos|hoje e que dia|qual(?: e)? o dia de hoje|qual(?: e)? a data de hoje|data de hoje|dia da semana|dia de hoje)\b/.test(normalized) ||
+    /^(?:que dia|qual dia|qual o dia|qual a data|qual e a data|qual data)$/.test(normalized);
 
-  const isTimeQuery = 
-    normalized.includes('que horas sao') ||
-    normalized.includes('que horas e') ||
-    normalized.includes('que horas') ||
-    normalized.includes('as horas') ||
-    normalized.includes('sao que horas') ||
-    normalized.includes('horas tem') ||
-    normalized.includes('qual a hora') ||
-    normalized.includes('qual e a hora') ||
-    normalized.includes('hora atual') ||
-    normalized.includes('hora de agora') ||
-    normalized === 'horas' ||
-    normalized === 'que horas';
+  const isTimeQuery =
+    /\b(?:que horas sao|que horas e agora|agora sao que horas|sao que horas|qual(?: e)? a hora atual|qual(?: e)? a hora de agora|hora atual|hora de agora|que hora e|que horas sao agora)\b/.test(normalized) ||
+    /^(?:que horas|as horas|horas|hora|que hora)$/.test(normalized);
 
   if (!isDateQuery && !isTimeQuery) return null;
 

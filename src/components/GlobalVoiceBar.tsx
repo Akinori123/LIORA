@@ -48,7 +48,19 @@ export const GlobalVoiceBar: React.FC = () => {
   const [frequencyBins, setFrequencyBins] = useState<number[]>([0, 0, 0, 0, 0, 0, 0, 0]);
   const [showDiagnosticModal, setShowDiagnosticModal] = useState(false);
   const [windowWidth, setWindowWidth] = useState<number>(typeof window !== 'undefined' ? window.innerWidth : 1280);
-  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const vadSpeakingRef = useRef<boolean>(false);
+  const vadStartTimeRef = useRef<number>(0);
+  const isDispatchingRef = useRef<boolean>(false);
+  const transcriptRef = useRef<string>(transcript);
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
+  const setOrbStateRef = useRef(setOrbState);
+  useEffect(() => {
+    setOrbStateRef.current = setOrbState;
+  }, [setOrbState]);
+  const lastExecutedCommandRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
   // FIX C2: espelho do orbState em ref para o ciclo de vida da voz NÃO depender
   // de estados que mudam durante a sessão (orbState). Sem isso, o effect de voz
@@ -66,6 +78,7 @@ export const GlobalVoiceBar: React.FC = () => {
   }, [isVoiceActive, runVaultDiagnostics]);
 
   const voiceTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const orbResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleVoiceTimer = (cb: () => void, ms: number) => {
     const id = setTimeout(() => {
       voiceTimersRef.current.delete(id);
@@ -73,6 +86,21 @@ export const GlobalVoiceBar: React.FC = () => {
     }, ms);
     voiceTimersRef.current.add(id);
     return id;
+  };
+  const scheduleOrbReset = (ms: number, ensureMeter = false) => {
+    if (orbResetTimerRef.current) {
+      clearTimeout(orbResetTimerRef.current);
+      orbResetTimerRef.current = null;
+    }
+    orbResetTimerRef.current = setTimeout(() => {
+      orbResetTimerRef.current = null;
+      if (speechService.isSpeaking()) return;
+      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
+      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
+      if (ensureMeter && currentVoiceActive) {
+        speechService.ensureAudioMeterRunning();
+      }
+    }, ms);
   };
 
   useEffect(() => {
@@ -82,6 +110,10 @@ export const GlobalVoiceBar: React.FC = () => {
       window.removeEventListener('resize', handleResize);
       voiceTimersRef.current.forEach(t => clearTimeout(t));
       voiceTimersRef.current.clear();
+      if (orbResetTimerRef.current) {
+        clearTimeout(orbResetTimerRef.current);
+        orbResetTimerRef.current = null;
+      }
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = null;
@@ -114,10 +146,7 @@ export const GlobalVoiceBar: React.FC = () => {
     speechService.speak(navMatch.spokenFeedback);
 
     // 4. Retorno limpo para estado de escuta, impedindo travamento em THINKING/EXECUTING
-    setTimeout(() => {
-      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-    }, 4000);
+    scheduleOrbReset(4000);
 
     // 5. Injeta no histórico de mensagens (memória de curto prazo) e canal Live
     const store = useLioraStore.getState();
@@ -152,35 +181,50 @@ export const GlobalVoiceBar: React.FC = () => {
     voiceLiveClient.extendSuppression(8000);
     speechService.stopSpeaking();
 
-    // 2. Feedback falado veicular imediato
-    setOrbState('SPEAKING');
-    speechService.unlockAudio();
-    speechService.speak(routeIntent.spokenFeedback, undefined, () => {
-      voiceLiveClient.extendSuppression(2000);
-    });
-
-    // 3. Abertura do Google Maps ou Waze
+    // 2. Executa abertura do Google Maps / Waze ANTES de confirmar por voz
+    setOrbState('EXECUTING');
+    let routeResult: { success: boolean; url: string; provider: string; originMode: string; dryRun?: boolean; simulated?: boolean } = {
+      success: false,
+      url: '',
+      provider: routeIntent.provider,
+      originMode: 'current_gps'
+    };
     try {
-      await launchGpsNavigation(routeIntent.destination, routeIntent.provider, routeIntent.origin);
+      routeResult = await launchGpsNavigation(routeIntent.destination, routeIntent.provider, routeIntent.origin);
     } catch (err) {
       console.warn('[GlobalVoiceBar] Falha ao acionar rota de GPS:', err);
     }
 
+    const appName = routeIntent.provider === 'waze' ? 'Waze' : 'Google Maps';
+    const isSimulated = Boolean((routeResult as any).simulated || routeResult.dryRun);
+    const spokenMessage = routeResult.success
+      ? (isSimulated ? `Modo Web Preview simulado: ${routeIntent.spokenFeedback}` : routeIntent.spokenFeedback)
+      : `Mestre, não consegui abrir a rota no ${appName}.`;
+
+    if (!routeResult.success) {
+      setErrorMessage(spokenMessage);
+    }
+
+    // 3. Feedback falado apenas após confirmação real do resultado
+    setOrbState('SPEAKING');
+    speechService.unlockAudio();
+    speechService.speak(spokenMessage, undefined, () => {
+      voiceLiveClient.extendSuppression(2000);
+    }, { isDeterministicOverride: true });
+
     // 4. Retorno limpo para estado de escuta
-    scheduleVoiceTimer(() => {
-      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-    }, 1500);
+    scheduleOrbReset(1500);
 
     // 5. Registro forense de auditoria sem alterar a aba ativa
-    const appName = routeIntent.provider === 'waze' ? 'Waze' : 'Google Maps';
+    useLioraStore.getState().recordVoiceExchange(routeIntent.rawInput, spokenMessage);
+    voiceLiveClient.sendContextUpdate(routeIntent.rawInput, spokenMessage);
     useLioraStore.getState().addActivityLog({
       category: 'tool',
-      summary: `Navegação GPS Ativa (${appName})`,
-      details: `Comando "${routeIntent.rawInput}" executado. Destino: "${routeIntent.destination}"${routeIntent.origin ? ` | Origem: "${routeIntent.origin}"` : ' | Origem: GPS Atual'}.`,
+      summary: `Navegação GPS ${routeResult.success ? 'Ativa' : 'Falhou'} (${appName})`,
+      details: `Comando "${routeIntent.rawInput}" ${routeResult.success ? 'executado' : 'falhou'}. Destino: "${routeIntent.destination}"${routeIntent.origin ? ` | Origem: "${routeIntent.origin}"` : ' | Origem: GPS Atual'}.`,
       riskLevel: 'R0',
-      status: 'success',
-      simulated: false
+      status: routeResult.success ? 'success' : 'error',
+      simulated: isSimulated
     });
   };
 
@@ -201,34 +245,48 @@ export const GlobalVoiceBar: React.FC = () => {
     voiceLiveClient.extendSuppression(8000);
     speechService.stopSpeaking();
 
-    // 2. Feedback falado veicular/assistente imediato
-    setOrbState('SPEAKING');
-    speechService.unlockAudio();
-    speechService.speak(placesIntent.spokenFeedback, undefined, () => {
-      voiceLiveClient.extendSuppression(2000);
-    });
-
-    // 3. Abertura do Google Maps Places nativamente
+    // 2. Executa busca no Google Maps ANTES de falar confirmação
+    setOrbState('EXECUTING');
+    let searchResult: { success: boolean; url: string; query: string; dryRun?: boolean; simulated?: boolean } = {
+      success: false,
+      url: '',
+      query: placesIntent.query
+    };
     try {
-      await launchPlacesSearch(placesIntent.query, placesIntent.nearLocation);
+      searchResult = await launchPlacesSearch(placesIntent.query, placesIntent.nearLocation);
     } catch (err) {
       console.warn('[GlobalVoiceBar] Falha ao acionar busca de locais:', err);
     }
 
+    const isSimulated = Boolean((searchResult as any).simulated || searchResult.dryRun);
+    const spokenMessage = searchResult.success
+      ? (isSimulated ? `Modo Web Preview simulado: ${placesIntent.spokenFeedback}` : placesIntent.spokenFeedback)
+      : 'Mestre, não consegui abrir a busca de locais no Google Maps.';
+
+    if (!searchResult.success) {
+      setErrorMessage(spokenMessage);
+    }
+
+    // 3. Feedback falado apenas após resultado confirmado
+    setOrbState('SPEAKING');
+    speechService.unlockAudio();
+    speechService.speak(spokenMessage, undefined, () => {
+      voiceLiveClient.extendSuppression(2000);
+    }, { isDeterministicOverride: true });
+
     // 4. Retorno limpo para estado de escuta
-    scheduleVoiceTimer(() => {
-      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-    }, 1500);
+    scheduleOrbReset(1500);
 
     // 5. Registro forense de auditoria
+    useLioraStore.getState().recordVoiceExchange(placesIntent.rawInput, spokenMessage);
+    voiceLiveClient.sendContextUpdate(placesIntent.rawInput, spokenMessage);
     useLioraStore.getState().addActivityLog({
       category: 'tool',
-      summary: 'Busca de Locais (Google Maps)',
-      details: `Comando "${placesIntent.rawInput}" executado. Termo: "${placesIntent.query}"${placesIntent.nearLocation ? ` | Referência: "${placesIntent.nearLocation}"` : ' | Perto da localização atual'}.`,
+      summary: `Busca de Locais (${searchResult.success ? 'Google Maps' : 'Falhou'})`,
+      details: `Comando "${placesIntent.rawInput}" ${searchResult.success ? 'executado' : 'falhou'}. Termo: "${placesIntent.query}"${placesIntent.nearLocation ? ` | Referência: "${placesIntent.nearLocation}"` : ' | Perto da localização atual'}.`,
       riskLevel: 'R0',
-      status: 'success',
-      simulated: false
+      status: searchResult.success ? 'success' : 'error',
+      simulated: isSimulated
     });
   };
 
@@ -244,66 +302,79 @@ export const GlobalVoiceBar: React.FC = () => {
     setTranscript('');
     setErrorMessage(null);
 
-    // 1. Interrompe modelo Live e áudio anterior para liberar a fala
+    // 1. Interrompe modelo Live e áudio anterior para liberar o canal
     voiceLiveClient.interrupt();
     voiceLiveClient.extendSuppression(8000);
     speechService.stopSpeaking();
 
-    // 2. Feedback falado imediato
+    // 2. Execução REAL da ação no computador hospedeiro ANTES de afirmar sucesso
+    setOrbState('EXECUTING');
+    let result: Awaited<ReturnType<typeof executePcAction>>;
+    try {
+      result = await executePcAction(pcMatch);
+    } catch (pcErr: any) {
+      result = {
+        success: false,
+        message: 'Erro inesperado ao executar ação no PC.',
+        error: pcErr?.message || 'Erro desconhecido'
+      };
+    }
+
+    const store = useLioraStore.getState();
+
+    // 3. Se bloqueado por consentimento R1/R2, abre o overlay de consentimento e informa por voz
+    if (!result.success && result.requiresConsent && result.consentToolName) {
+      const now = Date.now();
+      store.setPendingConsent({
+        auditId: `consent-${now}`,
+        ruleId: 'voice-pc-rule',
+        toolName: result.consentToolName,
+        riskLevel: 'R2',
+        parameters: result.consentParams || {},
+        consentToken: '',
+        sessionId: store.activeSessionId || 'operator-voice-session',
+        expiresAt: now + 60000,
+        reason: result.message || `Autorizar execução de ${result.consentToolName}`,
+        status: 'PENDING'
+      });
+      setOrbState('LISTENING');
+      return;
+    }
+
+    // 4. Monta resposta honesta estritamente baseada no retorno do backend
+    const appOrAction = pcMatch.type === 'app_launch' ? pcMatch.appName : pcMatch.action;
+    const isSimulated = Boolean(result.simulated);
+    const spokenMessage = result.success
+      ? (isSimulated ? `Modo Web Preview simulado: ${pcMatch.spokenFeedback}` : pcMatch.spokenFeedback)
+      : `Mestre, não consegui executar o comando: ${result.error || result.message || 'verifique se o aplicativo está instalado'}.`;
+
+    if (!result.success) {
+      setErrorMessage(spokenMessage);
+    }
+
     setOrbState('SPEAKING');
     speechService.unlockAudio();
     speechService.speak(
-      pcMatch.spokenFeedback,
+      spokenMessage,
       undefined,
       () => {
         voiceLiveClient.extendSuppression(2000);
         const currentVoiceActive = useLioraStore.getState().isVoiceActive;
         setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
         if (currentVoiceActive) speechService.ensureAudioMeterRunning();
-      }
+      },
+      { isDeterministicOverride: true }
     );
 
-    useLioraStore.getState().addActivityLog({
-      category: 'voice',
-      summary: `🔊 Fala LIORA: "${pcMatch.spokenFeedback}"`,
-      details: `Feedback auditivo em execução para o Mestre.`,
-      riskLevel: 'R0',
-      status: 'success',
-      simulated: false
-    });
-
-    // 3. Execução REAL da ação no computador hospedeiro
-    const result = await executePcAction(pcMatch);
-
-    // 4. Se a execução falhou, avisa com honestidade
-    if (!result.success) {
-      const errorMsg = `Mestre, não consegui executar o comando: ${result.error || 'verifique se o aplicativo está instalado'}.`;
-      speechService.speak(
-        errorMsg,
-        undefined,
-        () => {
-          const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-          setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-        }
-      );
-      setErrorMessage(errorMsg);
-    }
-
     // 5. Retorno limpo para estado de escuta de segurança
-    scheduleVoiceTimer(() => {
-      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-      if (currentVoiceActive) {
-        speechService.ensureAudioMeterRunning();
-      }
-    }, 4000);
+    scheduleOrbReset(4000, true);
 
     // 6. Injeta no histórico de mensagens (memória de curto prazo) e canal Live
-    const store = useLioraStore.getState();
-    const appOrAction = pcMatch.type === 'app_launch' ? pcMatch.appName : pcMatch.action;
     const assistantReply = result.success
-      ? `${pcMatch.spokenFeedback} (Aplicativo '${appOrAction}' iniciado e focado com sucesso).`
-      : `Não foi possível abrir: ${result.error || 'erro de execução'}.`;
+      ? (isSimulated
+          ? `${spokenMessage} (Simulado no ambiente Web Preview sem desktop físico).`
+          : `${pcMatch.spokenFeedback} (Aplicativo '${appOrAction}' iniciado com confirmação real).`)
+      : spokenMessage;
 
     store.recordVoiceExchange(pcMatch.rawInput, assistantReply);
     voiceLiveClient.sendContextUpdate(pcMatch.rawInput, assistantReply);
@@ -315,7 +386,7 @@ export const GlobalVoiceBar: React.FC = () => {
       details: `${result.message} (Executável: ${pcMatch.type === 'app_launch' ? pcMatch.executable : pcMatch.action})`,
       riskLevel: 'R1',
       status: result.success ? 'success' : 'error',
-      simulated: false
+      simulated: isSimulated
     });
   };
 
@@ -351,13 +422,7 @@ export const GlobalVoiceBar: React.FC = () => {
     );
 
     // 3. Retorno limpo para estado de escuta de segurança
-    scheduleVoiceTimer(() => {
-      const currentVoiceActive = useLioraStore.getState().isVoiceActive;
-      setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
-      if (currentVoiceActive) {
-        speechService.ensureAudioMeterRunning();
-      }
-    }, 4000);
+    scheduleOrbReset(4000, true);
 
     // 4. Injeta no histórico de mensagens (memória de curto prazo) e canal Live
     const store = useLioraStore.getState();
@@ -470,7 +535,7 @@ export const GlobalVoiceBar: React.FC = () => {
     // dá feedback visual para o usuário saber que a LIORA ainda está processando.
     if (store.isGenerating) {
       setErrorMessage('Aguarde... A LIORA ainda está processando a resposta anterior.');
-      setTimeout(() => setErrorMessage(null), 2500);
+      scheduleVoiceTimer(() => setErrorMessage(null), 2500);
       return;
     }
 
@@ -591,10 +656,10 @@ export const GlobalVoiceBar: React.FC = () => {
         const duration = Date.now() - vadStartTimeRef.current;
         if (!silenceTimerRef.current && duration >= 400) {
           silenceTimerRef.current = setTimeout(async () => {
+            silenceTimerRef.current = null;
             if (isDispatchingRef.current) return;
-            // Bloqueio definitivo de voz dupla: no modo de voz contínua ativo, o canal Gemini Live
-            // via WebSocket já recebe o áudio em tempo real. Evita envio paralelo ao chat HTTP.
-            if (useLioraStore.getState().isVoiceActive) {
+            // Garante que a sessão de voz ainda está ativa; se o Live estiver conectado, evita envio paralelo ao chat HTTP.
+            if (!useLioraStore.getState().isVoiceActive) {
               return;
             }
             const currentLiveStatus = voiceLiveClient.getStatus();
@@ -605,7 +670,6 @@ export const GlobalVoiceBar: React.FC = () => {
             if (audioBlob) {
               try {
                 speechService.unlockAudio();
-                speechService.playInstantAcknowledgment();
                 const transRes = await speechService.transcribeAudio(audioBlob);
                 if (transRes.success && transRes.text && transRes.hasSpeech) {
                   await dispatchVoiceCommand(transRes.text, audioBlob);
@@ -630,7 +694,10 @@ export const GlobalVoiceBar: React.FC = () => {
     return () => {
       unsubLevel();
       unsubFreq();
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
     };
   }, [isVoiceActive, sendMessage, setOrbState]);
 
@@ -689,6 +756,7 @@ export const GlobalVoiceBar: React.FC = () => {
         // Resetar timer de silêncio
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
         }
 
         const clean = text.trim();
@@ -722,7 +790,7 @@ export const GlobalVoiceBar: React.FC = () => {
 
           if (matchedKey) {
             // Guarda anti-fala-parcial (interim): se o usuário ainda está falando, bloqueia apps genéricos desconhecidos
-            const KNOWN_EXES = ['notepad', 'calc', 'control', 'ms-settings:', 'taskmgr', 'explorer', 'chrome', 'msedge', 'spotify', 'code', 'powershell', 'mspaint', 'steam', 'discord', 'whatsapp', 'winword', 'excel', 'powerpnt'];
+            const KNOWN_EXES = ['notepad', 'calc', 'control', 'ms-settings:', 'taskmgr', 'explorer', 'chrome', 'msedge', 'spotify', 'code', 'powershell', 'mspaint', 'steam', 'discord', 'whatsapp', 'winword', 'excel', 'powerpnt', 'opera', 'telegram', 'vlc', 'obs64'];
             if (!isFinal && pcMatch && pcMatch.type === 'app_launch' && !KNOWN_EXES.includes(pcMatch.executable)) {
               return;
             }
@@ -781,6 +849,7 @@ export const GlobalVoiceBar: React.FC = () => {
           // Modo sem Live (fallback HTTP): aguarda silêncio e despacha para o chat HTTP
           const delayMs = isFinal ? 750 : 1200;
           silenceTimerRef.current = setTimeout(async () => {
+            silenceTimerRef.current = null;
             const promptToSend = clean;
             setTranscript('');
 
@@ -806,6 +875,7 @@ export const GlobalVoiceBar: React.FC = () => {
     return () => {
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
       }
       speechService.stopListening();
     };
@@ -819,6 +889,7 @@ export const GlobalVoiceBar: React.FC = () => {
     if (!transcript.trim() || isGenerating) return;
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
     const textToSend = transcript.trim();
     setTranscript('');
@@ -834,6 +905,7 @@ export const GlobalVoiceBar: React.FC = () => {
   const handleStopVoice = () => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
     speechService.stopListening();
     speechService.stopSpeaking();
@@ -946,8 +1018,17 @@ export const GlobalVoiceBar: React.FC = () => {
 
             {/* Espectro de Frequência Extenso e Prominente (Web Audio API) */}
             <div 
+              role="button"
+              tabIndex={0}
+              aria-label="Autorizar ou calibrar o microfone"
               className="flex-1 flex items-end justify-between gap-1 sm:gap-1.5 px-4 py-2 bg-[#080808] rounded-2xl border border-[#282828] h-11 cursor-pointer hover:border-[#FF2B2B] transition-all shadow-inner min-w-[180px] max-w-md"
               onClick={handleGrantMicPermission}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void handleGrantMicPermission();
+                }
+              }}
               title="Clique para autorizar ou calibrar o microfone"
             >
               {Array.from({ length: 20 }).map((_, idx) => {
@@ -981,6 +1062,7 @@ export const GlobalVoiceBar: React.FC = () => {
                 ? 'bg-[#FF2B2B] border-[#FF2B2B] text-white shadow-[0_0_15px_rgba(255,43,43,0.4)]' 
                 : 'bg-[#121212] hover:bg-[#1E1E1E] text-[#A8A8A8] hover:text-white border-[#2A2A2A]'
             }`}
+            aria-label="Abrir painel diagnóstico de áudio"
             title="Abrir Painel Diagnóstico de Áudio (Volume, Sample Rate e WebSockets)"
           >
             <Activity className="w-4.5 h-4.5" />
@@ -989,6 +1071,7 @@ export const GlobalVoiceBar: React.FC = () => {
           <button
             onClick={() => setActiveTab('conversation')}
             className="p-3 bg-[#121212] hover:bg-[#1E1E1E] text-[#A8A8A8] hover:text-white border border-[#2A2A2A] rounded-2xl transition-all hover:scale-105"
+            aria-label="Abrir tela de conversa completa"
             title="Abrir tela de conversa completa"
           >
             <MessageSquare className="w-4.5 h-4.5" />
@@ -997,6 +1080,7 @@ export const GlobalVoiceBar: React.FC = () => {
           <button
             onClick={handleStopVoice}
             className="flex items-center gap-1.5 px-4 py-2.5 bg-red-950/90 hover:bg-red-900 border border-red-700/60 text-red-200 rounded-2xl text-xs font-bold transition-all shadow-md hover:scale-105"
+            aria-label="Pausar voz e encerrar microfone"
             title="Encerrar microfone e sessão de voz"
           >
             <MicOff className="w-4 h-4 text-red-400" />

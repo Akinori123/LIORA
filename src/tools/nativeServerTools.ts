@@ -20,7 +20,8 @@ import os from 'os';
 import path from 'path';
 import { ToolDefinition } from './types';
 // NÚCLEO DE CONTROLE TOTAL DO PC: visão, apps/inputs e arquivos (R0-R2)
-import { pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool } from './pcControlTools';
+import { pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, openBrowserTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, isOsDryRun } from './pcControlTools';
+import { shouldUseWebPreviewDesktopFallback } from '../utils/runtimeEnvironment';
 // AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — R2 com consentimento HMAC
 import { webBrowserAgentTool } from './web/browserAgentTool';
 // FASE 2: PRODUTIVIDADE — E-mail IMAP/SMTP e Calendário local (R1 leitura, R2 escrita)
@@ -1052,15 +1053,32 @@ export const nativeSystemLockSessionTool: ToolDefinition<Record<string, never>, 
     requiredFields: ['success', 'message', 'simulated']
   },
   execute: async () => {
+    if (isOsDryRun()) {
+      return { success: true, message: 'Bloqueio de sessão validado em modo dry-run.', simulated: true };
+    }
+    if (shouldUseWebPreviewDesktopFallback()) {
+      return {
+        success: true,
+        simulated: true,
+        runtimeMode: 'web-preview-simulated',
+        message: '[MODO WEB PREVIEW - SIMULADO] Bloqueio de sessão simulado no ambiente em nuvem sem desktop físico.'
+      };
+    }
     if (os.platform() === 'win32') {
-      await execRealCommand('rundll32.exe user32.dll,LockWorkStation', 3000);
-      return { success: true, message: 'Sessão do Windows bloqueada.', simulated: false };
+      const res = await execRealCommand('rundll32.exe user32.dll,LockWorkStation', 3000);
+      return res.exitCode === 0
+        ? { success: true, message: 'Sessão do Windows bloqueada.', simulated: false }
+        : { success: false, message: 'Falha ao bloquear sessão do Windows.', error: res.stderr.slice(0, 150) || `exitCode=${res.exitCode}`, simulated: false };
     } else if (os.platform() === 'darwin') {
-      await execRealCommand('pmset displaysleepnow', 3000);
-      return { success: true, message: 'Sessão do macOS bloqueada.', simulated: false };
+      const res = await execRealCommand('pmset displaysleepnow', 3000);
+      return res.exitCode === 0
+        ? { success: true, message: 'Sessão do macOS bloqueada.', simulated: false }
+        : { success: false, message: 'Falha ao bloquear sessão do macOS.', error: res.stderr.slice(0, 150) || `exitCode=${res.exitCode}`, simulated: false };
     } else {
-      await execRealCommand('loginctl lock-session || xdg-screensaver lock', 3000);
-      return { success: true, message: 'Sessão do Linux bloqueada.', simulated: false };
+      const res = await execRealCommand('loginctl lock-session || xdg-screensaver lock', 3000);
+      return res.exitCode === 0
+        ? { success: true, message: 'Sessão do Linux bloqueada.', simulated: false }
+        : { success: false, message: 'Falha ao bloquear sessão do Linux (loginctl/xdg-screensaver indisponível).', error: res.stderr.slice(0, 150) || `exitCode=${res.exitCode}`, simulated: false };
     }
   }
 };
@@ -1093,25 +1111,42 @@ export const nativeSystemSetVolumeTool: ToolDefinition<{ level: number }, any> =
   },
   execute: async ({ level }) => {
     const clamped = Math.min(100, Math.max(0, Math.round(level)));
+    if (isOsDryRun()) {
+      return { success: true, level: clamped, method: 'dry-run', simulated: false };
+    }
+    if (shouldUseWebPreviewDesktopFallback()) {
+      return {
+        success: true,
+        level: clamped,
+        method: 'web-preview-simulated',
+        simulated: true,
+        runtimeMode: 'web-preview-simulated',
+        message: `[MODO WEB PREVIEW - SIMULADO] Volume ajustado para ${clamped}% em modo simulado.`
+      };
+    }
 
     if (os.platform() === 'win32') {
       // Tenta via nircmd se disponível
-      const { exitCode } = await execRealCommand(`nircmd setsysvolume ${clamped * 655}`, 2000);
+      const { exitCode, stderr } = await execRealCommand(`nircmd setsysvolume ${clamped * 655}`, 2000);
       if (exitCode === 0) {
         return { success: true, level: clamped, method: 'nircmd', simulated: false };
       }
       return {
-        success: true,
+        success: false,
         level: clamped,
         simulated: false,
-        note: 'Comando de volume registrado. Para ajuste preciso de hardware no Windows, instale nircmd.exe.'
+        error: stderr.slice(0, 150) || 'nircmd.exe não encontrado para ajustar volume no Windows.'
       };
     } else if (os.platform() === 'darwin') {
-      await execRealCommand(`osascript -e "set volume output volume ${clamped}"`, 3000);
-      return { success: true, level: clamped, method: 'osascript', simulated: false };
+      const { exitCode, stderr } = await execRealCommand(`osascript -e "set volume output volume ${clamped}"`, 3000);
+      return exitCode === 0
+        ? { success: true, level: clamped, method: 'osascript', simulated: false }
+        : { success: false, level: clamped, method: 'osascript', simulated: false, error: stderr.slice(0, 150) || `osascript falhou (exitCode=${exitCode})` };
     } else {
-      await execRealCommand(`amixer sset Master ${clamped}%`, 3000);
-      return { success: true, level: clamped, method: 'amixer', simulated: false };
+      const { exitCode, stderr } = await execRealCommand(`amixer sset Master ${clamped}%`, 3000);
+      return exitCode === 0
+        ? { success: true, level: clamped, method: 'amixer', simulated: false }
+        : { success: false, level: clamped, method: 'amixer', simulated: false, error: stderr.slice(0, 150) || `amixer indisponível ou falhou (exitCode=${exitCode})` };
     }
   }
 };
@@ -1316,6 +1351,7 @@ export function installNativeServerTools(registry: {
     pcTakeScreenshotTool,
     pcManageAppsTool,
     openApplicationTool,
+    openBrowserTool,
     pcSimulateInputTool,
     fileSearchAndReadTool,
     fileWriteAndModifyTool,

@@ -55,7 +55,9 @@ export const HomeView: React.FC = () => {
     closeTelemetry,
     clearMessages,
     executeTool,
-    addActivityLog
+    addActivityLog,
+    services,
+    syncServicesFromEnv
   } = useLioraStore();
 
   const [promptInput, setPromptInput] = useState('');
@@ -121,11 +123,22 @@ export const HomeView: React.FC = () => {
     }
   };
 
+  const apiKeyStatusRef = useRef(apiKeyStatus);
+  useEffect(() => {
+    apiKeyStatusRef.current = apiKeyStatus;
+  }, [apiKeyStatus]);
+
   // Helper unificado para contar integrações ativas sem duplicidade
-  const updateActiveIntegrationsCount = (geminiConfigured: boolean, openRouterConfigured: boolean) => {
-    const integrations = integrationsVault.getServices();
+  const updateActiveIntegrationsCount = (
+    geminiConfigured: boolean,
+    openRouterConfigured: boolean,
+    currentServices = services
+  ) => {
+    const sourceServices = currentServices && currentServices.length > 0
+      ? currentServices
+      : integrationsVault.getServices();
     const connectedServiceIds = new Set(
-      integrations.filter((i) => i.status === 'CONNECTED' || i.status === 'DEGRADED').map(i => i.id)
+      sourceServices.filter((i) => i.status === 'CONNECTED' || i.status === 'DEGRADED').map(i => i.id)
     );
     if (geminiConfigured) {
       connectedServiceIds.add('svc-gemini');
@@ -136,7 +149,11 @@ export const HomeView: React.FC = () => {
     setActiveIntegrationsCount(connectedServiceIds.size);
   };
 
-  // Fetch status of keys from backend
+  useEffect(() => {
+    updateActiveIntegrationsCount(apiKeyStatus.geminiConfigured, apiKeyStatus.openRouterConfigured, services);
+  }, [services, apiKeyStatus]);
+
+  // Fetch status of keys from backend and sync into Vault/Store
   const loadApiKeyStatus = async () => {
     try {
       const res = await fetch('/api/env/keys/status', {
@@ -147,13 +164,17 @@ export const HomeView: React.FC = () => {
         const data = await res.json();
         const geminiConfigured = Boolean(data.gemini?.isConfigured);
         const openRouterConfigured = Boolean(data.openrouter?.isConfigured);
-        setApiKeyStatus({
+        const nextStatus = {
           geminiConfigured,
           geminiMasked: data.gemini?.masked || '',
           openRouterConfigured,
           openRouterMasked: data.openrouter?.masked || ''
-        });
-        updateActiveIntegrationsCount(geminiConfigured, openRouterConfigured);
+        };
+        apiKeyStatusRef.current = nextStatus;
+        setApiKeyStatus(nextStatus);
+        integrationsVault.hydrateFromBackendEnv(data);
+        await syncServicesFromEnv();
+        updateActiveIntegrationsCount(geminiConfigured, openRouterConfigured, integrationsVault.getServices());
       }
     } catch {
       // Offline fallback
@@ -168,7 +189,11 @@ export const HomeView: React.FC = () => {
         setCpuUsage(t.cpuUsagePercent);
         setRamUsage(t.memoryUsagePercent);
       }
-      updateActiveIntegrationsCount(apiKeyStatus.geminiConfigured, apiKeyStatus.openRouterConfigured);
+      updateActiveIntegrationsCount(
+        apiKeyStatusRef.current.geminiConfigured,
+        apiKeyStatusRef.current.openRouterConfigured,
+        integrationsVault.getServices()
+      );
     } catch {
       // Fallback
     }
@@ -430,6 +455,7 @@ export const HomeView: React.FC = () => {
         }
         setApiKeySaveStatus(`Sucesso: ${keyName} gravada e ativa no Cofre com sucesso.`);
         await loadApiKeyStatus();
+        await syncServicesFromEnv();
         if (apiKeySaveTimerRef.current) clearTimeout(apiKeySaveTimerRef.current);
         apiKeySaveTimerRef.current = setTimeout(() => setApiKeySaveStatus(null), 4000);
       } else {

@@ -6,6 +6,7 @@
 import { integrationsVault } from './integrationsVault';
 import { toolRegistry } from '../tools/registry';
 import { speechService } from './speechService';
+import { audioGate } from './audioGate';
 import { eventBus } from '../utils/eventBus';
 import { rankMemories, formatMemoryContextBlock } from '../utils/memoryRanker';
 import type { MemoryEntry } from '../types';
@@ -47,7 +48,7 @@ export function pcmBase64ToFloat32(base64: string): Float32Array {
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) {
     float32[i] = int16[i] / 32768.0;
@@ -86,6 +87,7 @@ export class VoiceLiveClient {
    */
   public extendSuppression(ms = 6000) {
     this.suppressAudioUntil = Math.max(this.suppressAudioUntil, Date.now() + ms);
+    audioGate.suppressLiveFor(ms);
   }
 
   // R3 (resiliência): estado de reconexão do canal Live. Quedas breves de rede
@@ -116,6 +118,9 @@ export class VoiceLiveClient {
   constructor(config: VoiceLiveConfig = {}, callbacks: VoiceLiveCallbacks = {}) {
     this.config = config;
     this.callbacks = callbacks;
+    audioGate.registerAbortHandler('live_ws', () => {
+      this.stopAudioPlayback();
+    });
   }
 
   public setCallbacks(callbacks: VoiceLiveCallbacks) {
@@ -160,6 +165,12 @@ export class VoiceLiveClient {
 
   private setStatus(newStatus: VoiceLiveStatus) {
     this.status = newStatus;
+    if (newStatus === 'CONNECTING' || newStatus === 'LISTENING' || newStatus === 'SPEAKING') {
+      audioGate.setLiveSessionActive(true);
+    } else {
+      audioGate.setLiveSessionActive(false);
+      audioGate.releaseChannel('live_ws');
+    }
     this.callbacks.onStatusChange?.(newStatus);
   }
 
@@ -459,17 +470,22 @@ export class VoiceLiveClient {
                 data: payload.data,
                 success: Boolean(payload.success),
                 simulated: Boolean(payload.simulated),
+                requiresConsent: Boolean(payload.requiresConsent),
+                code: payload.code,
                 riskLevel: payload.riskLevel || 'R1',
                 resultSummary: payload.resultSummary,
                 error: payload.error
               });
-              // Sincronização tool→TTS: publica o resultado real para a LIORA
-              // FALAR o que a ferramenta retornou (maps, rotas, notícias, etc).
+              // Sincronização tool→TTS: publica o resultado real apenas quando há erro
+              // explícito ou quando a sessão Live não está falando o retorno.
               eventBus.publish('liora:tool_result', {
                 toolName: payload.toolName,
                 success: Boolean(payload.success),
+                simulated: Boolean(payload.simulated),
+                fromLiveSession: true,
                 resultSummary: payload.resultSummary,
-                resultData: payload.data?.resultData || payload.data
+                resultData: payload.data?.resultData || payload.data,
+                error: payload.error
               });
               break;
 
@@ -628,12 +644,14 @@ export class VoiceLiveClient {
   private playAudioOutputChunk(base64Pcm: string) {
     if (!this.outputAudioCtx) return;
     // Suprime áudio quando um comando determinístico foi interceptado ou a LIORA local já está falando
-    if (Date.now() < this.suppressAudioUntil) return;
-    if (speechService.isSpeaking()) return;
+    if (Date.now() < this.suppressAudioUntil || audioGate.isLiveSuppressed()) return;
+    if (speechService.isSpeaking() && !audioGate.acquireChannel('live_ws')) return;
+    if (!audioGate.acquireChannel('live_ws')) return;
 
     try {
-      this.setStatus('SPEAKING');
       const float32 = pcmBase64ToFloat32(base64Pcm);
+      if (!float32 || float32.length === 0) return;
+      this.setStatus('SPEAKING');
       const audioBuffer = this.outputAudioCtx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
 
@@ -652,8 +670,11 @@ export class VoiceLiveClient {
         if (index !== -1) {
           this.activeSources.splice(index, 1);
         }
-        if (this.activeSources.length === 0 && this.status === 'SPEAKING') {
-          this.setStatus('LISTENING');
+        if (this.activeSources.length === 0) {
+          audioGate.releaseChannel('live_ws');
+          if (this.status === 'SPEAKING') {
+            this.setStatus('LISTENING');
+          }
         }
       };
     } catch (e) {
@@ -675,6 +696,7 @@ export class VoiceLiveClient {
     }
     this.activeSources = [];
     this.nextStartTime = 0;
+    audioGate.releaseChannel('live_ws');
   }
 
   /**
@@ -685,6 +707,7 @@ export class VoiceLiveClient {
     this.stopAudioPlayback();
     // Suprime áudio residual em voo por 6s (evita vazamento de turnos e voz dupla com comandos locais)
     this.suppressAudioUntil = Date.now() + 6000;
+    audioGate.suppressLiveFor(6000);
     if (this.status === 'SPEAKING') {
       this.setStatus('LISTENING');
     }

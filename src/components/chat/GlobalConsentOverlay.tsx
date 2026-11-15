@@ -6,6 +6,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useLioraStore } from '../../store/lioraStore';
 import { speechService } from '../../services/speechService';
+import { voiceLiveClient } from '../../services/voiceLiveClient';
 import { eventBus } from '../../utils/eventBus';
 import { ConsentCard } from './ConsentCard';
 
@@ -39,7 +40,8 @@ export const GlobalConsentOverlay: React.FC = () => {
     const spoken = `Atenção. ${announcement} Diga confirmar para autorizar, ou cancelar para recusar.`;
 
     if (isVoiceActive) {
-      speechService.speak(spoken, () => { }, () => { });
+      voiceLiveClient.extendSuppression(6000);
+      speechService.speak(spoken, () => { }, () => { }, { isDeterministicOverride: true });
     }
 
     // Listener falado: aceita confirmação via canal de transcrição existente

@@ -355,7 +355,7 @@ export class AutomationsEngine {
   public async handleSystemEvent(eventName: string, payload?: any): Promise<AutomationExecutionLog[]> {
     if (this.recursionDepth >= this.maxRecursionDepth) {
       const loopBlockedLog: AutomationExecutionLog = {
-        id: `auto-log-${Date.now()}-${Date.now().toString(36)}`,
+        id: `auto-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         ruleId: 'event-loop',
         ruleName: `Anti-Loop Evento: ${eventName}`,
         timestamp: new Date().toISOString(),
@@ -407,7 +407,7 @@ export class AutomationsEngine {
     const now = new Date();
     const timestamp = now.toISOString();
     const timeHms = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const logId = `auto-log-${Date.now()}-${Date.now().toString(36)}`;
+    const logId = `auto-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     const rule = this.rules.get(ruleId);
     if (!rule) {
@@ -665,7 +665,7 @@ export class AutomationsEngine {
                   }
                   success = true;
                   executionOutput = rawResult;
-                  isSimulated = true;
+                  isSimulated = Boolean(rawResult?.simulated ?? toolDef.isSimulated);
                   return true;
                 } else {
                   const bridgeRes = await this.executeBridge(toolName, parameters, sessionId);
@@ -846,7 +846,7 @@ export class AutomationsEngine {
     const now = new Date();
     const timestamp = now.toISOString();
     const timeHms = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const logId = `auto-log-${Date.now()}-${Date.now().toString(36)}`;
+    const logId = `auto-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     const rule = this.rules.get(ruleId);
     if (!rule) {
@@ -943,7 +943,7 @@ export class AutomationsEngine {
           } else {
             success = true;
           }
-          isSimulated = true;
+          isSimulated = Boolean(executionOutput?.simulated ?? toolDef.isSimulated);
         } else {
           const bridgeRes = await this.executeBridge(toolName, parameters, sessionId);
           success = bridgeRes.success;
@@ -1073,7 +1073,7 @@ export class AutomationsEngine {
 
       for (const item of parsed) {
         if (item && item.name && item.trigger && item.action) {
-          const ruleId = item.id || `auto-${Date.now()}-${Date.now().toString(36)}`;
+          const ruleId = item.id || `auto-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const rule: AutomationRule = {
             ...item,
             id: ruleId,

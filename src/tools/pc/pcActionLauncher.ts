@@ -14,7 +14,14 @@ export interface PcExecutionResult {
   success: boolean;
   message: string;
   error?: string;
+  simulated?: boolean;
+  runtimeMode?: string;
+  requiresConsent?: boolean;
+  consentToolName?: string;
+  consentParams?: Record<string, any>;
 }
+
+const BROWSER_EXECUTABLES = new Set(['chrome', 'msedge', 'opera', 'firefox']);
 
 export async function executePcAction(match: PcCommandMatch): Promise<PcExecutionResult> {
   try {
@@ -25,6 +32,8 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
           await invokeTauri<boolean>('open_application', { target: match.executable });
           return {
             success: true,
+            simulated: false,
+            runtimeMode: 'tauri-desktop',
             message: `Aplicativo '${match.appName}' iniciado com sucesso no computador.`
           };
         } catch {
@@ -32,17 +41,22 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
         }
       }
 
+      // Navegadores usam diretamente open_browser para suportar argumentos de browser e Web Preview cleanly
+      const primaryTool = BROWSER_EXECUTABLES.has(match.executable) ? 'open_browser' : 'open_application';
+      const primaryParams = primaryTool === 'open_browser'
+        ? { browser: match.executable }
+        : { appName: match.executable };
+
       const res = await fetch('/api/tools/execute', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'x-liora-session-id': 'operator-voice-session',
           'x-liora-ui-consent': 'operator-direct-voice'
         },
         body: JSON.stringify({
-          toolName: 'open_application',
-          parameters: {
-            appName: match.executable
-          }
+          toolName: primaryTool,
+          parameters: primaryParams
         })
       });
 
@@ -50,9 +64,23 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
       const isActualSuccess = res.ok && Boolean(data.success) && data.data?.success !== false;
 
       if (isActualSuccess) {
+        const isSimulated = Boolean(data.simulated || data.data?.simulated);
         return {
           success: true,
-          message: `Aplicativo '${match.appName}' iniciado com sucesso no computador.`
+          simulated: isSimulated,
+          runtimeMode: data.data?.runtimeMode,
+          message: data.data?.message || `Aplicativo '${match.appName}' iniciado com sucesso no computador.`
+        };
+      }
+
+      if (res.status === 403 && (data.code === 'REQUIRES_USER_CONFIRMATION' || data.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
+        return {
+          success: false,
+          requiresConsent: true,
+          consentToolName: primaryTool,
+          consentParams: primaryParams,
+          message: data.error || `Abertura de '${match.appName}' requer sua autorização explícita.`,
+          error: data.error || 'Ação bloqueada aguardando consentimento.'
         };
       }
 
@@ -61,6 +89,7 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'x-liora-session-id': 'operator-voice-session',
           'x-liora-ui-consent': 'operator-direct-voice'
         },
         body: JSON.stringify({
@@ -74,13 +103,27 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
 
       const fallbackData = await fallbackRes.json().catch(() => ({}));
       const isFallbackSuccess = fallbackRes.ok && Boolean(fallbackData.success) && fallbackData.data?.success !== false;
+      const isFallbackSimulated = Boolean(fallbackData.simulated || fallbackData.data?.simulated);
+
+      if (fallbackRes.status === 403 && (fallbackData.code === 'REQUIRES_USER_CONFIRMATION' || fallbackData.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
+        return {
+          success: false,
+          requiresConsent: true,
+          consentToolName: 'pc_manage_apps',
+          consentParams: { action: 'launch', appPath: match.executable },
+          message: fallbackData.error || `Abertura de '${match.appName}' requer autorização explícita.`,
+          error: fallbackData.error || 'Ação bloqueada aguardando consentimento.'
+        };
+      }
 
       const errorDetail = fallbackData.data?.message || fallbackData.error || data.data?.message || data.error || 'verifique se o aplicativo está instalado no computador';
 
       return {
         success: isFallbackSuccess,
-        message: isFallbackSuccess 
-          ? `Aplicativo '${match.appName}' iniciado com sucesso.` 
+        simulated: isFallbackSimulated,
+        runtimeMode: fallbackData.data?.runtimeMode,
+        message: isFallbackSuccess
+          ? (fallbackData.data?.message || `Aplicativo '${match.appName}' iniciado com sucesso.`)
           : `Não foi possível iniciar '${match.appName}': ${errorDetail}.`,
         error: isFallbackSuccess ? undefined : errorDetail
       };
@@ -89,16 +132,26 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
     if (match.type === 'system_lock') {
       const res = await fetch('/api/tools/execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-liora-ui-consent': 'operator-direct-voice' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-liora-session-id': 'operator-voice-session',
+          'x-liora-ui-consent': 'operator-direct-voice'
+        },
         body: JSON.stringify({
           toolName: 'system_lock_session',
           parameters: {}
         })
       });
       const data = await res.json().catch(() => ({}));
+      const isActualSuccess = res.ok && Boolean(data.success) && data.data?.success !== false;
+      const isSimulated = Boolean(data.simulated || data.data?.simulated);
+      const errDetail = data.data?.error || data.error || data.data?.message;
       return {
-        success: Boolean(data.success),
-        message: data.success ? 'Sessão do computador bloqueada.' : 'Falha ao bloquear sessão.'
+        success: isActualSuccess,
+        simulated: isSimulated,
+        runtimeMode: data.data?.runtimeMode,
+        message: isActualSuccess ? (data.data?.message || 'Sessão do computador bloqueada.') : (errDetail || 'Falha ao bloquear sessão.'),
+        error: isActualSuccess ? undefined : (errDetail || 'Falha ao bloquear sessão.')
       };
     }
 
@@ -106,16 +159,26 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
       const targetLevel = match.type === 'volume_mute' ? 0 : match.type === 'volume_up' ? 80 : 30;
       const res = await fetch('/api/tools/execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-liora-ui-consent': 'operator-direct-voice' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-liora-session-id': 'operator-voice-session',
+          'x-liora-ui-consent': 'operator-direct-voice'
+        },
         body: JSON.stringify({
           toolName: 'system_set_volume',
           parameters: { level: targetLevel }
         })
       });
       const data = await res.json().catch(() => ({}));
+      const isActualSuccess = res.ok && Boolean(data.success) && data.data?.success !== false;
+      const isSimulated = Boolean(data.simulated || data.data?.simulated);
+      const errDetail = data.data?.error || data.error || data.data?.message;
       return {
-        success: Boolean(data.success),
-        message: data.success ? `Volume ajustado para ${targetLevel}%.` : 'Falha ao ajustar volume.'
+        success: isActualSuccess,
+        simulated: isSimulated,
+        runtimeMode: data.data?.runtimeMode,
+        message: isActualSuccess ? (data.data?.message || `Volume ajustado para ${targetLevel}%.`) : (errDetail || 'Falha ao ajustar volume.'),
+        error: isActualSuccess ? undefined : (errDetail || 'Falha ao ajustar volume.')
       };
     }
 

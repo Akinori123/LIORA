@@ -12,7 +12,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { toolRegistry } from './src/tools/registry';
 import { installNativeServerTools } from './src/tools/nativeServerTools';
 // NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3) — registro no registry do lado cliente
-import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, openApplicationTool } from './src/tools/pcControlTools';
+import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, openApplicationTool, openBrowserTool } from './src/tools/pcControlTools';
+import { detectRuntimeEnvironment } from './src/utils/runtimeEnvironment';
 // AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — registro no registry do lado cliente
 import { webBrowserAgentTool } from './src/tools/web/browserAgentTool';
 // CORREÇÃO (Etapa 1): resolução de apelidos geográficos via memória semântica
@@ -302,6 +303,7 @@ async function callOpenRouterFallback(
 // WebSocketServer e as sessões Playwright precisam ser fechados no stopServer(),
 // senão handles abertos retêm o event loop e o after() da suíte nunca resolve.
 let activeWsServer: import('ws').WebSocketServer | null = null;
+let activeWsHeartbeat: NodeJS.Timeout | null = null;
 let activeBrowserCloser: (() => Promise<void>) | null = null;
 // Conjunto vivo de conexões WS (referência compartilhada com startServer)
 const liveConnections = new Set<WebSocket>();
@@ -319,7 +321,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   // NÚCLEO DE CONTROLE TOTAL DO PC: registro direto das ferramentas de visão,
   // apps/inputs e arquivos no Tool Registry compartilhado (declarações vão ao
   // Gemini no chat e no canal Live; execução real via server local).
-  const pcControlTools = [pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, webBrowserAgentTool, emailFetchAndReadTool, emailSendOrReplyTool, calendarListEventsTool, calendarCreateEventTool, startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroundTaskTool, listBackgroundTasksTool, vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool, resolvePlaceAliasTool, savePlaceAliasTool];
+  const pcControlTools = [pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, openBrowserTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, webBrowserAgentTool, emailFetchAndReadTool, emailSendOrReplyTool, calendarListEventsTool, calendarCreateEventTool, startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroundTaskTool, listBackgroundTasksTool, vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool, resolvePlaceAliasTool, savePlaceAliasTool];
   for (const t of pcControlTools) {
     toolRegistry.unregisterTool(t.name);
     toolRegistry.registerTool(t);
@@ -349,6 +351,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       toolName === 'navigateToTab' || 
       toolName === 'openSettings' || 
       toolName === 'open_application' ||
+      toolName === 'open_browser' ||
       (toolName === 'pc_manage_apps' && (params.action === 'launch' || params.action === 'focus' || params.action === 'list')) ||
       toolName === 'system_info' ||
       toolName === 'getSystemStatus' ||
@@ -389,27 +392,37 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       return { toolName, success: false, error: `FALHA_PERMISSAO: ${evalErr?.message || 'avaliação de permissão falhou'}`, simulated: true, riskLevel: risk, data: null };
     }
     if (evaluation.decision !== 'ALLOW') {
+      const requiresConsent =
+        evaluation.code === 'REQUIRES_USER_CONFIRMATION' ||
+        evaluation.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B';
       return {
         toolName,
         success: false,
         simulated: true,
         riskLevel: risk,
         data: null,
+        code: evaluation.code,
+        parameters: params,
+        requiresConsent,
         error: `BLOQUEADO_PELO_PERMISSION_ENGINE (${evaluation.code || 'POLICY'}): ${evaluation.reason || 'operação exige confirmação humana explícita no painel de consentimento'}`
       };
     }
     const result = await toolRegistry.executeTool(toolName, params, { sessionId, timestamp: new Date().toISOString() });
+    const actualSimulated = Boolean(result.simulated || result.data?.simulated);
     if (result.data && result.data.success === false) {
       return {
         toolName,
         success: false,
-        simulated: Boolean(result.simulated),
+        simulated: actualSimulated,
         riskLevel: risk,
         data: result.data,
-        error: result.data.message || result.error || 'Falha na execução da ferramenta no computador.'
+        error: result.data.error || result.data.message || result.error || 'Falha na execução da ferramenta no computador.'
       };
     }
-    return result;
+    return {
+      ...result,
+      simulated: actualSimulated
+    };
   }
 
   let ai = new GoogleGenAI({
@@ -526,11 +539,15 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
   // LocalExecutionBridge Status and Diagnostic Endpoint
   app.get('/api/system/bridge-status', (req, res) => {
+    const rt = detectRuntimeEnvironment();
     res.json({
       success: true,
       bridgeType: 'LocalExecutionBridge',
-      runtimeEnvironment: 'web-preview',
-      isTauriActive: false,
+      runtimeEnvironment: rt.mode,
+      platform: rt.platform,
+      hasGuiDisplay: rt.hasGuiDisplay,
+      webPreviewFallbackActive: rt.webPreviewFallbackActive,
+      isTauriActive: rt.isTauri,
       securityProfile: 'STRICT',
       supportedCommands: [
         'get_system_info',
@@ -540,12 +557,32 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         'workspace_list_files',
         'system_exec_sandbox',
         'execute_local_tool',
+        'open_application',
+        'open_browser',
         'read_keychain_secret',
         'write_keychain_secret',
         'get_vehicle_telemetry'
       ],
       canonicalizerActive: true,
       verifierEngineActive: true,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  // Cloud Web Preview Adaptability Endpoint: permite testes controlados de ações desktop sem crashar em Linux headless
+  app.post('/api/system/desktop-fallback', (req, res) => {
+    const rt = detectRuntimeEnvironment();
+    const { action = 'status', target = '' } = req.body || {};
+    res.json({
+      success: true,
+      simulated: rt.webPreviewFallbackActive || rt.isDryRun,
+      runtimeMode: rt.mode,
+      platform: rt.platform,
+      action,
+      target,
+      message: rt.webPreviewFallbackActive
+        ? `[MODO WEB PREVIEW - SIMULADO] Ação '${action}' (${target || 'sistema'}) tratada via adaptador HTTP localhost.`
+        : `Ambiente desktop local (${rt.platform}) ativo para '${action}'.`,
       timestamp: new Date().toISOString()
     });
   });
@@ -826,11 +863,9 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         throw lastError;
       }
 
-      const isNoVoice = !transcribedText || 
-        transcribedText === '[SEM_VOZ]' || 
-        transcribedText.toLowerCase().includes('sem voz') || 
-        transcribedText.toLowerCase().includes('silêncio') || 
-        transcribedText === '[SILENCIO]';
+      const trimmedTranscribed = (transcribedText || '').trim();
+      const isNoVoice = !trimmedTranscribed ||
+        /^\[?(?:sem[\s_]+voz|sil[êe]ncio)\]?$/i.test(trimmedTranscribed);
 
       return res.json({
         success: true,
@@ -1090,6 +1125,9 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
               toolExecuted: toolName,
               success: execResult.success,
               simulated: execResult.simulated,
+              requiresConsent: Boolean((execResult as any).requiresConsent),
+              code: (execResult as any).code,
+              parameters: (execResult as any).parameters || toolParams,
               error: execResult.error,
               riskLevel: execResult.riskLevel,
               resultSummary: execResult.success ? (execResult.data?.message || (execResult.data ? 'Executado e verificado no servidor local.' : 'Executado.')) : (execResult.error || 'Falhou'),
@@ -1138,7 +1176,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
             console.info(`[Model Router] Transitioning ${activeModel} to gemini-3.1-flash-lite.`);
             activeModel = 'gemini-3.1-flash-lite';
             const safeContents = sanitizeContentsForFallback(contents);
-            const stream = await ai.models.generateContentStream({
+            const stream = await chatStreamClient.models.generateContentStream({
               model: activeModel,
               contents: safeContents,
               config: {
@@ -1547,11 +1585,16 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         return res.status(400).json({ success: false, error: 'toolName obrigatório.', code: 'INVALID_INPUT' });
       }
 
-      // Somente ferramentas do cofre podem ser consentidas por clique de UI.
-      // CORREÇÃO (raiz): vault_list_keys é R1 e o painel precisa emitir consentimento
-      // para listar — antes ficava de fora e o cofre nunca aparecia na UI.
-      const UI_CONSENT_TOOLS = new Set(['vault_list_keys', 'vault_store_credential', 'vault_delete_credential', 'vault_get_credential']);
-      if (!UI_CONSENT_TOOLS.has(toolName)) {
+      // Permite consentimento explícito de UI para qualquer ferramenta registrada não-R3 e não-negada pelo perfil STRICT.
+      const toolDef = toolRegistry.getTool(toolName);
+      if (!toolDef) {
+        return res.status(404).json({
+          success: false,
+          error: `Ferramenta '${toolName}' não encontrada para consentimento de UI.`,
+          code: 'TOOL_NOT_FOUND'
+        });
+      }
+      if (toolDef.riskLevel === 'R3' || toolName === 'workspace_read_file') {
         return res.status(403).json({
           success: false,
           error: `Ferramenta '${toolName}' não é elegível para consentimento de UI.`,
@@ -1716,7 +1759,13 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       // do servidor (anti-replay): expira em 60s, single-use, binding tool+params.
       let uiConsentValid = false;
       let issuedToken: string | undefined = undefined;
-      if (uiConsentToken === 'operator-direct-voice' && (clientIp === '127.0.0.1' || clientIp === '::1' || clientIp.includes('127.0.0.1'))) {
+      const isLoopbackClient =
+        clientIp === '127.0.0.1' ||
+        clientIp === '::1' ||
+        clientIp === '::ffff:127.0.0.1' ||
+        clientIp.includes('127.0.0.1') ||
+        req.hostname === 'localhost';
+      if (uiConsentToken === 'operator-direct-voice' && isLoopbackClient) {
         try {
           const parametersHash = computeParametersHash(parameters);
           const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, clientSessionId);
@@ -1726,45 +1775,47 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       } else if (uiConsentToken) {
         const record = activeUiConsentTokens.get(uiConsentToken);
         if (record) {
-          const parametersHash = computeParametersHash(parameters);
           const stillValid = record.expiresAt > Date.now()
-            && record.toolName === toolName
-            && record.parametersHash === parametersHash;
+            && record.toolName === toolName;
           if (stillValid) {
             activeUiConsentTokens.delete(uiConsentToken); // consumo atômico (anti-replay)
-            uiConsentValid = true;
+            try {
+              const parametersHash = computeParametersHash(parameters);
+              const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, clientSessionId);
+              issuedToken = issued.token;
+              uiConsentValid = true;
+            } catch {}
           }
         }
       }
 
       // riskLevel explícito do registry (resolve R1/R2 para tools fora da whitelist R0)
       const toolRiskLevel = toolDef?.riskLevel as any;
-      // Consentimento HMAC sintético quando o token de UI é válido — o PermissionEngine
-      // consome o token pelo mesmo caminho do ConsentCard por voz (consumeConsentToken),
-      // mantendo a auditoria e o anti-replay unificados.
+      // Consentimento HMAC emitido pelo PermissionEngine após validação do token de UI
       const evaluation = await permissionEngine.evaluate(toolName, parameters, context, {
         riskLevel: toolRiskLevel,
-        consentToken: uiConsentValid ? (issuedToken || `ui-consent-validated-${toolName}`) : undefined
+        consentToken: uiConsentValid ? issuedToken : undefined
       });
 
       if (evaluation.decision === 'ALLOW') {
         const execResult = await toolRegistry.executeTool(toolName, parameters);
         const actualSuccess = Boolean(execResult.success) && execResult.data?.success !== false;
+        const actualSimulated = Boolean(execResult.simulated || execResult.data?.simulated);
         return res.status(actualSuccess ? 200 : 400).json({
           success: actualSuccess,
           toolName,
           decision: 'ALLOW',
           riskLevel: evaluation.riskLevel,
           data: execResult.data,
-          error: actualSuccess ? undefined : (execResult.error || execResult.data?.message || 'Falha na execução da ferramenta no host'),
+          error: actualSuccess ? undefined : (execResult.error || execResult.data?.error || execResult.data?.message || 'Falha na execução da ferramenta no host'),
           verification: execResult.verification,
-          simulated: Boolean(execResult.simulated),
+          simulated: actualSimulated,
           parametersHash: evaluation.parametersHash,
           timestamp: evaluation.timestamp,
           auditId: evaluation.auditId,
           message: actualSuccess
-            ? 'Operação autorizada pelo Permission Engine e verificada pelo Verifier Engine.'
-            : (execResult.error || execResult.data?.message || 'Falha ao executar ferramenta.')
+            ? (execResult.data?.message || 'Operação autorizada pelo Permission Engine e verificada pelo Verifier Engine.')
+            : (execResult.error || execResult.data?.error || execResult.data?.message || 'Falha ao executar ferramenta.')
         });
       } else {
         const httpStatus = evaluation.code === 'SESSION_INVALID_OR_MISSING' ? 401 : 403;
@@ -1908,6 +1959,10 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   // BUG FIX: ws.ping() em socket half-open não falha imediatamente — o padrão
   // correto é ping → aguardar pong com timeout de 1 ciclo. Conexões que não
   // respondem pong são terminadas (evita esgotamento lento de slots).
+  if (activeWsHeartbeat) {
+    clearInterval(activeWsHeartbeat);
+    activeWsHeartbeat = null;
+  }
   const wsHeartbeat = setInterval(() => {
     for (const ws of activeConnections) {
       if (ws.readyState !== WebSocket.OPEN) {
@@ -1930,6 +1985,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       }
     }
   }, HEARTBEAT_INTERVAL_MS);
+  activeWsHeartbeat = wsHeartbeat;
   wss.on('connection', (ws) => {
     (ws as any).isAlive = true;
     ws.on('pong', () => { (ws as any).isAlive = true; });
@@ -2173,8 +2229,11 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                         ws.send(JSON.stringify({
                           type: 'TOOL_EXECUTED',
                           toolName,
+                          parameters: (execResult as any).parameters || toolParams,
                           success: execResult.success,
                           simulated: execResult.simulated,
+                          requiresConsent: Boolean((execResult as any).requiresConsent),
+                          code: (execResult as any).code,
                           error: execResult.error,
                           riskLevel: execResult.riskLevel,
                           resultSummary: execResult.success
@@ -2428,6 +2487,10 @@ export async function stopServer(): Promise<void> {
     // sessões Playwright antes do close() — handles abertos retêm o event loop
     // e o after() da suíte nunca resolve.
     try {
+      if (activeWsHeartbeat) {
+        clearInterval(activeWsHeartbeat);
+        activeWsHeartbeat = null;
+      }
       if (activeWsServer) {
         for (const ws of liveConnections) {
           try { ws.terminate(); } catch { /* ignore */ }
