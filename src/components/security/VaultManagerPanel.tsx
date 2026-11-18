@@ -13,8 +13,14 @@
  *  - Indicador de integridade do cofre
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { KeyRound, Plus, Trash2, ShieldCheck, ShieldAlert, Eye, EyeOff, RefreshCw, X } from 'lucide-react';
+
+function formatSafeDate(iso?: string): string {
+  if (!iso) return 'N/A';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? 'N/A' : d.toLocaleDateString('pt-BR');
+}
 
 interface VaultKeyEntry {
   key: string;
@@ -36,38 +42,13 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
   const [showValue, setShowValue] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const isMountedRef = useRef(true);
 
-  const loadKeys = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      // CORREÇÃO (raiz): vault_list_keys é R1 — o PermissionEngine EXIGE consentimento
-      // para qualquer R1. Sem o token de UI, o servidor respondia DENY e o cofre
-      // aparecia sempre vazio. O clique de recarregar/abrir o painel é o consentimento.
-      const token = await getUiConsentToken('vault_list_keys', {});
-      const res = await fetch('/api/tools/execute', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'x-liora-ui-consent': token } : {})
-        },
-        body: JSON.stringify({ toolName: 'vault_list_keys', parameters: {} })
-      });
-      const data = await res.json();
-      // BUG FIX (raiz): /api/tools/execute retorna o payload da ferramenta em
-      // data.data (ex: { success, data: { keys, count } }), não em data.keys.
-      // A UI lia sempre [] e o painel mostrava o cofre vazio mesmo com credenciais.
-      const payload = data?.data ?? data;
-      if (data.success) {
-        setKeys(payload?.keys || []);
-      } else {
-        setError(data.error || payload?.error || 'Falha ao listar o cofre.');
-      }
-    } catch (err: any) {
-      setError(err?.message || 'Falha de rede ao acessar o cofre.');
-    } finally {
-      setIsLoading(false);
-    }
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
   /**
@@ -89,6 +70,38 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
     }
   }, []);
 
+  const loadKeys = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const token = await getUiConsentToken('vault_list_keys', {});
+      const res = await fetch('/api/tools/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'x-liora-ui-consent': token } : {})
+        },
+        body: JSON.stringify({ toolName: 'vault_list_keys', parameters: {} })
+      });
+      const data = await res.json();
+      if (!isMountedRef.current) return;
+      const payload = data?.data ?? data;
+      if (data.success) {
+        setKeys(payload?.keys || []);
+      } else {
+        setError(data.error || payload?.error || 'Falha ao listar o cofre.');
+      }
+    } catch (err: any) {
+      if (isMountedRef.current) {
+        setError(err?.message || 'Falha de rede ao acessar o cofre.');
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+    }
+  }, [getUiConsentToken]);
+
   useEffect(() => { void loadKeys(); }, [loadKeys]);
 
   const handleStore = async () => {
@@ -99,6 +112,7 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
     try {
       const parameters = { key: newKeyName.trim(), value: newKeyValue, description: 'Adicionado pela UI do cofre' };
       const token = await getUiConsentToken('vault_store_credential', parameters);
+      if (!isMountedRef.current) return;
       if (!token) {
         setFeedback('Falha ao emitir consentimento de segurança. Tente novamente.');
         return;
@@ -109,6 +123,7 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         body: JSON.stringify({ toolName: 'vault_store_credential', parameters })
       });
       const data = await res.json();
+      if (!isMountedRef.current) return;
       if (data.success) {
         setFeedback(`Credencial '${newKeyName.trim()}' armazenada com sucesso.`);
         setNewKeyName('');
@@ -119,13 +134,16 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         setFeedback(data.error || 'Falha ao armazenar.');
       }
     } catch (err: any) {
-      setFeedback(err?.message || 'Falha de rede.');
+      if (isMountedRef.current) {
+        setFeedback(err?.message || 'Falha de rede.');
+      }
     }
   };
 
   const handleDelete = async (key: string) => {
     try {
       const token = await getUiConsentToken('vault_delete_credential', { key });
+      if (!isMountedRef.current) return;
       if (!token) {
         setFeedback('Falha ao emitir consentimento de segurança.');
         return;
@@ -136,19 +154,20 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         body: JSON.stringify({ toolName: 'vault_delete_credential', parameters: { key } })
       });
       const data = await res.json();
+      if (!isMountedRef.current) return;
       if (data.success) {
         setFeedback(`Credencial '${key}' removida do cofre.`);
         setConfirmDelete(null);
         await loadKeys();
       } else {
-        // CORREÇÃO: em caso de falha, sai do modo confirmação — antes o botão
-        // 'Confirmar' ficava preso na entrada mesmo após erro/expiração do token.
         setConfirmDelete(null);
         setFeedback(data.error || 'Falha ao remover.');
       }
     } catch (err: any) {
-      setConfirmDelete(null);
-      setFeedback(err?.message || 'Falha de rede.');
+      if (isMountedRef.current) {
+        setConfirmDelete(null);
+        setFeedback(err?.message || 'Falha de rede.');
+      }
     }
   };
 
@@ -167,7 +186,9 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         </div>
         <div className="flex items-center gap-1.5">
           <button
+            type="button"
             onClick={() => void loadKeys()}
+            aria-label="Recarregar chaves do cofre"
             className="p-1.5 rounded-lg text-[#888888] hover:text-white hover:bg-[#1E1E1E] transition-colors"
             title="Recarregar"
           >
@@ -175,7 +196,9 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
           </button>
           {onClose && (
             <button
+              type="button"
               onClick={onClose}
+              aria-label="Fechar painel do cofre"
               className="p-1.5 rounded-lg text-[#888888] hover:text-white hover:bg-[#1E1E1E] transition-colors"
               title="Fechar"
             >
@@ -218,18 +241,20 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
                   <div className="text-[10px] text-[#777777] truncate">{entry.description}</div>
                 )}
                 <div className="text-[10px] text-[#555555] font-mono">
-                  atualizada: {new Date(entry.updatedAt).toLocaleDateString('pt-BR')}
+                  atualizada: {formatSafeDate(entry.updatedAt)}
                 </div>
               </div>
               {confirmDelete === entry.key ? (
                 <div className="flex items-center gap-1 shrink-0">
                   <button
+                    type="button"
                     onClick={() => void handleDelete(entry.key)}
                     className="px-2 py-1 rounded text-[10px] font-bold bg-red-600 hover:bg-red-500 text-white"
                   >
                     Confirmar
                   </button>
                   <button
+                    type="button"
                     onClick={() => setConfirmDelete(null)}
                     className="px-2 py-1 rounded text-[10px] text-[#888888] hover:text-white"
                   >
@@ -238,7 +263,9 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
                 </div>
               ) : (
                 <button
+                  type="button"
                   onClick={() => setConfirmDelete(entry.key)}
+                  aria-label={`Remover credencial ${entry.key}`}
                   className="p-1.5 rounded text-[#666666] hover:text-red-400 hover:bg-red-950/30 transition-colors shrink-0"
                   title="Remover do cofre"
                 >
@@ -261,6 +288,7 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
           value={newKeyName}
           onChange={(e) => setNewKeyName(e.target.value)}
           placeholder="Identificador (ex: smtp.main)"
+          aria-label="Identificador da credencial"
           className="w-full bg-[#161616] border border-[#2B2B2B] rounded-lg px-3 py-1.5 text-xs text-white placeholder-[#555555] focus:outline-none focus:border-[var(--accent-primary)]"
         />
         <div className="relative">
@@ -269,10 +297,13 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
             value={newKeyValue}
             onChange={(e) => setNewKeyValue(e.target.value)}
             placeholder="Valor do segredo"
+            aria-label="Valor do segredo"
             className="w-full bg-[#161616] border border-[#2B2B2B] rounded-lg px-3 py-1.5 pr-9 text-xs text-white placeholder-[#555555] focus:outline-none focus:border-[var(--accent-primary)]"
           />
           <button
+            type="button"
             onClick={() => setShowValue(!showValue)}
+            aria-label={showValue ? 'Ocultar valor do segredo' : 'Mostrar valor do segredo'}
             className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[#666666] hover:text-white"
             title={showValue ? 'Ocultar' : 'Mostrar'}
           >
@@ -280,6 +311,7 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
           </button>
         </div>
         <button
+          type="button"
           onClick={() => void handleStore()}
           disabled={!newKeyName.trim() || !newKeyValue.trim()}
           className="w-full py-1.5 rounded-lg text-xs font-bold text-white transition-all disabled:opacity-40"

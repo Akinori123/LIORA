@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { 
   Zap, 
@@ -40,7 +41,21 @@ export const AutomationsView: React.FC = () => {
     importAutomationsJson,
     shieldModeActive,
     toggleShieldMode
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow(state => ({
+      automations: state.automations,
+      automationLogs: state.automationLogs,
+      toggleAutomation: state.toggleAutomation,
+      triggerAutomationNow: state.triggerAutomationNow,
+      approveAutomationConsent: state.approveAutomationConsent,
+      addAutomation: state.addAutomation,
+      deleteAutomation: state.deleteAutomation,
+      exportAutomationsJson: state.exportAutomationsJson,
+      importAutomationsJson: state.importAutomationsJson,
+      shieldModeActive: state.shieldModeActive,
+      toggleShieldMode: state.toggleShieldMode
+    }))
+  );
 
   const [executingRuleId, setExecutingRuleId] = useState<string | null>(null);
   const [approvingRuleId, setApprovingRuleId] = useState<string | null>(null);
@@ -48,15 +63,21 @@ export const AutomationsView: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [importStatus, setImportStatus] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef(true);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const importStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const exportRevokeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   React.useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
       if (importStatusTimerRef.current) clearTimeout(importStatusTimerRef.current);
+      if (exportRevokeTimerRef.current) clearTimeout(exportRevokeTimerRef.current);
     };
   }, []);
 
@@ -67,12 +88,26 @@ export const AutomationsView: React.FC = () => {
   const [triggerConfigValue, setTriggerConfigValue] = useState('15');
   const [selectedTool, setSelectedTool] = useState('system_info');
   const [expectedRisk, setExpectedRisk] = useState<ToolRiskLevel>('R0');
+  const [toolParams, setToolParams] = useState<{ variableName: string; filePath: string; content: string; command: string }>({
+    variableName: 'NODE_ENV',
+    filePath: 'docs/ROADMAP.md',
+    content: '',
+    command: 'git status'
+  });
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setFormError(null);
+    setName('');
+    setDescription('');
+  };
 
   const handleExecute = async (ruleId: string) => {
     setExecutingRuleId(ruleId);
     setFeedbackMessage(null);
     try {
       const res = await triggerAutomationNow(ruleId);
+      if (!isMountedRef.current) return;
       if (res) {
         if (res.status === 'SUCCESS') {
           setFeedbackMessage({
@@ -107,17 +142,21 @@ export const AutomationsView: React.FC = () => {
         }
       }
     } catch {
-      setFeedbackMessage({
-        ruleId,
-        text: 'Erro ao despachar execução da regra.',
-        type: 'error'
-      });
+      if (isMountedRef.current) {
+        setFeedbackMessage({
+          ruleId,
+          text: 'Erro ao despachar execução da regra.',
+          type: 'error'
+        });
+      }
     } finally {
-      setExecutingRuleId(null);
-      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
-      feedbackTimerRef.current = setTimeout(() => {
-        setFeedbackMessage(null);
-      }, 6000);
+      if (isMountedRef.current) {
+        setExecutingRuleId(null);
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setFeedbackMessage(null);
+        }, 6000);
+      }
     }
   };
 
@@ -126,6 +165,7 @@ export const AutomationsView: React.FC = () => {
     setFeedbackMessage(null);
     try {
       const res = await approveAutomationConsent(ruleId);
+      if (!isMountedRef.current) return;
       if (res) {
         if (res.status === 'SUCCESS') {
           setFeedbackMessage({
@@ -142,17 +182,21 @@ export const AutomationsView: React.FC = () => {
         }
       }
     } catch {
-      setFeedbackMessage({
-        ruleId,
-        text: 'Erro ao aprovar consentimento na interface.',
-        type: 'error'
-      });
+      if (isMountedRef.current) {
+        setFeedbackMessage({
+          ruleId,
+          text: 'Erro ao aprovar consentimento na interface.',
+          type: 'error'
+        });
+      }
     } finally {
-      setApprovingRuleId(null);
-      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
-      feedbackTimerRef.current = setTimeout(() => {
-        setFeedbackMessage(null);
-      }, 6000);
+      if (isMountedRef.current) {
+        setApprovingRuleId(null);
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setFeedbackMessage(null);
+        }, 6000);
+      }
     }
   };
 
@@ -167,7 +211,11 @@ export const AutomationsView: React.FC = () => {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      if (exportRevokeTimerRef.current) clearTimeout(exportRevokeTimerRef.current);
+      exportRevokeTimerRef.current = setTimeout(() => {
+        URL.revokeObjectURL(url);
+        exportRevokeTimerRef.current = null;
+      }, 1000);
     } catch (err: any) {
       notificationSystem.notify('Erro na Exportação', `Falha ao exportar regras: ${err?.message}`, 'error');
     }
@@ -179,44 +227,104 @@ export const AutomationsView: React.FC = () => {
 
     const reader = new FileReader();
     reader.onload = (event) => {
+      if (!isMountedRef.current) return;
       try {
         const text = event.target?.result as string;
         const res = importAutomationsJson(text, 'merge');
+        if (!isMountedRef.current) return;
         if (res.success) {
           setImportStatus({ text: `${res.count} regras importadas com sucesso!`, type: 'success' });
         } else {
           setImportStatus({ text: res.error || 'Erro ao importar regras.', type: 'error' });
         }
       } catch (err: any) {
-        setImportStatus({ text: err?.message || 'Arquivo JSON inválido.', type: 'error' });
+        if (isMountedRef.current) {
+          setImportStatus({ text: err?.message || 'Arquivo JSON inválido.', type: 'error' });
+        }
       } finally {
         if (fileInputRef.current) fileInputRef.current.value = '';
+        if (isMountedRef.current) {
+          if (importStatusTimerRef.current) clearTimeout(importStatusTimerRef.current);
+          importStatusTimerRef.current = setTimeout(() => {
+            if (isMountedRef.current) setImportStatus(null);
+          }, 5000);
+        }
+      }
+    };
+    reader.onerror = () => {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (isMountedRef.current) {
+        setImportStatus({ text: 'Erro ao ler o arquivo JSON selecionado.', type: 'error' });
         if (importStatusTimerRef.current) clearTimeout(importStatusTimerRef.current);
-        importStatusTimerRef.current = setTimeout(() => setImportStatus(null), 5000);
+        importStatusTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setImportStatus(null);
+        }, 5000);
       }
     };
     reader.readAsText(file);
   };
 
+  const handleTriggerTypeChange = (nextType: AutomationTriggerType) => {
+    setTriggerType(nextType);
+    setFormError(null);
+    if (nextType === 'TIME_INTERVAL') setTriggerConfigValue('15');
+    else if (nextType === 'TIME_OF_DAY') setTriggerConfigValue('08:00');
+    else if (nextType === 'SYSTEM_EVENT') setTriggerConfigValue(SYSTEM_EVENTS.DEVICE_STATUS_CHANGED);
+    else setTriggerConfigValue('');
+  };
+
   const handleCreateAutomation = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim()) {
+      setFormError('Informe um nome para a regra de automação.');
+      return;
+    }
 
     let humanReadable = '';
     const config: any = {};
 
     if (triggerType === 'TIME_INTERVAL') {
-      const minutes = parseInt(triggerConfigValue, 10) || 15;
+      const trimmed = triggerConfigValue.trim();
+      if (!/^\d+$/.test(trimmed)) {
+        setFormError('Informe um intervalo numérico válido entre 1 e 1440 minutos.');
+        return;
+      }
+      const minutes = Number(trimmed);
+      if (minutes < 1 || minutes > 1440) {
+        setFormError('O intervalo em minutos deve estar entre 1 e 1440.');
+        return;
+      }
       config.intervalMinutes = minutes;
       humanReadable = `A cada ${minutes} min`;
     } else if (triggerType === 'TIME_OF_DAY') {
-      config.timeOfDay = triggerConfigValue || '08:00';
+      const trimmed = triggerConfigValue.trim();
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(trimmed)) {
+        setFormError('Informe um horário válido no formato HH:MM (ex: 08:30).');
+        return;
+      }
+      config.timeOfDay = trimmed;
       humanReadable = `Todos os dias às ${config.timeOfDay}`;
     } else if (triggerType === 'SYSTEM_EVENT') {
-      config.eventName = triggerConfigValue.trim() || SYSTEM_EVENTS.DEVICE_STATUS_CHANGED;
+      const evName = triggerConfigValue.trim();
+      if (!evName) {
+        setFormError('Informe o nome do evento do sistema.');
+        return;
+      }
+      config.eventName = evName;
       humanReadable = `Ao emitir evento '${config.eventName}'`;
     } else {
       humanReadable = 'Acionamento sob demanda (Manual)';
+    }
+
+    let actionParams: Record<string, any> = {};
+    if (selectedTool === 'system_read_env_safe') {
+      actionParams = { variableName: toolParams.variableName.trim() || 'NODE_ENV' };
+    } else if (selectedTool === 'workspace_read_file') {
+      actionParams = { filePath: toolParams.filePath.trim() || 'docs/ROADMAP.md', maxLines: 50 };
+    } else if (selectedTool === 'workspace_write_file') {
+      actionParams = { filePath: toolParams.filePath.trim() || 'workspace/automacao.txt', content: toolParams.content || 'Registrado pela LIORA.' };
+    } else if (selectedTool === 'system_exec_sandbox') {
+      actionParams = { command: toolParams.command.trim() || 'git status', timeoutMs: 5000 };
     }
 
     addAutomation({
@@ -231,15 +339,13 @@ export const AutomationsView: React.FC = () => {
       action: {
         type: 'EXECUTE_TOOL',
         toolName: selectedTool,
-        parameters: {},
+        parameters: actionParams,
         description: `Executar ferramenta ${selectedTool}`,
         expectedRiskLevel: expectedRisk
       }
     });
 
-    setIsModalOpen(false);
-    setName('');
-    setDescription('');
+    closeModal();
   };
 
   return (
@@ -262,6 +368,7 @@ export const AutomationsView: React.FC = () => {
         <div className="flex items-center flex-wrap gap-2.5">
           {/* Shield Mode Toggle */}
           <button
+            type="button"
             onClick={toggleShieldMode}
             className={`px-3 py-1.5 rounded-lg text-xs font-mono flex items-center gap-2 border transition-colors ${
               shieldModeActive 
@@ -276,6 +383,7 @@ export const AutomationsView: React.FC = () => {
 
           {/* Export / Import */}
           <button
+            type="button"
             onClick={handleExport}
             className="px-3 py-1.5 bg-[#171717] hover:bg-[#222222] border border-[#2E2E2E] hover:border-[#444444] rounded-lg text-xs text-[#CCCCCC] hover:text-white flex items-center gap-1.5 transition-colors font-mono"
             title="Exportar todas as regras para backup JSON"
@@ -297,8 +405,12 @@ export const AutomationsView: React.FC = () => {
           </label>
 
           {/* Nova Automação */}
-          <button 
-            onClick={() => setIsModalOpen(true)}
+          <button
+            type="button"
+            onClick={() => {
+              setFormError(null);
+              setIsModalOpen(true);
+            }}
             className="px-4 py-1.5 bg-[var(--accent-primary)] hover:opacity-90 text-white text-xs font-semibold rounded-lg flex items-center gap-2 transition-all shadow-md shadow-[var(--accent-glow)]"
           >
             <Plus className="w-4 h-4" />
@@ -374,7 +486,7 @@ export const AutomationsView: React.FC = () => {
                           <span className={`flex items-center gap-1 font-mono text-[11px] ${
                             auto.lastExecutionStatus === 'SUCCESS' ? 'text-emerald-400' :
                             auto.lastExecutionStatus === 'WAITING_CONSENT' ? 'text-amber-400 font-bold' :
-                            auto.lastExecutionStatus === 'SKIPPED_BUSY' ? 'text-purple-400' :
+                            auto.lastExecutionStatus === 'SKIPPED_BUSY' ? 'text-amber-400' :
                             'text-red-400'
                           }`}>
                             {auto.lastExecutionStatus === 'SUCCESS' && <CheckCircle2 className="w-3 h-3" />}
@@ -394,6 +506,7 @@ export const AutomationsView: React.FC = () => {
                   {/* Botão de aprovação direta de R1 quando WAITING_CONSENT */}
                   {isWaitingConsent && (
                     <button
+                      type="button"
                       onClick={() => handleApproveInline(auto.id)}
                       disabled={isApproving}
                       className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold font-mono rounded-lg flex items-center gap-1.5 transition-colors shadow-md shadow-amber-500/20 disabled:opacity-50"
@@ -404,16 +517,19 @@ export const AutomationsView: React.FC = () => {
                     </button>
                   )}
 
-                  <button 
+                  <button
+                    type="button"
                     onClick={() => handleExecute(auto.id)}
                     disabled={isExecuting}
                     className="p-2.5 bg-[#171717] hover:bg-[#222222] border border-[#333333] hover:border-[#444444] rounded-lg text-white transition-colors disabled:opacity-50" 
+                    aria-label={`Disparar regra ${auto.name}`}
                     title="Disparar agora sob demanda"
                   >
                     <Play className={`w-4 h-4 ${isExecuting ? 'animate-spin text-[var(--accent-primary)]' : 'text-emerald-400'}`} />
                   </button>
                   
                   <button
+                    type="button"
                     onClick={() => toggleAutomation(auto.id)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors border ${
                       auto.enabled 
@@ -425,8 +541,10 @@ export const AutomationsView: React.FC = () => {
                   </button>
 
                   <button
+                    type="button"
                     onClick={() => deleteAutomation(auto.id)}
                     className="p-2.5 bg-[#171717] hover:bg-red-500/10 border border-[#2E2E2E] hover:border-red-500/30 text-[#888888] hover:text-red-400 rounded-lg transition-colors"
+                    aria-label={`Remover regra ${auto.name}`}
                     title="Remover regra de automação"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -475,7 +593,7 @@ export const AutomationsView: React.FC = () => {
                   <span className={`w-2 h-2 rounded-full shrink-0 ${
                     log.status === 'SUCCESS' ? 'bg-emerald-400' :
                     log.status === 'WAITING_CONSENT' ? 'bg-amber-400 animate-pulse' :
-                    log.status === 'SKIPPED_BUSY' ? 'bg-purple-400' :
+                    log.status === 'SKIPPED_BUSY' ? 'bg-amber-400' :
                     'bg-red-400'
                   }`} />
                   <div className="truncate">
@@ -503,7 +621,12 @@ export const AutomationsView: React.FC = () => {
 
       {/* Modal Nova Automação */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Criar Nova Automação"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+        >
           <div className="bg-[#111111] border border-[#333333] rounded-2xl max-w-lg w-full p-6 space-y-6 shadow-2xl">
             <div className="flex items-center justify-between border-b border-[#222222] pb-4">
               <div className="flex items-center gap-2">
@@ -511,7 +634,9 @@ export const AutomationsView: React.FC = () => {
                 <h3 className="font-bold text-lg text-white">Criar Nova Automação</h3>
               </div>
               <button 
-                onClick={() => setIsModalOpen(false)}
+                type="button"
+                onClick={closeModal}
+                aria-label="Fechar modal de nova automação"
                 className="text-[#888888] hover:text-white p-1"
               >
                 <X className="w-5 h-5" />
@@ -520,24 +645,28 @@ export const AutomationsView: React.FC = () => {
 
             <form onSubmit={handleCreateAutomation} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                <label htmlFor="auto-rule-name" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                   Nome da Regra
                 </label>
-                <input 
+                <input
+                  id="auto-rule-name"
                   type="text" 
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (formError) setFormError(null);
+                  }}
                   placeholder="Ex: Auditoria Diária de Variáveis" 
                   className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)]"
-                  required
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                <label htmlFor="auto-rule-desc" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                   Descrição
                 </label>
-                <input 
+                <input
+                  id="auto-rule-desc"
                   type="text" 
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -548,12 +677,13 @@ export const AutomationsView: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                  <label htmlFor="auto-trigger-type" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                     Tipo de Gatilho
                   </label>
-                  <select 
+                  <select
+                    id="auto-trigger-type"
                     value={triggerType}
-                    onChange={(e) => setTriggerType(e.target.value as AutomationTriggerType)}
+                    onChange={(e) => handleTriggerTypeChange(e.target.value as AutomationTriggerType)}
                     className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)]"
                   >
                     <option value="TIME_INTERVAL">Intervalo Periódico</option>
@@ -564,27 +694,33 @@ export const AutomationsView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                  <label htmlFor="auto-trigger-param" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                     {triggerType === 'TIME_INTERVAL' ? 'Minutos (Intervalo)' :
                      triggerType === 'TIME_OF_DAY' ? 'Horário (HH:MM)' :
-                     triggerType === 'SYSTEM_EVENT' ? 'Nome do Evento' : 'Parâmetro'}
+                     triggerType === 'SYSTEM_EVENT' ? 'Nome do Evento' : 'Parâmetro (Opcional)'}
                   </label>
-                  <input 
+                  <input
+                    id="auto-trigger-param"
                     type="text" 
                     value={triggerConfigValue}
-                    onChange={(e) => setTriggerConfigValue(e.target.value)}
-                    placeholder={triggerType === 'TIME_INTERVAL' ? '15' : triggerType === 'TIME_OF_DAY' ? '08:00' : 'DEVICE_STATUS_CHANGED'}
-                    className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                    onChange={(e) => {
+                      setTriggerConfigValue(e.target.value);
+                      if (formError) setFormError(null);
+                    }}
+                    disabled={triggerType === 'MANUAL'}
+                    placeholder={triggerType === 'TIME_INTERVAL' ? '15' : triggerType === 'TIME_OF_DAY' ? '08:00' : triggerType === 'SYSTEM_EVENT' ? 'DEVICE_STATUS_CHANGED' : 'Sob demanda'}
+                    className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)] disabled:opacity-50"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                  <label htmlFor="auto-target-tool" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                     Ferramenta Alvo
                   </label>
-                  <select 
+                  <select
+                    id="auto-target-tool"
                     value={selectedTool}
                     onChange={(e) => {
                       const tName = e.target.value;
@@ -606,9 +742,9 @@ export const AutomationsView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                  <span className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                     Nível de Risco Calculado
-                  </label>
+                  </span>
                   <div className={`px-3 py-2 rounded-lg text-xs font-mono font-bold border ${
                     expectedRisk === 'R0' 
                       ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' 
@@ -619,10 +755,82 @@ export const AutomationsView: React.FC = () => {
                 </div>
               </div>
 
+              {selectedTool === 'system_read_env_safe' && (
+                <div>
+                  <label htmlFor="auto-env-var" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                    Variável (variableName)
+                  </label>
+                  <input
+                    id="auto-env-var"
+                    type="text"
+                    value={toolParams.variableName}
+                    onChange={(e) => setToolParams({ ...toolParams, variableName: e.target.value })}
+                    placeholder="NODE_ENV"
+                    className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                  />
+                </div>
+              )}
+
+              {(selectedTool === 'workspace_read_file' || selectedTool === 'workspace_write_file') && (
+                <div className="space-y-3">
+                  <div>
+                    <label htmlFor="auto-file-path" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                      Caminho do Arquivo (filePath)
+                    </label>
+                    <input
+                      id="auto-file-path"
+                      type="text"
+                      value={toolParams.filePath}
+                      onChange={(e) => setToolParams({ ...toolParams, filePath: e.target.value })}
+                      placeholder={selectedTool === 'workspace_write_file' ? 'workspace/relatorio.txt' : 'docs/ROADMAP.md'}
+                      className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                    />
+                  </div>
+                  {selectedTool === 'workspace_write_file' && (
+                    <div>
+                      <label htmlFor="auto-file-content" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                        Conteúdo a Gravar (content)
+                      </label>
+                      <textarea
+                        id="auto-file-content"
+                        rows={2}
+                        value={toolParams.content}
+                        onChange={(e) => setToolParams({ ...toolParams, content: e.target.value })}
+                        placeholder="Texto ou relatório a ser gravado..."
+                        className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {selectedTool === 'system_exec_sandbox' && (
+                <div>
+                  <label htmlFor="auto-sandbox-cmd" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                    Comando CLI Sandbox (command)
+                  </label>
+                  <input
+                    id="auto-sandbox-cmd"
+                    type="text"
+                    value={toolParams.command}
+                    onChange={(e) => setToolParams({ ...toolParams, command: e.target.value })}
+                    placeholder="git status"
+                    className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                  />
+                </div>
+              )}
+
+              {formError && (
+                <p role="alert" className="text-xs text-red-400 font-mono flex items-center gap-1.5 bg-red-950/40 border border-red-800/50 px-3 py-2 rounded-lg">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{formError}</span>
+                </p>
+              )}
+
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-[#222222]">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={closeModal}
                   className="px-4 py-2 bg-[#171717] hover:bg-[#222222] text-[#888888] hover:text-white text-xs font-semibold rounded-lg transition-colors"
                 >
                   Cancelar

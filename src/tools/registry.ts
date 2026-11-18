@@ -16,6 +16,12 @@ import {
   ValidationResult 
 } from './validator';
 import { verifierEngine } from './verifier';
+import {
+  commandDeduplicator,
+  buildCommandDedupeKey,
+  isSideEffectfulDedupeTool,
+  DEFAULT_COMMAND_DEDUPE_WINDOW_MS
+} from '../utils/commandDeduplicator';
 import { 
   systemInfoTool, 
   workspaceReadFileTool, 
@@ -197,6 +203,40 @@ export class ToolRegistry {
 
     try {
       const sanitizedParams = validation.sanitized || rawParams;
+
+      // Deduplicação / idempotência (janela de 3000ms) para comandos de abertura de apps/browser/input
+      const shouldDedupe = !context?.skipDedupe && isSideEffectfulDedupeTool(toolName, sanitizedParams);
+      const dedupeKey = shouldDedupe ? buildCommandDedupeKey(toolName, sanitizedParams) : '';
+      if (shouldDedupe && dedupeKey) {
+        const dedupeCheck = commandDeduplicator.checkAndLock(dedupeKey, Date.now(), DEFAULT_COMMAND_DEDUPE_WINDOW_MS);
+        if (dedupeCheck.isDuplicate) {
+          if (timer) clearTimeout(timer);
+          console.log('[ToolRegistry] [DEDUPE_SUPPRESSED]', {
+            toolName,
+            dedupeKey,
+            remainingMs: dedupeCheck.remainingMs
+          });
+          const cached = dedupeCheck.cachedResult;
+          const suppressedData = cached && typeof cached === 'object'
+            ? { ...cached, duplicateSuppressed: true }
+            : {
+                success: true,
+                duplicateSuppressed: true,
+                simulated: tool.isSimulated,
+                message: `Comando '${toolName}' idêntico suprimido na janela de deduplicação (${DEFAULT_COMMAND_DEDUPE_WINDOW_MS}ms).`
+              };
+          return {
+            toolName,
+            success: true,
+            data: suppressedData,
+            simulated: Boolean(cached?.simulated ?? tool.isSimulated),
+            riskLevel: tool.riskLevel,
+            executionTimeMs: Math.round(performance.now() - start),
+            timestamp
+          };
+        }
+      }
+
       const executionPromise = tool.execute(sanitizedParams, context);
       const data = await Promise.race([executionPromise, timeoutPromise]);
       if (timer) clearTimeout(timer);
@@ -204,6 +244,7 @@ export class ToolRegistry {
       // Validação estrita do contrato de saída
       const outputVal = validateToolOutput(data, tool.outputSchema);
       if (!outputVal.valid) {
+        if (shouldDedupe && dedupeKey) commandDeduplicator.release(dedupeKey);
         return {
           toolName,
           success: false,
@@ -218,6 +259,7 @@ export class ToolRegistry {
       // Auditoria pós-execução via Verifier Engine (Item 17 do Plano Mestre)
       const verification = await verifierEngine.verifyExecution(toolName, sanitizedParams, data);
       if (!verification.passed) {
+        if (shouldDedupe && dedupeKey) commandDeduplicator.release(dedupeKey);
         return {
           toolName,
           success: false,
@@ -228,6 +270,14 @@ export class ToolRegistry {
           timestamp,
           verification: verification.evidence
         };
+      }
+
+      if (shouldDedupe && dedupeKey) {
+        if (data?.success === false) {
+          commandDeduplicator.release(dedupeKey);
+        } else {
+          commandDeduplicator.recordResult(dedupeKey, data);
+        }
       }
 
       const executionTimeMs = Math.round(performance.now() - start);
@@ -249,6 +299,10 @@ export class ToolRegistry {
       return resResult;
     } catch (err: any) {
       if (timer) clearTimeout(timer);
+      const sanitizedParamsForRelease = validation.sanitized || rawParams;
+      if (!context?.skipDedupe && isSideEffectfulDedupeTool(toolName, sanitizedParamsForRelease)) {
+        commandDeduplicator.release(buildCommandDedupeKey(toolName, sanitizedParamsForRelease));
+      }
       const executionTimeMs = Math.round(performance.now() - start);
       const cleanError = sanitizeErrorMessage(err);
       const errResult: ToolExecutionResult = {

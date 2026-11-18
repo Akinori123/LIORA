@@ -185,6 +185,23 @@ export class AutomationsEngine {
   }
 
   /**
+   * Recarrega regras a partir do LocalStorage (ou lista explícita) e re-assina o EventBus
+   */
+  public reloadFromStorage(overrideRules?: AutomationRule[]): void {
+    this.rules.clear();
+    if (Array.isArray(overrideRules) && overrideRules.length > 0) {
+      for (const rule of overrideRules) {
+        if (rule && rule.id && rule.name && rule.trigger && rule.action) {
+          this.rules.set(rule.id, { ...rule });
+        }
+      }
+    } else {
+      this.initRules();
+    }
+    this.setupEventListeners();
+  }
+
+  /**
    * Configura ouvintes no barramento EventBus para todas as regras ativas baseadas em SYSTEM_EVENT
    */
   public setupEventListeners(): void {
@@ -996,6 +1013,51 @@ export class AutomationsEngine {
     }
 
     return confirmedLog;
+  }
+
+  /**
+   * Sincroniza o estado de uma regra que aguardava consentimento quando a decisão
+   * (aprovação via overlay global/voz, rejeição ou expiração) acontece fora do card inline.
+   */
+  public recordExternalConsentResolution(
+    ruleId: string,
+    outcome: {
+      status: 'SUCCESS' | 'FAILED' | 'BLOCKED_BY_POLICY';
+      outputSummary?: string;
+      errorMessage?: string;
+      auditId?: string;
+      parametersHash?: string;
+      simulated?: boolean;
+      durationMs?: number;
+    }
+  ): AutomationExecutionLog | null {
+    const rule = this.rules.get(ruleId);
+    if (!rule) return null;
+
+    const now = new Date();
+    const isSimulated = outcome.simulated ?? true;
+    const log: AutomationExecutionLog = {
+      id: `auto-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      ruleId: rule.id,
+      ruleName: rule.name,
+      timestamp: now.toISOString(),
+      timeHms: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      triggerType: 'MANUAL',
+      actionExecuted: `tool:${rule.action.toolName || rule.action.description}`,
+      status: outcome.status,
+      riskLevel: rule.action.expectedRiskLevel,
+      durationMs: outcome.durationMs ?? 0,
+      outputSummary: outcome.outputSummary,
+      errorMessage: outcome.errorMessage,
+      auditId: outcome.auditId,
+      parametersHash: outcome.parametersHash,
+      simulated: isSimulated,
+      isNative: !isSimulated
+    };
+
+    this.updateRuleStatus(rule.id, outcome.status);
+    this.recordLog(log);
+    return log;
   }
 
   /**

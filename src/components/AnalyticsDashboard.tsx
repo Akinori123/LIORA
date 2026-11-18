@@ -49,7 +49,9 @@ export const AnalyticsDashboard: React.FC = () => {
         </div>
 
         <button
+          type="button"
           onClick={() => setStats(tokenAnalytics.getStats())}
+          aria-label="Atualizar estatísticas de consumo"
           className="p-1.5 bg-[#171717] hover:bg-[#222222] border border-[#2E2E2E] rounded-lg text-[#A8A8A8] hover:text-white transition-colors"
           title="Atualizar estatísticas"
         >
@@ -89,9 +91,9 @@ export const AnalyticsDashboard: React.FC = () => {
         <div className="bg-[#141414] border border-[#222222] rounded-xl p-4 space-y-2">
           <div className="flex items-center justify-between text-[#888888]">
             <span className="text-xs font-semibold uppercase tracking-wider">Backup OpenRouter</span>
-            <Layers className="w-4 h-4 text-purple-400" />
+            <Layers className="w-4 h-4 text-white" />
           </div>
-          <div className="text-2xl font-bold font-mono text-purple-400">
+          <div className="text-2xl font-bold font-mono text-white">
             {stats.openRouterCalls} <span className="text-xs text-[#888888] font-normal">reqs</span>
           </div>
           <p className="text-[11px] text-[#A8A8A8]">
@@ -138,14 +140,14 @@ export const AnalyticsDashboard: React.FC = () => {
             </div>
 
             <div className="flex items-center justify-between text-xs font-mono pt-2">
-              <span className="text-purple-400 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-purple-400" /> OpenRouter Failover
+              <span className="text-white flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-white" /> OpenRouter Failover
               </span>
               <span className="text-white font-bold">{openRouterPercent}%</span>
             </div>
             <div className="w-full bg-[#222222] h-2 rounded-full overflow-hidden">
               <div 
-                className="bg-purple-400 h-full transition-all duration-300" 
+                className="bg-white h-full transition-all duration-300" 
                 style={{ width: `${openRouterPercent}%` }}
               />
             </div>
@@ -181,7 +183,12 @@ export const AnalyticsDashboard: React.FC = () => {
 
           <div className="flex items-center justify-between text-[10px] font-mono text-[#777777]">
             <span>Mais Antigo</span>
-            <span>Última chamada: {stats.lastCallTimestamp ? new Date(stats.lastCallTimestamp).toLocaleTimeString() : 'N/A'}</span>
+            <span>
+              Última chamada:{' '}
+              {stats.lastCallTimestamp && !Number.isNaN(new Date(stats.lastCallTimestamp).getTime())
+                ? new Date(stats.lastCallTimestamp).toLocaleTimeString('pt-BR')
+                : 'N/A'}
+            </span>
           </div>
         </div>
       </div>

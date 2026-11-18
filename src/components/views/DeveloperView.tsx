@@ -37,11 +37,11 @@ import {
   FileDiff,
   Download
 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { ToolSummary, ToolExecutionResult } from '../../types';
-import { SecurityAuditEvent } from '../../security/types';
+import { SecurityAuditEvent, ToolPermissionPolicy } from '../../security/types';
 import { permissionEngine } from '../../security/permissionEngine';
-import { computeParametersHash } from '../../security/canonicalizer';
 import { AnalyticsDashboard } from '../AnalyticsDashboard';
 import { 
   SAMPLE_CODE_FILES, 
@@ -52,18 +52,41 @@ import {
 } from '../../utils/codeDiffHelper';
 
 export const DeveloperView: React.FC = () => {
-  const { tools, loadTools, executeTool } = useLioraStore();
+  const {
+    tools,
+    loadTools,
+    executeTool,
+    toolPolicies,
+    globalAutoApprove,
+    setToolPolicy,
+    setGlobalAutoApprove
+  } = useLioraStore(
+    useShallow(state => ({
+      tools: state.tools,
+      loadTools: state.loadTools,
+      executeTool: state.executeTool,
+      toolPolicies: state.toolPolicies,
+      globalAutoApprove: state.globalAutoApprove,
+      setToolPolicy: state.setToolPolicy,
+      setGlobalAutoApprove: state.setGlobalAutoApprove
+    }))
+  );
   const [selectedTool, setSelectedTool] = useState<string>('system_info');
-  const [paramInputs, setParamInputs] = useState<Record<string, any>>({
-    detailLevel: 'standard',
-    filePath: 'docs/ROADMAP.md',
-    command: 'git status'
+  const [perToolParams, setPerToolParams] = useState<Record<string, Record<string, any>>>({
+    system_info: { detailLevel: 'standard' },
+    system_read_env_safe: { variableName: 'NODE_ENV' },
+    workspace_read_file: { filePath: 'docs/ROADMAP.md', maxLines: 50 },
+    workspace_write_file: { filePath: 'workspace/sandbox_out.txt', content: 'Registrado via Sandbox LIORA.' },
+    system_exec_simulated: { command: 'git status', timeoutMs: 5000 },
+    system_exec_sandbox: { command: 'git status', timeoutMs: 5000 },
+    open_application: { appName: 'Bloco de Notas' },
+    pc_manage_apps: { action: 'list', appPath: 'notepad.exe' },
+    pc_simulate_input: { action: 'type', text: 'Teste LIORA' },
+    mcp_code_indexer: { action: 'index_files', scope: 'src' }
   });
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionResult, setExecutionResult] = useState<ToolExecutionResult | null>(null);
-
-  // R1 Consent Simulation Switch (Diretriz 4)
-  const [simulateConsent, setSimulateConsent] = useState<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
 
   // Healthcheck & Latency states (Diretriz 5)
   const [serverHealth, setServerHealth] = useState<{ status: 'healthy' | 'degraded' | 'offline'; latencyMs: number; lastPing: string }>({
@@ -86,7 +109,8 @@ export const DeveloperView: React.FC = () => {
   const [selectedReaIdx, setSelectedReaIdx] = useState<number>(0);
   const [reaRunning, setReaRunning] = useState<boolean>(false);
   const [reaAnalysisDone, setReaAnalysisDone] = useState<boolean>(false);
-  const reaTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const reaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const exportRevokeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selectedFile = SAMPLE_CODE_FILES[selectedFileIdx] || SAMPLE_CODE_FILES[0];
   const diffLines = useMemo(() => computeUnifiedDiff(selectedFile.originalContent, selectedFile.modifiedContent), [selectedFile]);
@@ -103,6 +127,7 @@ export const DeveloperView: React.FC = () => {
     setReaRunning(true);
     setReaAnalysisDone(false);
     reaTimerRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
       setReaRunning(false);
       setReaAnalysisDone(true);
       reaTimerRef.current = null;
@@ -110,14 +135,19 @@ export const DeveloperView: React.FC = () => {
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     loadTools();
-    loadAuditTrail();
     checkHealth();
 
     return () => {
+      isMountedRef.current = false;
       if (reaTimerRef.current) {
         clearTimeout(reaTimerRef.current);
         reaTimerRef.current = null;
+      }
+      if (exportRevokeTimerRef.current) {
+        clearTimeout(exportRevokeTimerRef.current);
+        exportRevokeTimerRef.current = null;
       }
     };
   }, [loadTools]);
@@ -128,6 +158,7 @@ export const DeveloperView: React.FC = () => {
       const res = await fetch('/api/security/audit?limit=1', {
         headers: { 'Accept': 'application/json' }
       });
+      if (!isMountedRef.current) return;
       const durationMs = Math.round(performance.now() - start);
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
@@ -144,6 +175,7 @@ export const DeveloperView: React.FC = () => {
         });
       }
     } catch {
+      if (!isMountedRef.current) return;
       setServerHealth({
         status: 'offline',
         latencyMs: 0,
@@ -167,10 +199,11 @@ export const DeveloperView: React.FC = () => {
       const res = await fetch(`/api/security/audit?${queryParams.toString()}`, {
         headers: { 'Accept': 'application/json' }
       });
+      if (!isMountedRef.current) return;
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
-        if (Array.isArray(data.events)) {
+        if (isMountedRef.current && Array.isArray(data.events)) {
           setAuditEvents(data.events);
           return;
         }
@@ -182,8 +215,11 @@ export const DeveloperView: React.FC = () => {
         if (toolNameFilter !== 'ALL' && ev.toolName !== toolNameFilter) return false;
         return true;
       });
-      setAuditEvents([...filtered].reverse());
+      if (isMountedRef.current) {
+        setAuditEvents([...filtered].reverse());
+      }
     } catch {
+      if (!isMountedRef.current) return;
       // Offline fallback: load local audit events without logging unhandled SyntaxError
       try {
         const localEvents = permissionEngine.getAuditEvents();
@@ -197,7 +233,9 @@ export const DeveloperView: React.FC = () => {
         setAuditEvents([]);
       }
     } finally {
-      setAuditLoading(false);
+      if (isMountedRef.current) {
+        setAuditLoading(false);
+      }
     }
   };
 
@@ -209,19 +247,23 @@ export const DeveloperView: React.FC = () => {
         method: 'DELETE',
         headers: { 'Accept': 'application/json' }
       });
+      if (!isMountedRef.current) return;
       if (res.ok) {
         setAuditEvents([]);
       } else {
-        // Fallback local clear
         permissionEngine.clearAuditEvents();
         setAuditEvents([]);
       }
     } catch {
       permissionEngine.clearAuditEvents();
-      setAuditEvents([]);
+      if (isMountedRef.current) {
+        setAuditEvents([]);
+      }
     } finally {
-      setClearingAudit(false);
-      loadAuditTrail();
+      if (isMountedRef.current) {
+        setClearingAudit(false);
+        void loadAuditTrail();
+      }
     }
   };
 
@@ -299,8 +341,14 @@ export const DeveloperView: React.FC = () => {
     const a = document.createElement('a');
     a.href = url;
     a.download = `liora-audit-report-${reportTimestamp.split('T')[0]}.html`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    if (exportRevokeTimerRef.current) clearTimeout(exportRevokeTimerRef.current);
+    exportRevokeTimerRef.current = setTimeout(() => {
+      URL.revokeObjectURL(url);
+      exportRevokeTimerRef.current = null;
+    }, 1000);
   };
 
   useEffect(() => {
@@ -318,86 +366,113 @@ export const DeveloperView: React.FC = () => {
 
   const catalogTools = tools.length > 0 ? tools : defaultToolsList;
   const activeToolDef = catalogTools.find(t => t.name === selectedTool) || catalogTools[0];
+  const filterToolNames = useMemo(() => {
+    const names = new Set<string>(catalogTools.map(t => t.name));
+    auditEvents.forEach(ev => { if (ev.toolName) names.add(ev.toolName); });
+    return Array.from(names).sort();
+  }, [catalogTools, auditEvents]);
+
+  const currentToolValues = useMemo(() => {
+    const props = activeToolDef?.parameters?.properties || {};
+    const requiredSet = new Set(activeToolDef?.parameters?.required || []);
+    const seeded = perToolParams[activeToolDef?.name] || {};
+    const merged: Record<string, any> = {};
+    for (const [key, prop] of Object.entries(props)) {
+      if (key in seeded) {
+        merged[key] = seeded[key];
+      } else if (prop.default !== undefined) {
+        merged[key] = prop.default;
+      } else if (Array.isArray(prop.enum) && prop.enum.length > 0 && (requiredSet.has(key) || prop.required)) {
+        merged[key] = prop.enum[0];
+      }
+    }
+    return { ...merged, ...seeded };
+  }, [activeToolDef, perToolParams]);
+
+  const setToolParamValue = (toolName: string, key: string, value: any) => {
+    setPerToolParams((prev) => ({
+      ...prev,
+      [toolName]: {
+        ...(prev[toolName] || {}),
+        [key]: value
+      }
+    }));
+  };
 
   const handleExecute = async () => {
     if (!activeToolDef || isExecuting) return;
     setIsExecuting(true);
     setExecutionResult(null);
 
-    let paramsToSend: Record<string, any> = {};
-    if (activeToolDef.name === 'system_info') {
-      paramsToSend = { detailLevel: paramInputs.detailLevel || 'standard' };
-    } else if (activeToolDef.name === 'system_read_env_safe') {
-      // BUG FIX: antes enviava { key: 'NODE_ENV' } mas o schema da ferramenta
-      // espera 'variableName' (ou 'keys'). O backend ignorava a chave recebida.
-      paramsToSend = { variableName: paramInputs.variableName || 'NODE_ENV' };
-    } else if (activeToolDef.name === 'workspace_read_file') {
-      paramsToSend = { filePath: paramInputs.filePath || 'docs/ROADMAP.md', maxLines: 50 };
-    } else if (activeToolDef.name === 'system_exec_simulated') {
-      paramsToSend = { command: paramInputs.command || 'git status', timeoutMs: 5000 };
-    } else if (activeToolDef.category === 'mcp' || activeToolDef.name.startsWith('mcp_')) {
-      paramsToSend = { action: 'index_files', scope: 'src' };
+    const props = activeToolDef.parameters?.properties || {};
+    const requiredSet = new Set(activeToolDef.parameters?.required || []);
+    const rawValues = currentToolValues;
+    const paramsToSend: Record<string, any> = {};
+
+    for (const [key, prop] of Object.entries(props)) {
+      const val = rawValues[key];
+      const isReq = requiredSet.has(key) || Boolean(prop.required);
+      if (val === undefined || val === null || val === '') {
+        if (isReq && prop.default !== undefined) {
+          paramsToSend[key] = prop.default;
+        }
+        continue;
+      }
+      if (prop.type === 'number') {
+        const num = Number(val);
+        if (Number.isFinite(num)) paramsToSend[key] = num;
+      } else if (prop.type === 'boolean') {
+        paramsToSend[key] = typeof val === 'boolean' ? val : val === 'true';
+      } else if (prop.type === 'array') {
+        if (Array.isArray(val)) {
+          paramsToSend[key] = val;
+        } else if (typeof val === 'string') {
+          const trimmed = val.trim();
+          if (trimmed.startsWith('[')) {
+            try { paramsToSend[key] = JSON.parse(trimmed); continue; } catch {}
+          }
+          paramsToSend[key] = trimmed.split(',').map(s => s.trim()).filter(Boolean);
+        }
+      } else if (prop.type === 'object') {
+        if (typeof val === 'object') {
+          paramsToSend[key] = val;
+        } else if (typeof val === 'string') {
+          try { paramsToSend[key] = JSON.parse(val); } catch { paramsToSend[key] = {}; }
+        }
+      } else {
+        paramsToSend[key] = String(val);
+      }
+    }
+
+    if (Object.keys(props).length === 0 && (activeToolDef.category === 'mcp' || activeToolDef.name.startsWith('mcp_'))) {
+      paramsToSend.action = 'index_files';
+      paramsToSend.scope = 'src';
     }
 
     try {
-      let result: ToolExecutionResult;
-
-      // Se simular consentimento R1/R2 estiver ativo (Modo Operador Direto)
-      if (simulateConsent && (activeToolDef.riskLevel === 'R1' || activeToolDef.riskLevel === 'R2')) {
-        const pHash = computeParametersHash(paramsToSend);
-        const consentData = await permissionEngine.issueConsentToken(
-          activeToolDef.name,
-          pHash,
-          'dev-sandbox-session'
-        );
-        
-        // Avaliar e consumir consentimento no Permission Engine
-        const consumed = permissionEngine.consumeConsentToken(
-          consentData.token,
-          activeToolDef.name,
-          pHash,
-          'dev-sandbox-session'
-        );
-
-        if (consumed.success) {
-          result = {
-            toolName: activeToolDef.name,
-            success: true,
-            data: {
-              status: 'ALLOW_WITH_CONSENT',
-              consentAuditId: consumed.consentAuditId,
-              message: `Execução ${activeToolDef.riskLevel} autorizada com consentimento efêmero (token SHA-256 consumido de uso único).`,
-              executedAt: new Date().toISOString()
-            },
-            simulated: true,
-            riskLevel: activeToolDef.riskLevel,
-            executionTimeMs: 14,
-            timestamp: new Date().toISOString()
-          };
-        } else {
-          result = await executeTool(activeToolDef.name, paramsToSend);
-        }
-      } else {
-        result = await executeTool(activeToolDef.name, paramsToSend);
-      }
-
+      const result = await executeTool(activeToolDef.name, paramsToSend);
+      if (!isMountedRef.current) return;
       setExecutionResult(result);
       
       // Recarrega em tempo real e revalida healthcheck (Diretriz 2 & 5)
       await loadAuditTrail();
       await checkHealth();
     } catch (err: any) {
-      setExecutionResult({
-        toolName: activeToolDef.name,
-        success: false,
-        error: err?.message || 'Falha ao executar avaliação no sandbox.',
-        simulated: true,
-        riskLevel: activeToolDef.riskLevel,
-        executionTimeMs: 0,
-        timestamp: new Date().toISOString()
-      });
+      if (isMountedRef.current) {
+        setExecutionResult({
+          toolName: activeToolDef.name,
+          success: false,
+          error: err?.message || 'Falha ao executar avaliação no sandbox.',
+          simulated: true,
+          riskLevel: activeToolDef.riskLevel,
+          executionTimeMs: 0,
+          timestamp: new Date().toISOString()
+        });
+      }
     } finally {
-      setIsExecuting(false);
+      if (isMountedRef.current) {
+        setIsExecuting(false);
+      }
     }
   };
 
@@ -422,8 +497,9 @@ export const DeveloperView: React.FC = () => {
       </div>
 
       {/* Sub-Tab Navigation (Item 22 do Plano Mestre) */}
-      <div className="flex items-center gap-2 border-b border-[#222222] pb-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[#222222] pb-3">
         <button
+          type="button"
           onClick={() => setActiveDevTab('tools')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-semibold transition-colors ${
             activeDevTab === 'tools'
@@ -436,6 +512,7 @@ export const DeveloperView: React.FC = () => {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveDevTab('diffs')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-semibold transition-colors ${
             activeDevTab === 'diffs'
@@ -448,6 +525,7 @@ export const DeveloperView: React.FC = () => {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveDevTab('rea')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-semibold transition-colors ${
             activeDevTab === 'rea'
@@ -455,7 +533,7 @@ export const DeveloperView: React.FC = () => {
               : 'text-[#888888] hover:text-white hover:bg-[#141414]'
           }`}
         >
-          <Binary className="w-3.5 h-3.5 text-purple-400" />
+          <Binary className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
           <span>Engenharia Reversa (REA)</span>
         </button>
       </div>
@@ -497,7 +575,7 @@ export const DeveloperView: React.FC = () => {
               <span>{serverHealth.status === 'healthy' ? `Online (${serverHealth.latencyMs}ms)` : 'Conectando...'}</span>
             </h3>
             <p className="mt-2 text-xs text-[#A8A8A8] leading-relaxed">
-              Endpoint `/api/security/audit` ativo • Ping: {serverHealth.lastPing}
+              Endpoint <code className="text-white">/api/security/audit</code> ativo • Ping: {serverHealth.lastPing}
             </p>
           </div>
         </div>
@@ -538,14 +616,15 @@ export const DeveloperView: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-3 flex-wrap">
-            {/* R1/R2 Consent Switch (Modo Operador Direto) */}
+            {/* Switch Global Persistente (Modo Operador Direto R1/R2) */}
             <label className="flex items-center gap-2 px-3 py-1.5 bg-[#171717] border border-[#2E2E2E] rounded-lg text-xs font-mono text-[#CCCCCC] cursor-pointer hover:border-[#444444] transition-colors">
-              <KeyRound className={`w-3.5 h-3.5 ${simulateConsent ? 'text-emerald-400' : 'text-[#888888]'}`} />
+              <KeyRound className={`w-3.5 h-3.5 ${globalAutoApprove ? 'text-emerald-400' : 'text-[#888888]'}`} />
               <span>Auto-Consentimento Operador (R1/R2)</span>
               <input 
                 type="checkbox"
-                checked={simulateConsent}
-                onChange={(e) => setSimulateConsent(e.target.checked)}
+                checked={globalAutoApprove}
+                onChange={(e) => { void setGlobalAutoApprove(e.target.checked); }}
+                aria-label="Auto-Consentimento Operador (R1/R2)"
                 className="w-3.5 h-3.5 accent-emerald-500 rounded cursor-pointer"
               />
             </label>
@@ -555,8 +634,10 @@ export const DeveloperView: React.FC = () => {
             </span>
             
             <button
+              type="button"
               onClick={() => { loadTools(); loadAuditTrail(); checkHealth(); }}
               className="p-1.5 text-[#888888] hover:text-white transition-colors"
+              aria-label="Atualizar catálogo e auditoria"
               title="Atualizar catálogo e auditoria"
             >
               <RefreshCw className="w-4 h-4" />
@@ -564,59 +645,108 @@ export const DeveloperView: React.FC = () => {
           </div>
         </div>
 
-        {/* Tool Selector Tabs */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        {/* Tool Selector Cards + Per-Tool Granular Policy */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {catalogTools.map((tool) => {
             const isSelected = selectedTool === tool.name;
             const isMCP = tool.category === 'mcp' || tool.name.startsWith('mcp_');
             const isR0 = tool.riskLevel === 'R0';
+            const isR3 = tool.riskLevel === 'R3';
+            const currentPolicy: ToolPermissionPolicy = toolPolicies[tool.name] || 'default';
+
+            let effectiveStatusLabel = '';
+            let effectiveStatusClass = 'text-emerald-400';
+            if (isR3) {
+              effectiveStatusLabel = 'BLOQUEIO R3 ESTRITO';
+              effectiveStatusClass = 'text-red-400 font-semibold';
+            } else if (currentPolicy === 'always_require_consent') {
+              effectiveStatusLabel = 'EXIGIR CONSENTIMENTO';
+              effectiveStatusClass = 'text-rose-400 font-semibold';
+            } else if (currentPolicy === 'always_allow') {
+              effectiveStatusLabel = 'SEMPRE PERMITIR';
+              effectiveStatusClass = 'text-emerald-400 font-semibold';
+            } else if (globalAutoApprove) {
+              effectiveStatusLabel = 'LIBERADO (Global)';
+              effectiveStatusClass = 'text-emerald-400 font-semibold';
+            } else if (isR0) {
+              effectiveStatusLabel = 'ALLOW (R0 Auto)';
+              effectiveStatusClass = 'text-emerald-400';
+            } else if (tool.riskLevel === 'R1') {
+              effectiveStatusLabel = 'CONSENT (R1)';
+              effectiveStatusClass = 'text-amber-400';
+            } else {
+              effectiveStatusLabel = 'CONSENT (R2)';
+              effectiveStatusClass = 'text-rose-400';
+            }
 
             return (
-              <button
+              <div
                 key={tool.name}
-                onClick={() => {
-                  setSelectedTool(tool.name);
-                  setExecutionResult(null);
-                }}
-                className={`p-3.5 rounded-xl border text-left transition-all ${
+                className={`p-3.5 rounded-xl border transition-all flex flex-col justify-between gap-2.5 ${
                   isSelected 
                     ? 'bg-[#181818] border-[var(--accent-primary)] shadow-[0_0_15px_var(--accent-glow)]' 
                     : 'bg-[#141414] border-[#222222] hover:border-[#333333]'
                 }`}
               >
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-1.5 truncate">
-                    {tool.name === 'system_info' && <Cpu className="w-3.5 h-3.5 text-cyan-400 shrink-0" />}
-                    {tool.name === 'system_read_env_safe' && <KeyRound className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
-                    {tool.name === 'workspace_read_file' && <FileText className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
-                    {tool.name === 'system_exec_simulated' && <Terminal className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
-                    {isMCP && <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" />}
-                    <span className="font-mono text-xs font-semibold text-white truncate">{tool.name}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedTool(tool.name);
+                    setExecutionResult(null);
+                  }}
+                  aria-pressed={isSelected}
+                  className="text-left w-full focus:outline-none"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5 truncate">
+                      {tool.name === 'system_info' && <Cpu className="w-3.5 h-3.5 text-cyan-400 shrink-0" />}
+                      {tool.name === 'system_read_env_safe' && <KeyRound className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                      {tool.name === 'workspace_read_file' && <FileText className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                      {tool.name === 'system_exec_simulated' && <Terminal className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                      {isMCP && <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)] shrink-0" />}
+                      <span className="font-mono text-xs font-semibold text-white truncate">{tool.name}</span>
+                    </div>
+                    <span className={`text-[9px] font-mono px-1.5 py-0.2 rounded border shrink-0 ${
+                      tool.riskLevel === 'R0' 
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
+                        : tool.riskLevel === 'R1'
+                          ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                          : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
+                    }`}>
+                      {tool.riskLevel}
+                    </span>
                   </div>
-                  <span className={`text-[9px] font-mono px-1.5 py-0.2 rounded border shrink-0 ${
-                    tool.riskLevel === 'R0' 
-                      ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
-                      : tool.riskLevel === 'R1'
-                        ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
-                        : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
-                  }`}>
-                    {tool.riskLevel}
-                  </span>
+                  <p className="text-[11px] text-[#888888] line-clamp-2 leading-tight">{tool.description}</p>
+                  <div className="mt-2.5 flex items-center justify-between text-[10px] font-mono text-[#666666]">
+                    <span>{isMCP ? 'MCP Protocol' : tool.category}</span>
+                    <span className={effectiveStatusClass}>{effectiveStatusLabel}</span>
+                  </div>
+                </button>
+
+                {/* Seletor Granular de Política Individual (3 Estados) */}
+                <div className="pt-2 border-t border-[#222222]/80">
+                  <select
+                    aria-label={`Política de permissão para ${tool.name}`}
+                    disabled={isR3}
+                    value={currentPolicy}
+                    onChange={(e) => {
+                      const nextPolicy = e.target.value as ToolPermissionPolicy;
+                      void setToolPolicy(tool.name, nextPolicy);
+                    }}
+                    className={`w-full bg-[#0E0E0E] border rounded-lg px-2 py-1.5 text-[11px] font-mono text-white focus:outline-none focus:border-[var(--accent-primary)] disabled:opacity-50 cursor-pointer ${
+                      currentPolicy === 'always_allow'
+                        ? 'border-emerald-500/40 text-emerald-300'
+                        : currentPolicy === 'always_require_consent'
+                          ? 'border-rose-500/40 text-rose-300'
+                          : 'border-[#262626]'
+                    }`}
+                  >
+                    <option value="default">Padrão (R0 Auto / R1-R2 Perguntar)</option>
+                    <option value="always_allow">Sempre Permitir (Auto-Approve)</option>
+                    <option value="always_require_consent">Sempre Exigir Consentimento / Bloquear</option>
+                  </select>
                 </div>
-                <p className="text-[11px] text-[#888888] line-clamp-2 leading-tight">{tool.description}</p>
-                <div className="mt-2.5 flex items-center justify-between text-[10px] font-mono text-[#666666]">
-                  <span>{isMCP ? 'MCP Protocol' : tool.category}</span>
-                  {simulateConsent ? (
-                    <span className="text-emerald-400 font-semibold">LIBERADO (Operador)</span>
-                  ) : isR0 ? (
-                    <span className="text-emerald-400">ALLOW (R0 Auto)</span>
-                  ) : tool.riskLevel === 'R1' ? (
-                    <span className="text-amber-400">CONSENT (R1)</span>
-                  ) : (
-                    <span className="text-rose-400">CONSENT (R2)</span>
-                  )}
-                </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -629,7 +759,7 @@ export const DeveloperView: React.FC = () => {
                 <h4 className="font-semibold text-white text-sm flex items-center gap-2">
                   Avaliação da Ferramenta: <span className="font-mono text-[var(--accent-primary)]">{activeToolDef.name}</span>
                   {activeToolDef.category === 'mcp' && (
-                    <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[10px] font-mono rounded-full flex items-center gap-1">
+                    <span className="px-2 py-0.5 bg-[var(--accent-bg)] text-[var(--accent-primary)] border border-[var(--accent-border)] text-[10px] font-mono rounded-full flex items-center gap-1">
                       <Layers className="w-3 h-3" /> Servidor MCP
                     </span>
                   )}
@@ -639,6 +769,7 @@ export const DeveloperView: React.FC = () => {
 
               {/* Botão Avaliar com Estado de Carregamento & Prevenção de Duplo Clique (Diretriz 2) */}
               <button
+                type="button"
                 onClick={handleExecute}
                 disabled={isExecuting}
                 className="flex items-center gap-2 px-4 py-2 bg-[var(--accent-primary)] hover:opacity-90 text-white text-xs font-semibold rounded-lg shadow-md shadow-[var(--accent-glow)] transition-all disabled:opacity-50"
@@ -648,72 +779,109 @@ export const DeveloperView: React.FC = () => {
               </button>
             </div>
 
-            {/* Inputs de Parâmetros com base na ferramenta selecionada */}
+            {/* Inputs de Parâmetros orientados a Schema JSON para qualquer ferramenta do registro */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-              {activeToolDef.name === 'system_info' && (
-                <div>
-                  <label className="block text-xs font-mono text-[#A8A8A8] mb-1">detailLevel</label>
-                  <select
-                    value={paramInputs.detailLevel || 'standard'}
-                    onChange={(e) => setParamInputs({ ...paramInputs, detailLevel: e.target.value })}
-                    className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
-                  >
-                    <option value="summary">summary</option>
-                    <option value="standard">standard</option>
-                    <option value="full">full</option>
-                  </select>
+              {Object.entries(activeToolDef.parameters?.properties || {}).length === 0 ? (
+                <div className="bg-[#0E0E0E] border border-[#222222] rounded-lg p-3 text-xs font-mono text-[#888888]">
+                  Esta ferramenta não requer parâmetros de entrada adicionais.
                 </div>
-              )}
-
-              {activeToolDef.name === 'system_read_env_safe' && (
-                <div>
-                  <label className="block text-xs font-mono text-[#A8A8A8] mb-1">key (Variável de Ambiente)</label>
-                  <input
-                    type="text"
-                    value="NODE_ENV"
-                    disabled
-                    className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-[#A8A8A8]"
-                  />
-                </div>
-              )}
-
-              {activeToolDef.name === 'workspace_read_file' && (
-                <div>
-                  <label className="block text-xs font-mono text-[#A8A8A8] mb-1">filePath (Fixture Virtual)</label>
-                  <input
-                    type="text"
-                    value={paramInputs.filePath || ''}
-                    onChange={(e) => setParamInputs({ ...paramInputs, filePath: e.target.value })}
-                    placeholder="docs/ROADMAP.md"
-                    className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
-                  />
-                </div>
-              )}
-
-              {activeToolDef.name === 'system_exec_simulated' && (
-                <div>
-                  <label className="block text-xs font-mono text-[#A8A8A8] mb-1">command (Sandboxed CLI)</label>
-                  <input
-                    type="text"
-                    value={paramInputs.command || ''}
-                    onChange={(e) => setParamInputs({ ...paramInputs, command: e.target.value })}
-                    placeholder="git status"
-                    className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
-                  />
-                </div>
+              ) : (
+                Object.entries(activeToolDef.parameters?.properties || {}).map(([key, prop]) => {
+                  const isRequired = Boolean(activeToolDef.parameters?.required?.includes(key) || prop.required);
+                  const val = currentToolValues[key];
+                  const inputId = `dev-param-${activeToolDef.name}-${key}`;
+                  return (
+                    <div key={key}>
+                      <label htmlFor={inputId} className="block text-xs font-mono text-[#A8A8A8] mb-1 truncate" title={prop.description || key}>
+                        {key} {isRequired && <span className="text-[var(--accent-primary)]">*</span>}
+                        {prop.type ? <span className="text-[10px] text-[#666666] ml-1.5">({prop.type})</span> : null}
+                      </label>
+                      {Array.isArray(prop.enum) && prop.enum.length > 0 ? (
+                        <select
+                          id={inputId}
+                          value={val ?? ''}
+                          onChange={(e) => setToolParamValue(activeToolDef.name, key, e.target.value)}
+                          className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                        >
+                          {!isRequired && <option value="">(opcional)</option>}
+                          {prop.enum.map((opt) => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      ) : prop.type === 'boolean' ? (
+                        <select
+                          id={inputId}
+                          value={val === undefined ? '' : String(Boolean(val))}
+                          onChange={(e) => setToolParamValue(activeToolDef.name, key, e.target.value === '' ? '' : e.target.value === 'true')}
+                          className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                        >
+                          {!isRequired && <option value="">(padrão)</option>}
+                          <option value="true">true</option>
+                          <option value="false">false</option>
+                        </select>
+                      ) : prop.type === 'number' ? (
+                        <input
+                          id={inputId}
+                          type="number"
+                          value={val ?? ''}
+                          min={prop.minimum}
+                          max={prop.maximum}
+                          onChange={(e) => setToolParamValue(activeToolDef.name, key, e.target.value)}
+                          placeholder={prop.description || key}
+                          className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                        />
+                      ) : (
+                        <input
+                          id={inputId}
+                          type="text"
+                          value={
+                            Array.isArray(val)
+                              ? val.join(', ')
+                              : typeof val === 'object' && val !== null
+                                ? JSON.stringify(val)
+                                : (val ?? '')
+                          }
+                          onChange={(e) => setToolParamValue(activeToolDef.name, key, e.target.value)}
+                          placeholder={prop.description || key}
+                          className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
+                        />
+                      )}
+                      {prop.description && (
+                        <p className="text-[10px] text-[#666666] mt-1 line-clamp-1" title={prop.description}>
+                          {prop.description}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })
               )}
 
               <div className="bg-[#0E0E0E] border border-[#222222] rounded-lg p-3 flex flex-col justify-center">
                 <div className="flex items-center gap-2 text-xs font-mono text-[#A8A8A8]">
                   <Shield className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Perfil: STRICT • Risco: {activeToolDef.riskLevel}</span>
+                  <span>
+                    Perfil: STRICT • Risco: {activeToolDef.riskLevel} • Política:{' '}
+                    {(toolPolicies[activeToolDef.name] || 'default') === 'always_allow'
+                      ? 'Sempre Permitir'
+                      : (toolPolicies[activeToolDef.name] || 'default') === 'always_require_consent'
+                        ? 'Sempre Exigir Consentimento'
+                        : globalAutoApprove
+                          ? 'Padrão (Global Auto-Approve)'
+                          : 'Padrão'}
+                  </span>
                 </div>
                 <span className="text-[11px] text-[#888888] mt-1">
-                  {activeToolDef.name === 'system_info' || activeToolDef.name === 'system_read_env_safe' 
-                    ? 'Na lista branca de R0: Autorizado (ALLOW).' 
-                    : simulateConsent 
-                      ? 'Consentimento R1 simulado ativo: Autorizado (ALLOW_WITH_CONSENT).'
-                      : 'Fora da lista branca ou R1 sem consentimento: Negado (DENY).'}
+                  {activeToolDef.riskLevel === 'R3'
+                    ? 'Risco crítico R3: Bloqueado categoricamente pelo Permission Engine.'
+                    : (toolPolicies[activeToolDef.name] || 'default') === 'always_require_consent'
+                      ? 'Política individual ativa: Sempre exige confirmação humana explícita.'
+                      : (toolPolicies[activeToolDef.name] || 'default') === 'always_allow'
+                        ? 'Política individual ativa: Execução automática autorizada (Auto-Approve).'
+                        : globalAutoApprove
+                          ? 'Auto-Consentimento Global ativo: Execução R0/R1/R2 liberada automaticamente.'
+                          : activeToolDef.riskLevel === 'R0'
+                            ? 'Na lista branca de R0: Autorizado automaticamente (ALLOW).'
+                            : 'Nível R1/R2: Requer confirmação humana (REQUIRES_USER_CONFIRMATION).'}
                 </span>
               </div>
             </div>
@@ -775,6 +943,7 @@ export const DeveloperView: React.FC = () => {
               <ListFilter className="w-3.5 h-3.5" /> Filtros:
             </div>
             <select
+              aria-label="Filtrar trilha de auditoria por decisão"
               value={decisionFilter}
               onChange={(e) => setDecisionFilter(e.target.value)}
               className="bg-[#0E0E0E] border border-[#262626] rounded-lg px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -785,22 +954,24 @@ export const DeveloperView: React.FC = () => {
             </select>
 
             <select
+              aria-label="Filtrar trilha de auditoria por ferramenta"
               value={toolNameFilter}
               onChange={(e) => setToolNameFilter(e.target.value)}
               className="bg-[#0E0E0E] border border-[#262626] rounded-lg px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
             >
               <option value="ALL">Todas as Ferramentas</option>
-              <option value="system_info">system_info</option>
-              <option value="system_read_env_safe">system_read_env_safe</option>
-              <option value="workspace_read_file">workspace_read_file</option>
-              <option value="system_exec_simulated">system_exec_simulated</option>
+              {filterToolNames.map((tName) => (
+                <option key={tName} value={tName}>{tName}</option>
+              ))}
             </select>
 
             {/* Clear Audit Trail Button (Diretriz 2) */}
             <button
+              type="button"
               onClick={() => setShowClearConfirm(true)}
               disabled={clearingAudit || auditEvents.length === 0}
               className="px-3 py-1.5 bg-[#171717] hover:bg-red-500/10 border border-[#2E2E2E] hover:border-red-500/30 text-xs text-[#888888] hover:text-red-400 rounded-lg flex items-center gap-1.5 transition-colors font-mono disabled:opacity-50 cursor-pointer"
+              aria-label="Limpar trilha de auditoria"
               title="Resetar buffer circular de auditoria em dev"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -809,6 +980,7 @@ export const DeveloperView: React.FC = () => {
 
             {/* Export Audit Report Button */}
             <button
+              type="button"
               onClick={handleExportAuditReport}
               disabled={auditEvents.length === 0}
               className="px-3 py-1.5 bg-[#171717] hover:bg-emerald-500/10 border border-[#2E2E2E] hover:border-emerald-500/30 text-xs text-[#888888] hover:text-emerald-400 rounded-lg flex items-center gap-1.5 transition-colors font-mono disabled:opacity-50 cursor-pointer"
@@ -819,8 +991,10 @@ export const DeveloperView: React.FC = () => {
             </button>
 
             <button
+              type="button"
               onClick={() => loadAuditTrail()}
               className="p-1.5 bg-[#171717] hover:bg-[#222222] text-[#A8A8A8] hover:text-white rounded-lg border border-[#2E2E2E] transition-colors"
+              aria-label="Atualizar log de auditoria"
               title="Atualizar log"
             >
               <RefreshCw className="w-4 h-4" />
@@ -872,9 +1046,11 @@ export const DeveloperView: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-[#181818]">
                 {auditEvents.map((evt) => (
-                  <tr key={evt.auditId + evt.sequenceNumber} className="hover:bg-[#141414] transition-colors">
+                  <tr key={`${evt.auditId}-${evt.sequenceNumber}`} className="hover:bg-[#141414] transition-colors">
                     <td className="py-2.5 px-3 text-[#666666]">#{evt.sequenceNumber}</td>
-                    <td className="py-2.5 px-3 text-[#A8A8A8]">{new Date(evt.timestamp).toLocaleTimeString()}</td>
+                    <td className="py-2.5 px-3 text-[#A8A8A8]">
+                      {Number.isNaN(new Date(evt.timestamp).getTime()) ? (evt.timestamp || '--:--:--') : new Date(evt.timestamp).toLocaleTimeString('pt-BR')}
+                    </td>
                     <td className="py-2.5 px-3 text-white">{evt.eventType}</td>
                     <td className="py-2.5 px-3 font-semibold text-white">{evt.toolName}</td>
                     <td className="py-2.5 px-3">
@@ -930,7 +1106,7 @@ export const DeveloperView: React.FC = () => {
             </div>
 
             <div className="bg-[#111111] border border-[#222222] rounded-xl p-4 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 shrink-0">
+              <div className="w-10 h-10 rounded-lg bg-[var(--accent-bg)] border border-[var(--accent-border)] flex items-center justify-center text-[var(--accent-primary)] shrink-0">
                 <CheckCheck className="w-5 h-5" />
               </div>
               <div>
@@ -948,6 +1124,7 @@ export const DeveloperView: React.FC = () => {
               {SAMPLE_CODE_FILES.map((file, idx) => (
                 <button
                   key={file.path}
+                  type="button"
                   onClick={() => setSelectedFileIdx(idx)}
                   className={`w-full text-left p-3 rounded-lg border transition-all ${
                     selectedFileIdx === idx
@@ -1010,7 +1187,7 @@ export const DeveloperView: React.FC = () => {
           <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-4">
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                <div className="w-9 h-9 rounded-xl bg-[var(--accent-bg)] border border-[var(--accent-border)] flex items-center justify-center text-[var(--accent-primary)]">
                   <Binary className="w-5 h-5" />
                 </div>
                 <div>
@@ -1018,7 +1195,7 @@ export const DeveloperView: React.FC = () => {
                   <p className="text-xs text-[#888888] mt-0.5">Inspeção estática, extração de símbolos e auditoria de segurança de binários e bibliotecas.</p>
                 </div>
               </div>
-              <span className="px-2.5 py-1 rounded text-xs font-mono bg-purple-500/10 text-purple-400 border border-purple-500/20 font-bold">
+              <span className="px-2.5 py-1 rounded text-xs font-mono bg-[var(--accent-bg)] text-[var(--accent-primary)] border border-[var(--accent-border)] font-bold">
                 Módulo Soberano
               </span>
             </div>
@@ -1031,16 +1208,17 @@ export const DeveloperView: React.FC = () => {
               {SAMPLE_REA_TARGETS.map((target, idx) => (
                 <button
                   key={target.id}
+                  type="button"
                   onClick={() => { setSelectedReaIdx(idx); setReaAnalysisDone(false); }}
                   className={`w-full text-left p-3 rounded-lg border transition-all ${
                     selectedReaIdx === idx
-                      ? 'bg-[#181818] border-purple-500/60 shadow-sm shadow-purple-500/10'
+                      ? 'bg-[#181818] border-[var(--accent-primary)] shadow-sm shadow-[var(--accent-glow)]'
                       : 'bg-[#141414] border-[#222222] hover:border-[#333333]'
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-mono text-xs font-semibold text-white truncate">{target.name}</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#0E0E0E] text-purple-400 uppercase">{target.targetType}</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#0E0E0E] text-[var(--accent-primary)] uppercase">{target.targetType}</span>
                   </div>
                   <p className="text-[11px] text-[#888888] mt-1 font-mono truncate">{target.architecture}</p>
                 </button>
@@ -1056,9 +1234,10 @@ export const DeveloperView: React.FC = () => {
                 </div>
 
                 <button
+                  type="button"
                   onClick={handleRunReaAnalysis}
                   disabled={reaRunning}
-                  className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg shadow-md transition-all disabled:opacity-50"
+                  className="flex items-center gap-2 px-4 py-2 bg-[var(--accent-primary)] hover:opacity-90 text-white text-xs font-semibold rounded-lg shadow-md shadow-[var(--accent-glow)] transition-all disabled:opacity-50"
                 >
                   {reaRunning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
                   <span>{reaRunning ? 'Auditoria em Andamento...' : 'Executar Análise REA'}</span>
@@ -1109,9 +1288,9 @@ export const DeveloperView: React.FC = () => {
               </div>
 
               {reaAnalysisDone && (
-                <div className="p-4 bg-purple-500/10 border border-purple-500/30 rounded-xl space-y-2 text-xs font-mono">
-                  <div className="flex items-center gap-2 text-purple-300 font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-purple-400" />
+                <div className="p-4 bg-[var(--accent-bg)] border border-[var(--accent-border)] rounded-xl space-y-2 text-xs font-mono">
+                  <div className="flex items-center gap-2 text-white font-bold">
+                    <CheckCircle2 className="w-4 h-4 text-[var(--accent-primary)]" />
                     <span>Relatório de Auditoria Estática Concluído</span>
                     <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-mono">SIMULADO · FIXTURES DEMONSTRATIVAS</span>
                   </div>

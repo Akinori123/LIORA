@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect, useState, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { speechService } from '../../services/speechService';
 import { voiceLiveClient } from '../../services/voiceLiveClient';
@@ -35,12 +36,19 @@ interface AudioDiagnosticPanelProps {
 export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onClose, compact = false }) => {
   const { 
     isVoiceActive, 
-    orbState, 
     isVaultKeyMissing, 
     vaultDiagnosticMessage, 
     setActiveTab, 
     runVaultDiagnostics 
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow((s) => ({
+      isVoiceActive: s.isVoiceActive,
+      isVaultKeyMissing: s.isVaultKeyMissing,
+      vaultDiagnosticMessage: s.vaultDiagnosticMessage,
+      setActiveTab: s.setActiveTab,
+      runVaultDiagnostics: s.runVaultDiagnostics
+    }))
+  );
 
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [peakLevel, setPeakLevel] = useState<number>(0);
@@ -49,18 +57,22 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
   const [liveDiag, setLiveDiag] = useState(voiceLiveClient.getDiagnosticData());
   const [testNotice, setTestNotice] = useState<string | null>(null);
   const [isTestingAudio, setIsTestingAudio] = useState(false);
+  const isMountedRef = useRef(true);
   const peakRef = useRef<number>(0);
-  const peakTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const testNoticeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const peakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const testNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Intervalo de atualização de telemetria em tempo real (10Hz)
   useEffect(() => {
+    isMountedRef.current = true;
     const interval = setInterval(() => {
+      if (!isMountedRef.current) return;
       setSpeechDiag(speechService.getDiagnosticData());
       setLiveDiag(voiceLiveClient.getDiagnosticData());
     }, 100);
 
     return () => {
+      isMountedRef.current = false;
       clearInterval(interval);
       if (testNoticeTimerRef.current) clearTimeout(testNoticeTimerRef.current);
     };
@@ -69,12 +81,14 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
   // Monitora nível de áudio e espectro de frequência com inscrição estável
   useEffect(() => {
     const unsubLevel = speechService.onAudioLevel((lvl) => {
+      if (!isMountedRef.current) return;
       setAudioLevel(lvl);
       if (lvl > peakRef.current) {
         peakRef.current = lvl;
         setPeakLevel(lvl);
         if (peakTimerRef.current) clearTimeout(peakTimerRef.current);
         peakTimerRef.current = setTimeout(() => {
+          if (!isMountedRef.current) return;
           peakRef.current = 0;
           setPeakLevel(0);
         }, 1500);
@@ -82,6 +96,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
     });
 
     const unsubFreq = speechService.onFrequencyData((bins) => {
+      if (!isMountedRef.current) return;
       setFrequencyBins(bins);
     });
 
@@ -105,10 +120,13 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
       await ctx.resume();
     }
     await speechService.requestMicrophonePermission();
+    if (!isMountedRef.current) return;
     setSpeechDiag(speechService.getDiagnosticData());
     setTestNotice('AudioContext e microfone reativados com sucesso.');
     if (testNoticeTimerRef.current) clearTimeout(testNoticeTimerRef.current);
-    testNoticeTimerRef.current = setTimeout(() => setTestNotice(null), 3000);
+    testNoticeTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) setTestNotice(null);
+    }, 3000);
   };
 
   const handleTestTtsSound = async () => {
@@ -119,15 +137,21 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
     try {
       await speechService.speak(
         'Diagnóstico de áudio da LIORA: Pipeline de síntese e reprodução operacional.',
-        () => setTestNotice('Reproduzindo áudio de teste...'),
         () => {
+          if (isMountedRef.current) setTestNotice('Reproduzindo áudio de teste...');
+        },
+        () => {
+          if (!isMountedRef.current) return;
           setIsTestingAudio(false);
           setTestNotice('Teste de reprodução concluído com sucesso.');
           if (testNoticeTimerRef.current) clearTimeout(testNoticeTimerRef.current);
-          testNoticeTimerRef.current = setTimeout(() => setTestNotice(null), 3000);
+          testNoticeTimerRef.current = setTimeout(() => {
+            if (isMountedRef.current) setTestNotice(null);
+          }, 3000);
         }
       );
     } catch (e: any) {
+      if (!isMountedRef.current) return;
       setIsTestingAudio(false);
       setTestNotice(`Falha no teste: ${e?.message || 'Erro de síntese'}`);
     }
@@ -160,9 +184,11 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
 
         {onClose && (
           <button
+            type="button"
             onClick={onClose}
             className="p-2 hover:bg-[#1A1A1A] text-[#888888] hover:text-white rounded-xl transition-colors shrink-0"
             title="Fechar Painel Diagnóstico"
+            aria-label="Fechar painel diagnóstico"
           >
             <X className="w-4 h-4" />
           </button>
@@ -177,6 +203,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
             <span className="font-medium">{vaultDiagnosticMessage || 'Chave do Gemini ausente no Cofre.'}</span>
           </div>
           <button
+            type="button"
             onClick={() => setActiveTab('integrations')}
             className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-[11px] font-bold shrink-0 flex items-center gap-1"
           >
@@ -324,6 +351,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#222222]">
         <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
             onClick={handleReactivateAudioContext}
             className="px-3 py-1.5 bg-[#181818] hover:bg-[#252525] border border-[#333333] text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
             title="Força o áudio do navegador a reativar caso o autoplay tenha sido bloqueado"
@@ -333,6 +361,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
           </button>
 
           <button
+            type="button"
             onClick={handleTestTtsSound}
             disabled={isTestingAudio}
             className="px-3 py-1.5 bg-[#181818] hover:bg-[#252525] border border-[#333333] text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
@@ -343,6 +372,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
           </button>
 
           <button
+            type="button"
             onClick={() => runVaultDiagnostics()}
             className="px-3 py-1.5 bg-[#181818] hover:bg-[#252525] border border-[#333333] text-white rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
             title="Re-executa a validação de chaves do Cofre"
@@ -353,6 +383,7 @@ export const AudioDiagnosticPanel: React.FC<AudioDiagnosticPanelProps> = ({ onCl
         </div>
 
         <button
+          type="button"
           onClick={() => setActiveTab('integrations')}
           className="px-3 py-1.5 bg-[#FF2B2B] hover:bg-red-600 text-white rounded-lg text-xs font-bold transition-all shadow-md hover:scale-105 flex items-center gap-1.5 cursor-pointer ml-auto"
         >

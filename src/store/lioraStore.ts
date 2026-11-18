@@ -23,8 +23,9 @@ import { loadHistory, saveHistory } from '../utils/historyStorage';
 import { executeLocalTool, LocalExecutionResult, isTauriEnvironment } from '../security/localBridge';
 import { rankMemories, formatMemoryContextBlock } from '../utils/memoryRanker';
 import { AutomationRule, AutomationExecutionLog, SYSTEM_EVENTS } from '../types/automations';
-import { automationsEngine } from '../services/automationsEngine';
+import { automationsEngine, AUTOMATIONS_STORAGE_KEY } from '../services/automationsEngine';
 import { permissionEngine } from '../security/permissionEngine';
+import { ToolPermissionPolicy, ToolPolicyMap } from '../security/types';
 import { computeParametersHash } from '../security/canonicalizer';
 import { eventBus } from '../utils/eventBus';
 import { IntegrationServiceConfig, WebhookEventPayload, IntegrationProviderId } from '../types/integrations';
@@ -101,6 +102,7 @@ export interface LioraState {
   deleteSession: (id: string) => void;
   updateSessionTitle: (id: string, title: string) => void;
   reloadFromStorage: () => void;
+  reloadAllFromStorage: () => Promise<void>;
   sendMessage: (text: string, image?: { data: string; mimeType?: string }, audio?: { data: string; mimeType?: string }) => Promise<void>;
   abortGeneration: () => void;
   retryMessage: (messageId: string) => Promise<void>;
@@ -115,14 +117,19 @@ export interface LioraState {
   addMemory: (entry: Omit<MemoryEntry, 'id' | 'updatedAt'>) => void;
   updateMemory: (id: string, entry: Partial<Omit<MemoryEntry, 'id' | 'updatedAt'>>) => void;
   deleteMemory: (id: string) => void;
-  importMemories: (entries: MemoryEntry[], mode?: 'merge' | 'replace') => void;
+  importMemories: (entries: MemoryEntry[], mode?: 'merge' | 'replace') => number;
   addCredential: (cred: Omit<CredentialItem, 'id' | 'maskedKey'>) => void;
   deleteCredential: (id: string) => void;
 
-  // Tool Registry Actions (Marco 6.1)
+  // Tool Registry Actions (Marco 6.1) & Granular Policies
   tools: ToolSummary[];
+  toolPolicies: ToolPolicyMap;
+  globalAutoApprove: boolean;
   loadTools: () => Promise<void>;
   executeTool: (toolName: string, parameters?: Record<string, any>) => Promise<ToolExecutionResult>;
+  setToolPolicy: (toolName: string, policy: ToolPermissionPolicy) => Promise<void>;
+  setGlobalAutoApprove: (enabled: boolean) => Promise<void>;
+  syncToolPolicies: () => Promise<void>;
 
   // Interactive Consent Flow Actions (Marco 7.3)
   pendingConsent: PendingConsentState | null;
@@ -156,7 +163,7 @@ export interface LioraState {
   vaultDiagnosticMessage: string | null;
   runVaultDiagnostics: () => Promise<boolean>;
   loadServices: () => void;
-  syncServicesFromEnv: () => Promise<void>;
+  syncServicesFromEnv: (options?: { skipRemoteFetch?: boolean }) => Promise<void>;
   connectService: (serviceId: string, rawKey: string, options?: { endpointUrl?: string; scopes?: string[] }) => Promise<boolean>;
   disconnectService: (serviceId: string) => void;
   testServiceConnection: (serviceId: string) => Promise<number>;
@@ -170,7 +177,13 @@ export interface LioraState {
   addDevice: (device: DeviceEntity) => DeviceEntity;
   removeDevice: (deviceId: string) => boolean;
   refreshDeviceTelemetry: (deviceId?: string) => Promise<void>;
-  sendDeviceCommand: (deviceId: string, commandType: DeviceCommand['commandType'], riskLevel?: ToolRiskLevel, payload?: Record<string, any>) => Promise<DeviceCommand>;
+  sendDeviceCommand: (
+    deviceId: string,
+    commandType: DeviceCommand['commandType'],
+    riskLevel?: ToolRiskLevel,
+    payload?: Record<string, any>,
+    options?: { consentToken?: string; uiConfirmed?: boolean; sessionId?: string }
+  ) => Promise<DeviceCommand>;
   pingDevicesHealth: () => Record<string, boolean>;
 
   // Global Settings (Marco 11.1)
@@ -227,15 +240,90 @@ function bootstrapInitialSessions(): { sessions: ConversationSession[]; activeSe
 
 export const MAX_ACTIVITY_LOGS = 1000;
 export const ACTIVITY_LOGS_STORAGE_KEY = 'liora_activity_logs_v1';
+export const TOOL_POLICIES_STORAGE_KEY = 'liora_tool_policies_v1';
+export const CONSENT_AUTO_DISMISS_MS = 2500;
+
+let consentAutoDismissTimer: ReturnType<typeof setTimeout> | null = null;
+let orbIdleResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearConsentAutoDismissTimer(): void {
+  if (consentAutoDismissTimer) {
+    clearTimeout(consentAutoDismissTimer);
+    consentAutoDismissTimer = null;
+  }
+}
+
+function clearOrbIdleResetTimer(): void {
+  if (orbIdleResetTimer) {
+    clearTimeout(orbIdleResetTimer);
+    orbIdleResetTimer = null;
+  }
+}
+
+function appendPersistedActivityLog(prevLogs: ActivityLogItem[], item: ActivityLogItem): ActivityLogItem[] {
+  const updated = [item, ...prevLogs].slice(0, MAX_ACTIVITY_LOGS);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(ACTIVITY_LOGS_STORAGE_KEY, JSON.stringify(updated));
+    }
+  } catch (err) {
+    console.warn('[ActivityLogs] Failed to persist logs to LocalStorage:', err);
+  }
+  return updated;
+}
+
+function loadPersistedToolPolicyConfig(): { globalAutoApprove: boolean; policies: ToolPolicyMap } {
+  if (typeof localStorage === 'undefined') {
+    return { globalAutoApprove: false, policies: {} };
+  }
+  try {
+    const raw = localStorage.getItem(TOOL_POLICIES_STORAGE_KEY);
+    if (!raw) return { globalAutoApprove: false, policies: {} };
+    const parsed = JSON.parse(raw);
+    const policies: ToolPolicyMap = {};
+    if (parsed?.policies && typeof parsed.policies === 'object') {
+      for (const [k, v] of Object.entries(parsed.policies)) {
+        if (v === 'always_allow' || v === 'always_require_consent') {
+          policies[k] = v;
+        }
+      }
+    }
+    const globalAutoApprove = Boolean(parsed?.globalAutoApprove);
+    permissionEngine.setGlobalAutoApprove(globalAutoApprove);
+    permissionEngine.setToolPolicies(policies);
+    return { globalAutoApprove, policies };
+  } catch {
+    return { globalAutoApprove: false, policies: {} };
+  }
+}
+
+function savePersistedToolPolicyConfig(globalAutoApprove: boolean, policies: ToolPolicyMap): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(TOOL_POLICIES_STORAGE_KEY, JSON.stringify({ globalAutoApprove, policies }));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+const initialToolPolicyConfig = loadPersistedToolPolicyConfig();
 
 // Instrução de sistema compartilhada entre sendMessage e retryMessage (Fix W1)
 export const LIORA_SYSTEM_INSTRUCTION = 
   "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
   "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
-  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
+  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Cockpit, Automações, Desenvolvedor, Integrações, Configurações). " +
   "Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Ao receber ordens para navegar ou alternar abas, confirme com prontidão e naturalidade. " +
   "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), use 'open_gps_navigation'. Quando pedir locais próximos ('mercado mais próximo', 'farmácia', 'posto'), use 'maps_search_places'. " +
-  "EXECUÇÃO DE FERRAMENTAS DO SISTEMA: NUNCA afirme que abriu o Bloco de Notas, navegador, programa ou executou uma ação física no computador antes de receber o retorno da ferramenta confirmando 'success: true'. Se a ferramenta falhar ou exigir confirmação humana, informe o erro ou peça confirmação ao Mestre explicitamente. Se 'simulated: true' estiver presente no retorno, informe claramente que a ação foi simulada no modo Web Preview. " +
+  "CICLO DE VIDA DAS FERRAMENTAS (INÍCIO, MEIO E FIM): Pense sempre na intenção completa do Mestre do início ao fim. Se ele pedir uma ação simples (ex: 'abra o bloco de notas'), execute a abertura via ferramenta e pergunte proativamente se deseja que você escreva algo, crie um relatório, anote ideias ou salve um arquivo. " +
+  "Se ele pedir ações compostas (ex: 'abra o bloco de notas e escreva um relatório/minhas ideias', 'abra outra aba', 'digite X e salve', 'feche o bloco de notas'), ENCADEIE as ferramentas necessárias passo a passo até concluir o objetivo: " +
+  "1) INÍCIO: abra/garanta o aplicativo (`pc_manage_apps` com action='launch' ou `open_application`) ou crie arquivo diretamente (`workspace_write_file` / `file_write_and_modify`); " +
+  "2) MEIO: para escrever no app aberto use `pc_simulate_input` com action='type' e `waitFocusMs: 800`, ou use `pc_simulate_input` com action='hotkey' para abrir nova aba (`Ctrl+T`), fechar aba (`Ctrl+W`), alternar abas (`Ctrl+Tab`) ou salvar (`Ctrl+S`); " +
+  "3) FIM: quando o Mestre pedir para encerrar ou fechar um app, use `pc_manage_apps` com action='kill' (processo) ou `pc_simulate_input` com action='hotkey' (`Alt+F4`). " +
+  "PERMISSÕES, CONSENTIMENTO E MODO DESENVOLVEDOR: Ferramentas R0 rodam automaticamente; ferramentas R1 e R2 (abrir/fechar apps, digitar/enviar atalhos, modificar arquivos, comandos sandbox) pausam para autorização se a política não estiver liberada. " +
+  "Se uma ferramenta retornar `requiresConsent: true` ou `REQUIRES_USER_CONFIRMATION`, NUNCA finja que a ação ocorreu: explique exatamente qual etapa pausou e por quê (nível R1/R2), e oriente o Mestre que ele pode autorizar AGORA clicando em 'Aprovar' na tela ou dizendo por voz 'Confirmar' / 'Autorizar' (ou 'Cancelar' para abortar). " +
+  "Apenas se o Mestre quiser aprovação automática contínua sem interrupções futuras, informe que ele pode habilitar 'Auto-Consentimento Operador (R1/R2)' ou definir a política individual ('Sempre Permitir') na aba Desenvolvedor — você pode inclusive navegar até lá se ele pedir. " +
+  "EXECUÇÃO HONESTA (REAL vs. SIMULADO): NUNCA afirme que abriu um app, digitou, salvou ou fechou algo no PC antes de receber o retorno confirmando `success: true`. Se `simulated: true` estiver no retorno, declare explicitamente que a etapa ocorreu em `[Modo Simulado / Web Preview]` sem efeito físico no sistema operacional. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown com linguagem especificada.";
 
 const defaultActivityLogs: ActivityLogItem[] = [
@@ -425,6 +513,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   activityLogs: bootstrapActivityLogs(),
 
   tools: [],
+  toolPolicies: initialToolPolicyConfig.policies,
+  globalAutoApprove: initialToolPolicyConfig.globalAutoApprove,
   automations: automationsEngine.getRules(),
   automationLogs: automationsEngine.getLogs(),
   shieldModeActive: true,
@@ -608,6 +698,91 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     }
   },
 
+  reloadAllFromStorage: async () => {
+    // 1. Sessões (restaura payload do storageAdapter para PRIMARY_STORAGE_KEY antes do reload)
+    try {
+      const adapterSessions = await storageAdapter.loadAll<any>('sessions');
+      if (Array.isArray(adapterSessions) && adapterSessions.length > 0) {
+        const payloadObj = adapterSessions.find((item: any) => item && Array.isArray(item.sessions));
+        if (payloadObj) {
+          saveHistory(payloadObj.sessions, payloadObj.activeSessionId || payloadObj.sessions[0]?.id || null);
+        } else {
+          const flatSessions = adapterSessions.flatMap((item: any) =>
+            Array.isArray(item) ? item : (item && typeof item === 'object' && 'messages' in item ? [item] : [])
+          );
+          if (flatSessions.length > 0) {
+            saveHistory(flatSessions, flatSessions[0]?.id || null);
+          }
+        }
+      }
+    } catch {}
+    get().reloadFromStorage();
+
+    // 2. Configurações Globais
+    try {
+      const adapterSettings = await storageAdapter.loadAll<GlobalSettings>('settings');
+      if (Array.isArray(adapterSettings) && adapterSettings.length > 0) {
+        const latestSettings = adapterSettings[adapterSettings.length - 1];
+        if (latestSettings && typeof latestSettings === 'object') {
+          settingsManager.saveSettings(latestSettings);
+        }
+      }
+    } catch {}
+    get().loadSettings();
+
+    // 3. Memórias de longo prazo
+    try {
+      const adapterMemories = await storageAdapter.loadAll<MemoryEntry>('memories');
+      if (Array.isArray(adapterMemories) && adapterMemories.length > 0) {
+        const unwrapped = adapterMemories.flatMap((item: any) =>
+          Array.isArray(item) ? item : (item && typeof item === 'object' && 'key' in item ? [item as MemoryEntry] : [])
+        );
+        if (unwrapped.length > 0) {
+          persistMemoriesToLocalStorage(unwrapped);
+          set({ memoryEntries: unwrapped });
+        } else {
+          set({ memoryEntries: bootstrapMemoryEntries() });
+        }
+      } else {
+        set({ memoryEntries: bootstrapMemoryEntries() });
+      }
+    } catch {
+      set({ memoryEntries: bootstrapMemoryEntries() });
+    }
+
+    // 4. Regras de Automação
+    try {
+      const adapterAutos = await storageAdapter.loadAll<any>('automations');
+      if (Array.isArray(adapterAutos) && adapterAutos.length > 0) {
+        const unwrappedRules = adapterAutos.flatMap((item: any) =>
+          Array.isArray(item) ? item : (item && typeof item === 'object' && item.trigger && item.action ? [item as AutomationRule] : [])
+        );
+        if (unwrappedRules.length > 0) {
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(AUTOMATIONS_STORAGE_KEY, JSON.stringify(unwrappedRules));
+          }
+          automationsEngine.reloadFromStorage(unwrappedRules);
+        }
+      }
+    } catch {}
+    get().loadAutomations();
+
+    // 5. Dispositivos Pareados
+    try {
+      const adapterDevices = await storageAdapter.loadAll<any>('devices');
+      if (Array.isArray(adapterDevices) && adapterDevices.length > 0) {
+        const unwrappedDevices = adapterDevices.flatMap((item: any) =>
+          Array.isArray(item) ? item : (item && typeof item === 'object' && item.id && item.type ? [item as DeviceEntity] : [])
+        );
+        devicesManager.reloadFromStorage(unwrappedDevices);
+      }
+    } catch {}
+    get().loadDevices();
+
+    // 6. Integrações & Serviços
+    get().loadServices();
+  },
+
   clearMessages: () => {
     set((state) => {
       const activeId = state.activeSessionId;
@@ -737,6 +912,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Calculate context strictly from target session messages
     const currentSessionMessages = targetSession.messages;
     const history = formatGeminiHistory(currentSessionMessages);
+    clearOrbIdleResetTimer();
     const controller = new AbortController();
 
     const newTargetMessages = [...currentSessionMessages, userMsg, assistantMsg];
@@ -808,6 +984,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     const navMatch = parseNavigationIntent(clean || '');
     if (navMatch && !liveIsHandling) {
+      setActiveAbortController(null);
       get().setActiveTab(navMatch.tab);
       updateDeterministicReply(navMatch.spokenFeedback, 'completed');
 
@@ -830,10 +1007,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     // Interceptação determinística de rotas veiculares (GPS)
     const routeIntent = parseRouteIntent(clean || '');
-    if (routeIntent) {
+    if (routeIntent && !liveIsHandling) {
       const appName = routeIntent.provider === 'waze' ? 'Waze' : 'Google Maps';
       try {
         const navResult = await launchGpsNavigation(routeIntent.destination, routeIntent.provider, routeIntent.origin);
+        if (controller.signal.aborted) {
+          set((state) => ({ isGenerating: false, orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE' }));
+          return;
+        }
         const feedback = navResult.success
           ? (navResult.dryRun ? `[Modo Simulado] ${routeIntent.spokenFeedback}` : routeIntent.spokenFeedback)
           : `Mestre, não consegui abrir o ${appName} para traçar a rota até "${routeIntent.destination}".`;
@@ -862,6 +1043,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           speechService.unlockAudio();
           speechService.speak(errText, undefined, undefined, { isDeterministicOverride: true });
         }
+      } finally {
+        if (getActiveAbortController() === controller) setActiveAbortController(null);
       }
 
       return;
@@ -869,9 +1052,13 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     // Interceptação determinística de busca de locais (Google Maps Places)
     const placesIntent = parsePlacesSearchIntent(clean || '');
-    if (placesIntent) {
+    if (placesIntent && !liveIsHandling) {
       try {
         const searchResult = await launchPlacesSearch(placesIntent.query, placesIntent.nearLocation);
+        if (controller.signal.aborted) {
+          set((state) => ({ isGenerating: false, orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE' }));
+          return;
+        }
         const feedback = searchResult.success
           ? (searchResult.dryRun ? `[Modo Simulado] ${placesIntent.spokenFeedback}` : placesIntent.spokenFeedback)
           : `Mestre, não consegui abrir a busca por "${placesIntent.query}" no Google Maps.`;
@@ -900,6 +1087,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           speechService.unlockAudio();
           speechService.speak(errText, undefined, undefined, { isDeterministicOverride: true });
         }
+      } finally {
+        if (getActiveAbortController() === controller) setActiveAbortController(null);
       }
 
       return;
@@ -908,6 +1097,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Interceptação determinística de data e hora local
     const timeMatch = parseTimeCommandIntent(clean || '');
     if (timeMatch && !liveIsHandling) {
+      setActiveAbortController(null);
       updateDeterministicReply(timeMatch.spokenFeedback, 'completed');
 
       get().addActivityLog({
@@ -934,6 +1124,10 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       try {
         // Executa no backend antes de confirmar ao usuário (zero falso positivo)
         const result = await executePcAction(pcMatch);
+        if (controller.signal.aborted) {
+          set((state) => ({ isGenerating: false, orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE' }));
+          return;
+        }
 
         if (!result.success && result.requiresConsent && result.consentToolName) {
           const now = Date.now();
@@ -942,7 +1136,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
               auditId: `consent-${now}`,
               ruleId: 'ui-consent',
               toolName: result.consentToolName,
-              riskLevel: 'R1',
+              riskLevel: result.consentRiskLevel || 'R1',
               parameters: result.consentParams || {},
               consentToken: '',
               sessionId: get().activeSessionId || 'operator-voice-session',
@@ -967,7 +1161,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           category: 'system',
           summary: pcMatch.type === 'app_launch' ? `Executar App: ${pcMatch.appName}` : `Ação de Sistema: ${pcMatch.action}`,
           details: result.message,
-          riskLevel: 'R1',
+          riskLevel: result.consentRiskLevel || 'R1',
           status: result.success ? 'success' : result.requiresConsent ? 'warning' : 'error',
           simulated: Boolean(result.simulated)
         });
@@ -993,6 +1187,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           speechService.unlockAudio();
           speechService.speak(errText, undefined, undefined, { isDeterministicOverride: true });
         }
+      } finally {
+        if (getActiveAbortController() === controller) setActiveAbortController(null);
       }
 
       return;
@@ -1170,7 +1366,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                   set({ orbState: 'SPEAKING' });
                 }
 
-                if (shouldSpeakResponse) {
+                if (shouldSpeakResponse && get().pendingConsent?.status !== 'PENDING') {
                   unspokenBuffer += data.chunk;
                   // Busca por delimitadores de frase (., !, ?, \n, ;) ou acúmulo de >35 caracteres
                   const match = unspokenBuffer.match(/^([^.!?\n;]+[.!?\n;]+)(.*)/s);
@@ -1275,7 +1471,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       }
 
       // Finaliza texto restante no buffer de fala e dispara o aviso de conclusão
-      if (shouldSpeakResponse && unspokenBuffer.trim()) {
+      const hasPendingConsent = get().pendingConsent?.status === 'PENDING';
+      if (shouldSpeakResponse && !hasPendingConsent && unspokenBuffer.trim()) {
         speechService.speakStreamingChunk(sanitizeTextForSpeech(unspokenBuffer.trim()), () => set({ orbState: 'SPEAKING' }));
       }
 
@@ -1321,7 +1518,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         };
       });
 
-      if (shouldSpeakResponse) {
+      if (shouldSpeakResponse && !hasPendingConsent) {
         speechService.finishStreamingQueue(() => {
           if (get().isVoiceActive) {
             set({ orbState: 'LISTENING' });
@@ -1330,13 +1527,20 @@ export const useLioraStore = create<LioraState>((set, get) => ({
             set({ orbState: 'IDLE' });
           }
         });
-      } else {
-        setTimeout(() => {
-          if (get().orbState === 'SUCCESS') set({ orbState: 'IDLE' });
+      } else if (!shouldSpeakResponse) {
+        clearOrbIdleResetTimer();
+        orbIdleResetTimer = setTimeout(() => {
+          orbIdleResetTimer = null;
+          if (get().orbState === 'SUCCESS' && !get().isGenerating) {
+            set({ orbState: get().isVoiceActive ? 'LISTENING' : 'IDLE' });
+          }
         }, 2000);
+        if (typeof (orbIdleResetTimer as any)?.unref === 'function') (orbIdleResetTimer as any).unref();
       }
+      if (getActiveAbortController() === controller) setActiveAbortController(null);
 
     } catch (err: any) {
+      if (getActiveAbortController() === controller) setActiveAbortController(null);
       if (controller.signal.aborted || err.name === 'AbortError') {
         set((state) => {
           const cancelIso = new Date().toISOString();
@@ -1366,13 +1570,17 @@ export const useLioraStore = create<LioraState>((set, get) => ({
             messages: isCurrent && currentSession ? currentSession.messages : state.messages,
             orbState: 'CANCELLED',
             isGenerating: false,
-            
           };
         });
 
-        setTimeout(() => {
-          if (get().orbState === 'CANCELLED') set({ orbState: 'IDLE' });
+        clearOrbIdleResetTimer();
+        orbIdleResetTimer = setTimeout(() => {
+          orbIdleResetTimer = null;
+          if (get().orbState === 'CANCELLED' && !get().isGenerating) {
+            set({ orbState: get().isVoiceActive ? 'LISTENING' : 'IDLE' });
+          }
         }, 2000);
+        if (typeof (orbIdleResetTimer as any)?.unref === 'function') (orbIdleResetTimer as any).unref();
         return;
       }
 
@@ -1408,13 +1616,19 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         };
       });
 
-      setTimeout(() => {
-        if (get().orbState === 'ERROR') set({ orbState: 'IDLE' });
+      clearOrbIdleResetTimer();
+      orbIdleResetTimer = setTimeout(() => {
+        orbIdleResetTimer = null;
+        if (get().orbState === 'ERROR' && !get().isGenerating) {
+          set({ orbState: get().isVoiceActive ? 'LISTENING' : 'IDLE' });
+        }
       }, 3000);
+      if (typeof (orbIdleResetTimer as any)?.unref === 'function') (orbIdleResetTimer as any).unref();
     }
   },
 
   abortGeneration: () => {
+    clearOrbIdleResetTimer();
     const controller = getActiveAbortController();
     if (controller) {
       controller.abort();
@@ -1436,14 +1650,16 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     if (failedIdx === -1) return;
 
     let userText = '';
+    let userMsgIdx = -1;
     for (let i = failedIdx - 1; i >= 0; i--) {
       if (currentMessages[i].sender === 'user') {
         userText = currentMessages[i].text;
+        userMsgIdx = i;
         break;
       }
     }
 
-    if (!userText) return;
+    if (!userText || userMsgIdx === -1) return;
 
     // Filter out the failed message from active session
     set((state) => {
@@ -1458,8 +1674,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       };
     });
 
-    const targetSession = get().sessions.find(s => s.id === targetSessionId)!;
-    const history = formatGeminiHistory(targetSession.messages.filter(m => m.text !== userText || m.sender !== 'user'));
+    const history = formatGeminiHistory(currentMessages.slice(0, userMsgIdx));
     
     const assistantMsgId = `msg-${Date.now()}-a`;
     const retryNow = new Date();
@@ -1470,12 +1685,13 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       text: '',
       timestamp: retryTimeHms,
       status: 'streaming',
-      modelUsed: 'gemini-3.1-flash-lite',
+      modelUsed: get().activeModel || 'gemini-3.1-flash-lite',
       source: 'text',
       createdAt: retryNow.toISOString(),
       sessionId: targetSessionId
     };
 
+    clearOrbIdleResetTimer();
     const controller = new AbortController();
 
     set((state) => {
@@ -1568,6 +1784,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       let accumulatedText = '';
       let buffer = '';
       let hasReceivedFirstChunk = false;
+      let usedProvider: 'gemini' | 'openrouter' = 'gemini';
+      let modelUsedRef: string | null = null;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -1583,7 +1801,58 @@ export const useLioraStore = create<LioraState>((set, get) => ({
             const jsonStr = line.replace(/^data:\s*/, '');
             try {
               const data = JSON.parse(jsonStr);
-              if (data.chunk) {
+              if (data.done && data.modelUsed) {
+                modelUsedRef = data.modelUsed;
+              }
+              if (data.failover) {
+                const failoverNotice = `\n\n> ⚠️ *[Alternado para OpenRouter: ${data.message || 'Cota do Gemini excedida'}]*\n\n`;
+                accumulatedText += failoverNotice;
+                if (data.provider === 'openrouter') {
+                  usedProvider = 'openrouter';
+                }
+                get().addActivityLog({
+                  category: 'ai',
+                  summary: 'Cota Gemini Excedida -> OpenRouter Failover',
+                  details: data.message || 'Cota do Gemini atingida. Alternando para o modelo de contingência OpenRouter.',
+                  riskLevel: 'R0',
+                  status: 'warning',
+                  simulated: false
+                });
+              } else if (data.toolExecuted) {
+                get().addActivityLog({
+                  category: 'tool',
+                  summary: `Ferramenta executada: ${data.toolExecuted}`,
+                  details: data.resultSummary || (data.success ? 'Execução real confirmada pelo servidor.' : 'Falhou.'),
+                  riskLevel: (data.riskLevel || 'R1') as any,
+                  status: data.success ? 'success' : 'error',
+                  simulated: Boolean(data.simulated)
+                });
+                if (!data.success && (data.requiresConsent || data.code === 'REQUIRES_USER_CONFIRMATION' || data.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
+                  const now = Date.now();
+                  set({
+                    pendingConsent: {
+                      auditId: data.auditId || `sse-consent-${now}`,
+                      ruleId: 'sse-tool-consent',
+                      toolName: data.toolExecuted,
+                      riskLevel: (data.riskLevel || 'R1') as ToolRiskLevel,
+                      parameters: data.parameters || {},
+                      consentToken: '',
+                      sessionId: targetSessionId || 'operator-voice-session',
+                      expiresAt: now + 60000,
+                      reason: data.resultSummary || `A execução de '${data.toolExecuted}' requer sua confirmação explícita.`,
+                      status: 'PENDING'
+                    }
+                  });
+                }
+                eventBus.publish('liora:tool_result', {
+                  toolName: data.toolExecuted,
+                  success: Boolean(data.success),
+                  requiresConsent: Boolean(data.requiresConsent),
+                  simulated: Boolean(data.simulated),
+                  resultSummary: data.resultSummary,
+                  resultData: data.resultData
+                });
+              } else if (data.chunk) {
                 accumulatedText += data.chunk;
                 if (!hasReceivedFirstChunk) {
                   hasReceivedFirstChunk = true;
@@ -1665,7 +1934,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       // no AnalyticsDashboard, mas o retryMessage não registrava — toda resposta
       // reenviada ficava invisível nas estatísticas. Registro na conclusão.
       tokenAnalytics.recordApiCall(
-        'gemini',
+        usedProvider,
         userText.length + JSON.stringify(history).length,
         accumulatedText.length,
         Math.round(performance.now() - retryStartMs)
@@ -1682,7 +1951,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
               m.id === assistantMsgId ? {
                 ...m,
                 text: accumulatedText || 'Sem resposta gerada.',
-                status: 'completed'
+                status: 'completed',
+                ...(modelUsedRef ? { modelUsed: modelUsedRef } : {})
               } : m
             )
           };
@@ -1721,12 +1991,19 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           }
         );
       } else {
-        setTimeout(() => {
-          if (get().orbState === 'SUCCESS') set({ orbState: 'IDLE' });
+        clearOrbIdleResetTimer();
+        orbIdleResetTimer = setTimeout(() => {
+          orbIdleResetTimer = null;
+          if (get().orbState === 'SUCCESS' && !get().isGenerating) {
+            set({ orbState: get().isVoiceActive ? 'LISTENING' : 'IDLE' });
+          }
         }, 2000);
+        if (typeof (orbIdleResetTimer as any)?.unref === 'function') (orbIdleResetTimer as any).unref();
       }
+      if (getActiveAbortController() === controller) setActiveAbortController(null);
 
     } catch (err: any) {
+      if (getActiveAbortController() === controller) setActiveAbortController(null);
       if (controller.signal.aborted || err.name === 'AbortError') {
         set((state) => {
           const cancelIso = new Date().toISOString();
@@ -1756,13 +2033,17 @@ export const useLioraStore = create<LioraState>((set, get) => ({
             messages: isCurrent && currentSession ? currentSession.messages : state.messages,
             orbState: 'CANCELLED',
             isGenerating: false,
-            
           };
         });
 
-        setTimeout(() => {
-          if (get().orbState === 'CANCELLED') set({ orbState: 'IDLE' });
+        clearOrbIdleResetTimer();
+        orbIdleResetTimer = setTimeout(() => {
+          orbIdleResetTimer = null;
+          if (get().orbState === 'CANCELLED' && !get().isGenerating) {
+            set({ orbState: get().isVoiceActive ? 'LISTENING' : 'IDLE' });
+          }
         }, 2000);
+        if (typeof (orbIdleResetTimer as any)?.unref === 'function') (orbIdleResetTimer as any).unref();
         return;
       }
 
@@ -1798,9 +2079,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         };
       });
 
-      setTimeout(() => {
-        if (get().orbState === 'ERROR') set({ orbState: 'IDLE' });
+      clearOrbIdleResetTimer();
+      orbIdleResetTimer = setTimeout(() => {
+        orbIdleResetTimer = null;
+        if (get().orbState === 'ERROR' && !get().isGenerating) {
+          set({ orbState: get().isVoiceActive ? 'LISTENING' : 'IDLE' });
+        }
       }, 3000);
+      if (typeof (orbIdleResetTimer as any)?.unref === 'function') (orbIdleResetTimer as any).unref();
     }
   },
 
@@ -1810,17 +2096,9 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       ...log
     };
-    set((state) => {
-      const updated = [newItem, ...state.activityLogs].slice(0, MAX_ACTIVITY_LOGS);
-      try {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem(ACTIVITY_LOGS_STORAGE_KEY, JSON.stringify(updated));
-        }
-      } catch (err) {
-        console.warn('[ActivityLogs] Failed to persist logs to LocalStorage:', err);
-      }
-      return { activityLogs: updated };
-    });
+    set((state) => ({
+      activityLogs: appendPersistedActivityLog(state.activityLogs, newItem)
+    }));
 
     // Envia telemetria em segundo plano para o terminal do servidor (apenas ambiente browser)
     if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
@@ -1855,9 +2133,18 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   },
 
   updateDeviceStatus: (id, connected) => {
-    set((state) => ({
-      devices: state.devices.map(d => d.id === id ? { ...d, connected, lastSeen: 'Agora' } : d)
-    }));
+    const updatedDevice = devicesManager.updateDeviceStatus(id, connected);
+    if (updatedDevice) {
+      set({ devices: devicesManager.getDevices() });
+    } else {
+      set((state) => ({
+        devices: state.devices.map(d =>
+          d.id === id
+            ? { ...d, connected, status: connected ? 'ONLINE' : 'OFFLINE', lastSeen: 'Agora' }
+            : d
+        )
+      }));
+    }
   },
 
   addMemory: (entry) => {
@@ -1958,30 +2245,54 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   },
 
   importMemories: (entries, mode = 'merge') => {
+    if (!Array.isArray(entries)) return 0;
     const today = new Date().toISOString().split('T')[0];
+    const allowedCategories = new Set<MemoryEntry['category']>(['preference', 'project', 'fact', 'routine']);
+    const validEntries = entries
+      .filter((e): e is MemoryEntry => (
+        Boolean(e) &&
+        typeof e === 'object' &&
+        typeof e.key === 'string' &&
+        e.key.trim().length > 0 &&
+        typeof e.value === 'string' &&
+        e.value.trim().length > 0
+      ))
+      .map((e, idx) => {
+        const category = allowedCategories.has(e.category) ? e.category : 'preference';
+        const confidence = typeof e.confidence === 'number' && Number.isFinite(e.confidence)
+          ? Math.min(1, Math.max(0, e.confidence))
+          : 1.0;
+        return {
+          id: typeof e.id === 'string' && e.id.trim() ? e.id.trim() : `mem-imp-${Date.now()}-${idx}`,
+          category,
+          key: e.key.trim(),
+          value: e.value.trim(),
+          confidence,
+          updatedAt: typeof e.updatedAt === 'string' && e.updatedAt.trim() ? e.updatedAt.trim() : today
+        };
+      });
+
+    if (validEntries.length === 0) {
+      return 0;
+    }
+
     let finalEntries: MemoryEntry[] = [];
 
     if (mode === 'replace') {
-      finalEntries = entries.map((e, idx) => ({
-        id: e.id || `mem-imp-${Date.now()}-${idx}`,
-        category: e.category || 'preference',
-        key: e.key ? e.key.trim() : `chave_${idx}`,
-        value: e.value || '',
-        confidence: e.confidence ?? 1.0,
-        updatedAt: e.updatedAt || today
-      }));
+      finalEntries = validEntries;
     } else {
       const map = new Map<string, MemoryEntry>();
       get().memoryEntries.forEach(m => map.set(m.key.trim().toLowerCase(), m));
-      entries.forEach((e, idx) => {
-        const cleanKey = e.key ? e.key.trim() : `chave_${idx}`;
+      validEntries.forEach((e) => {
+        const cleanKey = e.key;
         const normalized = cleanKey.toLowerCase();
+        const existing = map.get(normalized);
         map.set(normalized, {
-          id: e.id || map.get(normalized)?.id || `mem-imp-${Date.now()}-${idx}`,
-          category: e.category || map.get(normalized)?.category || 'preference',
+          id: e.id || existing?.id || `mem-imp-${Date.now()}`,
+          category: e.category || existing?.category || 'preference',
           key: cleanKey,
-          value: e.value || map.get(normalized)?.value || '',
-          confidence: e.confidence ?? map.get(normalized)?.confidence ?? 1.0,
+          value: e.value,
+          confidence: e.confidence ?? existing?.confidence ?? 1.0,
           updatedAt: today
         });
       });
@@ -1993,12 +2304,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
     get().addActivityLog({
       category: 'system',
-      summary: `Cofre de memórias importado (${entries.length} itens)`,
+      summary: `Cofre de memórias importado (${validEntries.length} itens)`,
       details: `Modo de importação: ${mode}. Total de registros ativos: ${finalEntries.length}.`,
       riskLevel: 'R1',
       status: 'success',
       simulated: false
     });
+
+    return validEntries.length;
   },
 
   addCredential: (cred) => {
@@ -2016,6 +2329,9 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
   loadTools: async () => {
     try {
+      // Sincroniza políticas persistidas no localStorage com o servidor e permissionEngine local
+      void get().syncToolPolicies();
+
       const res = await fetch('/api/tools', {
         headers: { 'Accept': 'application/json' }
       });
@@ -2041,6 +2357,82 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         }
       } catch {
         // Safe no-op
+      }
+    }
+  },
+
+  syncToolPolicies: async () => {
+    const hasLocalConfig =
+      typeof localStorage !== 'undefined' && localStorage.getItem(TOOL_POLICIES_STORAGE_KEY) !== null;
+    const { globalAutoApprove, toolPolicies } = get();
+    permissionEngine.setGlobalAutoApprove(globalAutoApprove);
+    permissionEngine.setToolPolicies(toolPolicies);
+    if (typeof fetch !== 'function') return;
+    try {
+      const res = hasLocalConfig
+        ? await fetch('/api/security/tool-policies', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ globalAutoApprove, policies: toolPolicies })
+          })
+        : await fetch('/api/security/tool-policies', {
+            headers: { 'Accept': 'application/json' }
+          });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data && typeof data === 'object' && data.policies) {
+          const nextAuto = Boolean(data.globalAutoApprove);
+          const nextPolicies = data.policies as ToolPolicyMap;
+          permissionEngine.setGlobalAutoApprove(nextAuto);
+          permissionEngine.setToolPolicies(nextPolicies);
+          set({ globalAutoApprove: nextAuto, toolPolicies: nextPolicies });
+        }
+      }
+    } catch {
+      // Offline/test fallback silencioso — políticas permanecem ativas no permissionEngine e localStorage
+    }
+  },
+
+  setToolPolicy: async (toolName: string, policy: ToolPermissionPolicy) => {
+    const current = { ...get().toolPolicies };
+    if (policy === 'default') {
+      delete current[toolName];
+    } else {
+      current[toolName] = policy;
+    }
+    permissionEngine.setToolPolicy(toolName, policy);
+    savePersistedToolPolicyConfig(get().globalAutoApprove, current);
+    set({ toolPolicies: current });
+
+    if (typeof fetch === 'function') {
+      try {
+        await fetch('/api/security/tool-policies', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ toolName, policy })
+        });
+      } catch {
+        // fallback local preservado
+      }
+    }
+  },
+
+  setGlobalAutoApprove: async (enabled: boolean) => {
+    const next = Boolean(enabled);
+    permissionEngine.setGlobalAutoApprove(next);
+    savePersistedToolPolicyConfig(next, get().toolPolicies);
+    set({ globalAutoApprove: next });
+
+    if (typeof fetch === 'function') {
+      try {
+        await fetch('/api/security/tool-policies', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ globalAutoApprove: next })
+        });
+      } catch {
+        // fallback local preservado
       }
     }
   },
@@ -2092,7 +2484,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         verificationDetails: (data as any).verification?.checkDetails
       };
 
-      set((state) => ({ activityLogs: [logItem, ...state.activityLogs] }));
+      set((state) => ({ activityLogs: appendPersistedActivityLog(state.activityLogs, logItem) }));
 
       // Execução de Ações Reais de Interface e Navegação na Store somente quando autorizada e bem-sucedida
       if (data.success) {
@@ -2155,12 +2547,13 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         simulated: true
       };
 
-      set((state) => ({ activityLogs: [logItem, ...state.activityLogs] }));
+      set((state) => ({ activityLogs: appendPersistedActivityLog(state.activityLogs, logItem) }));
       return errorResult;
     }
   },
 
   setPendingConsent: (consent: PendingConsentState | null) => {
+    clearConsentAutoDismissTimer();
     set({ pendingConsent: consent });
   },
 
@@ -2173,139 +2566,263 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       return null;
     }
 
+    clearConsentAutoDismissTimer();
     set({ pendingConsent: { ...pending, status: 'APPROVED' } });
 
-    let uiConsentToken: string | undefined = undefined;
-    if (!isTauriEnvironment() && typeof fetch === 'function') {
-      try {
-        const tokenRes = await fetch('/api/security/ui-consent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({
-            toolName: pending.toolName,
-            parameters: pending.parameters || {}
-          })
-        });
-        const tokenData = await tokenRes.json().catch(() => ({}));
-        if (!tokenRes.ok || !tokenData?.token) {
-          const errMsg = tokenData?.error || `Falha ao emitir token de consentimento (${tokenRes.status}).`;
-          const failResult: LocalExecutionResult = {
-            success: false,
-            toolName: pending.toolName,
-            riskLevel: pending.riskLevel,
-            error: errMsg,
-            executionTimeMs: 0,
-            simulated: false,
-            timestamp: new Date().toISOString()
-          };
-          const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          set(state => ({
-            activityLogs: [{
-              id: `log-${Date.now()}`,
-              timestamp: nowTime,
-              category: 'security',
-              summary: `Falha no Consentimento: ${pending.toolName}`,
-              details: errMsg,
-              riskLevel: pending.riskLevel,
-              status: 'error',
-              simulated: false
-            }, ...state.activityLogs]
-          }));
-          if (get().isVoiceActive) {
-            voiceLiveClient.extendSuppression(5000);
-            speechService.unlockAudio();
-            speechService.speak(
-              `Mestre, não foi possível validar o consentimento: ${errMsg}`,
-              undefined,
-              undefined,
-              { isDeterministicOverride: true }
-            );
-          }
-          return failResult;
+    const scheduleAutoDismiss = () => {
+      clearConsentAutoDismissTimer();
+      const targetAuditId = pending.auditId;
+      consentAutoDismissTimer = setTimeout(() => {
+        consentAutoDismissTimer = null;
+        const curr = get().pendingConsent;
+        if (curr && curr.auditId === targetAuditId && curr.status !== 'PENDING') {
+          set({ pendingConsent: null });
         }
-        uiConsentToken = tokenData.token;
-      } catch (err: any) {
-        const errMsg = err?.message || 'Erro de rede ao validar consentimento no servidor.';
-        if (get().isVoiceActive) {
-          voiceLiveClient.extendSuppression(5000);
-          speechService.unlockAudio();
-          speechService.speak(
-            `Mestre, não consegui validar a permissão com o servidor local: ${errMsg}`,
-            undefined,
-            undefined,
-            { isDeterministicOverride: true }
-          );
-        }
-        return {
-          success: false,
-          toolName: pending.toolName,
-          riskLevel: pending.riskLevel,
-          error: errMsg,
-          executionTimeMs: 0,
-          simulated: false,
-          timestamp: new Date().toISOString()
-        } as LocalExecutionResult;
+      }, CONSENT_AUTO_DISMISS_MS);
+      if (typeof (consentAutoDismissTimer as any)?.unref === 'function') {
+        (consentAutoDismissTimer as any).unref();
       }
-    }
-
-    // Disparar execução autorizada via executeLocalTool com token auditável
-    const result = await executeLocalTool(
-      pending.toolName,
-      pending.parameters,
-      pending.sessionId,
-      uiConsentToken
-    );
-
-    const isSuccess = Boolean((result as any).success);
-    const isSimulated = Boolean((result as any).simulated);
-
-    if (isSuccess) {
-      if (pending.toolName === 'navigateToTab' && pending.parameters?.tab) {
-        get().setActiveTab(pending.parameters.tab as any);
-      } else if (pending.toolName === 'openSettings') {
-        get().setActiveTab('settings');
-      } else if (pending.toolName === 'triggerAutomation' && pending.parameters?.ruleId) {
-        automationsEngine.triggerRule(pending.parameters.ruleId, { isManual: true });
-      }
-    }
-
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const logItem: ActivityLogItem = {
-      id: `log-${Date.now()}`,
-      timestamp: nowTime,
-      category: 'security',
-      summary: isSuccess
-        ? `Consentimento Aprovado: ${pending.toolName}`
-        : `Consentimento Aprovado, mas Execução Falhou: ${pending.toolName}`,
-      details: isSuccess
-        ? `Execução ${isSimulated ? 'simulada (Web Preview)' : 'nativa'} autorizada pelo usuário para '${pending.toolName}'.`
-        : `Erro após aprovação: ${(result as any).error || 'falha desconhecida na execução'}.`,
-      riskLevel: pending.riskLevel,
-      status: isSuccess ? 'success' : 'error',
-      simulated: isSimulated
     };
 
-    set(state => ({ activityLogs: [logItem, ...state.activityLogs] }));
+    let shouldAutoDismiss = true;
+    try {
+      let uiConsentToken: string | undefined = undefined;
+      if (typeof fetch === 'function') {
+        try {
+          const isNonHttpBrowser =
+            typeof window !== 'undefined' &&
+            typeof window.location?.protocol === 'string' &&
+            !window.location.protocol.startsWith('http');
+          const consentUrl = (typeof window === 'undefined' || isNonHttpBrowser)
+            ? `http://localhost:${(typeof process !== 'undefined' && process.env?.PORT) || 3000}/api/security/ui-consent`
+            : '/api/security/ui-consent';
 
-    if (get().isVoiceActive) {
-      voiceLiveClient.extendSuppression(5000);
-      speechService.unlockAudio();
-      const spokenFeedback = isSuccess
-        ? (isSimulated
-            ? `Autorizado em modo Web Preview simulado para ${pending.toolName}.`
-            : `Autorização confirmada e executada, Mestre.`)
-        : `Autorizei a ação, mas ocorreu uma falha: ${(result as any).error || 'verifique o aplicativo'}.`;
-      speechService.speak(spokenFeedback, undefined, undefined, { isDeterministicOverride: true });
+          const tokenRes = await fetch(consentUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({
+              toolName: pending.toolName,
+              parameters: pending.parameters || {}
+            })
+          });
+          const tokenData = await tokenRes.json().catch(() => ({}));
+          if (tokenRes.ok && tokenData?.token) {
+            uiConsentToken = tokenData.token;
+          } else if (!isTauriEnvironment()) {
+            const errMsg = tokenData?.error || `Falha ao emitir token de consentimento (${tokenRes.status}).`;
+            const failResult: LocalExecutionResult = {
+              success: false,
+              toolName: pending.toolName,
+              riskLevel: pending.riskLevel,
+              error: errMsg,
+              executionTimeMs: 0,
+              simulated: false,
+              timestamp: new Date().toISOString()
+            };
+            const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const isExpired = Date.now() > pending.expiresAt;
+            shouldAutoDismiss = isExpired;
+            set(state => ({
+              pendingConsent: isExpired
+                ? { ...pending, status: 'EXPIRED' }
+                : { ...pending, status: 'PENDING', reason: `${pending.reason || ''} (Falha na validação: ${errMsg})`.trim() },
+              activityLogs: appendPersistedActivityLog(state.activityLogs, {
+                id: `log-${Date.now()}`,
+                timestamp: nowTime,
+                category: 'security',
+                summary: `Falha no Consentimento: ${pending.toolName}`,
+                details: errMsg,
+                riskLevel: pending.riskLevel,
+                status: 'error',
+                simulated: false
+              })
+            }));
+            if (get().isVoiceActive) {
+              voiceLiveClient.extendSuppression(5000);
+              speechService.unlockAudio();
+              speechService.speak(
+                `Mestre, não foi possível validar o consentimento: ${errMsg}`,
+                undefined,
+                undefined,
+                { isDeterministicOverride: true }
+              );
+            }
+            return failResult;
+          }
+        } catch (err: any) {
+          if (!isTauriEnvironment()) {
+            const errMsg = err?.message || 'Erro de rede ao validar consentimento no servidor.';
+            const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const isExpired = Date.now() > pending.expiresAt;
+            shouldAutoDismiss = isExpired;
+            set(state => ({
+              pendingConsent: isExpired
+                ? { ...pending, status: 'EXPIRED' }
+                : { ...pending, status: 'PENDING', reason: `${pending.reason || ''} (Erro de rede: ${errMsg})`.trim() },
+              activityLogs: appendPersistedActivityLog(state.activityLogs, {
+                id: `log-${Date.now()}`,
+                timestamp: nowTime,
+                category: 'security',
+                summary: `Falha de Rede no Consentimento: ${pending.toolName}`,
+                details: errMsg,
+                riskLevel: pending.riskLevel,
+                status: 'error',
+                simulated: false
+              })
+            }));
+            if (get().isVoiceActive) {
+              voiceLiveClient.extendSuppression(5000);
+              speechService.unlockAudio();
+              speechService.speak(
+                `Mestre, não consegui validar a permissão com o servidor local: ${errMsg}`,
+                undefined,
+                undefined,
+                { isDeterministicOverride: true }
+              );
+            }
+            return {
+              success: false,
+              toolName: pending.toolName,
+              riskLevel: pending.riskLevel,
+              error: errMsg,
+              executionTimeMs: 0,
+              simulated: false,
+              timestamp: new Date().toISOString()
+            } as LocalExecutionResult;
+          }
+        }
+      }
+
+      // Disparar execução autorizada via executeLocalTool com token auditável
+      const result = await executeLocalTool(
+        pending.toolName,
+        pending.parameters,
+        pending.sessionId,
+        uiConsentToken
+      );
+
+      const isSuccess = Boolean((result as any).success);
+      const isSimulated = Boolean((result as any).simulated);
+
+      if (isSuccess) {
+        if (pending.toolName === 'navigateToTab' && pending.parameters?.tab) {
+          get().setActiveTab(pending.parameters.tab as any);
+        } else if (pending.toolName === 'openSettings') {
+          get().setActiveTab('settings');
+        } else if (pending.toolName === 'triggerAutomation' && pending.parameters?.ruleId) {
+          automationsEngine.triggerRule(pending.parameters.ruleId, { isManual: true });
+        }
+      }
+
+      const linkedRule = pending.ruleId ? automationsEngine.getRule(pending.ruleId) : undefined;
+      if (linkedRule) {
+        if (pending.consentToken) {
+          try {
+            permissionEngine.consumeConsentToken(
+              pending.consentToken,
+              pending.toolName,
+              pending.parametersHash || '',
+              pending.sessionId
+            );
+          } catch {
+            // Token pode já ter sido consumido ou emitido em outra camada
+          }
+        }
+        automationsEngine.recordExternalConsentResolution(linkedRule.id, {
+          status: isSuccess ? 'SUCCESS' : 'FAILED',
+          outputSummary: isSuccess
+            ? JSON.stringify((result as any).data ?? result).slice(0, 120)
+            : undefined,
+          errorMessage: isSuccess ? undefined : ((result as any).error || 'Falha após aprovação.'),
+          auditId: pending.auditId,
+          parametersHash: pending.parametersHash,
+          simulated: isSimulated,
+          durationMs: (result as any).executionTimeMs || 0
+        });
+      }
+
+      const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const logItem: ActivityLogItem = {
+        id: `log-${Date.now()}`,
+        timestamp: nowTime,
+        category: 'security',
+        summary: isSuccess
+          ? `Consentimento Aprovado: ${pending.toolName}`
+          : `Consentimento Aprovado, mas Execução Falhou: ${pending.toolName}`,
+        details: isSuccess
+          ? `Execução ${isSimulated ? 'simulada (Web Preview)' : 'nativa'} autorizada pelo usuário para '${pending.toolName}'.`
+          : `Erro após aprovação: ${(result as any).error || 'falha desconhecida na execução'}.`,
+        riskLevel: pending.riskLevel,
+        status: isSuccess ? 'success' : 'error',
+        simulated: isSimulated
+      };
+
+      set(state => ({
+        activityLogs: appendPersistedActivityLog(state.activityLogs, logItem),
+        ...(linkedRule
+          ? {
+              automations: automationsEngine.getRules(),
+              automationLogs: automationsEngine.getLogs()
+            }
+          : {})
+      }));
+
+      if (get().isVoiceActive) {
+        voiceLiveClient.extendSuppression(5000);
+        speechService.unlockAudio();
+        const spokenFeedback = isSuccess
+          ? (isSimulated
+              ? `Autorizado em modo Web Preview simulado para ${pending.toolName}.`
+              : `Autorização confirmada e executada, Mestre.`)
+          : `Autorizei a ação, mas ocorreu uma falha: ${(result as any).error || 'verifique o aplicativo'}.`;
+        speechService.speak(spokenFeedback, undefined, undefined, { isDeterministicOverride: true });
+      }
+
+      return result as ToolExecutionResult;
+    } finally {
+      if (shouldAutoDismiss) {
+        scheduleAutoDismiss();
+      }
     }
-
-    return result as ToolExecutionResult;
   },
 
   rejectConsent: () => {
     const pending = get().pendingConsent;
     if (!pending) return;
 
-    set({ pendingConsent: { ...pending, status: 'REJECTED' } });
+    clearConsentAutoDismissTimer();
+    const linkedRule = pending.ruleId ? automationsEngine.getRule(pending.ruleId) : undefined;
+    if (linkedRule) {
+      automationsEngine.recordExternalConsentResolution(linkedRule.id, {
+        status: 'BLOCKED_BY_POLICY',
+        errorMessage: 'Consentimento rejeitado manualmente pelo usuário.',
+        auditId: pending.auditId,
+        parametersHash: pending.parametersHash,
+        simulated: true
+      });
+    }
+
+    set({
+      pendingConsent: { ...pending, status: 'REJECTED' },
+      ...(linkedRule
+        ? {
+            automations: automationsEngine.getRules(),
+            automationLogs: automationsEngine.getLogs()
+          }
+        : {})
+    });
+
+    const targetAuditId = pending.auditId;
+    consentAutoDismissTimer = setTimeout(() => {
+      consentAutoDismissTimer = null;
+      const curr = get().pendingConsent;
+      if (curr && curr.auditId === targetAuditId && curr.status !== 'PENDING') {
+        set({ pendingConsent: null });
+      }
+    }, CONSENT_AUTO_DISMISS_MS);
+    if (typeof (consentAutoDismissTimer as any)?.unref === 'function') {
+      (consentAutoDismissTimer as any).unref();
+    }
 
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const logItem: ActivityLogItem = {
@@ -2319,14 +2836,46 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       simulated: true
     };
 
-    set(state => ({ activityLogs: [logItem, ...state.activityLogs] }));
+    set(state => ({ activityLogs: appendPersistedActivityLog(state.activityLogs, logItem) }));
   },
 
   expireConsent: () => {
     const pending = get().pendingConsent;
     if (!pending || pending.status !== 'PENDING') return;
 
-    set({ pendingConsent: { ...pending, status: 'EXPIRED' } });
+    clearConsentAutoDismissTimer();
+    const linkedRule = pending.ruleId ? automationsEngine.getRule(pending.ruleId) : undefined;
+    if (linkedRule) {
+      automationsEngine.recordExternalConsentResolution(linkedRule.id, {
+        status: 'BLOCKED_BY_POLICY',
+        errorMessage: 'Consentimento expirado (TTL 60s excedido).',
+        auditId: pending.auditId,
+        parametersHash: pending.parametersHash,
+        simulated: true
+      });
+    }
+
+    set({
+      pendingConsent: { ...pending, status: 'EXPIRED' },
+      ...(linkedRule
+        ? {
+            automations: automationsEngine.getRules(),
+            automationLogs: automationsEngine.getLogs()
+          }
+        : {})
+    });
+
+    const targetAuditId = pending.auditId;
+    consentAutoDismissTimer = setTimeout(() => {
+      consentAutoDismissTimer = null;
+      const curr = get().pendingConsent;
+      if (curr && curr.auditId === targetAuditId && curr.status !== 'PENDING') {
+        set({ pendingConsent: null });
+      }
+    }, CONSENT_AUTO_DISMISS_MS);
+    if (typeof (consentAutoDismissTimer as any)?.unref === 'function') {
+      (consentAutoDismissTimer as any).unref();
+    }
 
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const logItem: ActivityLogItem = {
@@ -2340,7 +2889,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       simulated: true
     };
 
-    set(state => ({ activityLogs: [logItem, ...state.activityLogs] }));
+    set(state => ({ activityLogs: appendPersistedActivityLog(state.activityLogs, logItem) }));
   },
 
   // Shield Mode Actions (Blindagem Soberana)
@@ -2675,7 +3224,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                     integrationsVault.getRawKey('svc-gemini') ||
                     (typeof localStorage !== 'undefined' ? (localStorage.getItem('GEMINI_API_KEY') || localStorage.getItem('liora_gemini_key')) : null);
 
-    let isMissing = !geminiKey || typeof geminiKey !== 'string' || geminiKey.trim().length < 5;
+    const gemSvc = integrationsVault.getService('svc-gemini');
+    let isMissing = (!geminiKey || typeof geminiKey !== 'string' || geminiKey.trim().length < 5) && gemSvc?.status !== 'CONNECTED';
 
     // Se não estiver em memória no browser, verifica se o servidor backend já possui a chave configurada no .env
     if (isMissing && typeof fetch !== 'undefined') {
@@ -2724,8 +3274,10 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     void get().syncServicesFromEnv();
   },
 
-  syncServicesFromEnv: async () => {
-    await integrationsVault.syncWithBackendEnv();
+  syncServicesFromEnv: async (options?: { skipRemoteFetch?: boolean }) => {
+    if (!options?.skipRemoteFetch) {
+      await integrationsVault.syncWithBackendEnv();
+    }
     const updatedServices = integrationsVault.getServices();
     const vaultCredentials = integrationsVault.getCredentials();
 
@@ -2954,8 +3506,8 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     });
   },
 
-  sendDeviceCommand: async (deviceId, commandType, riskLevel = 'R0', payload = {}) => {
-    const cmd = await devicesManager.sendCommand(deviceId, commandType, riskLevel, payload);
+  sendDeviceCommand: async (deviceId, commandType, riskLevel = 'R0', payload = {}, options) => {
+    const cmd = await devicesManager.sendCommand(deviceId, commandType, riskLevel, payload, options);
     set({
       devices: devicesManager.getDevices(),
       deviceCommands: devicesManager.getCommandLogs()
@@ -3017,9 +3569,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   },
 
   resetSettingsToDefault: () => {
-    const def = settingsManager.loadSettings(); // resets via manager default if cleared
-    settingsManager.saveSettings(def);
-    settingsManager.applyTheme(def.theme);
+    const def = settingsManager.resetSettings();
     if (def.ttsVoice) {
       speechService.setActiveNeuralVoice(def.ttsVoice);
       voiceLiveClient.setVoice(def.ttsVoice as any);

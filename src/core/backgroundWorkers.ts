@@ -168,8 +168,17 @@ class BackgroundWorkerManager {
       if (!ALLOWED.includes(bin)) {
         return { success: false, error: `COMMAND_NOT_IN_WHITELIST: binário '${bin}' não autorizado (permitidos: ${ALLOWED.join(', ')}).` };
       }
-      if (/[;&|`$<>]/.test(cmd)) {
+      if (/[;&|`$<>\r\n]/.test(cmd)) {
         return { success: false, error: 'COMMAND_INJECTION_BLOCKED: metacaracteres de shell não são permitidos.' };
+      }
+      if (bin === 'git') {
+        const tokens = cmd.split(/\s+/).slice(1);
+        const hasDangerousGitArg = tokens.some(
+          t => t === '-c' || t.startsWith('-c=') || t.includes('--upload-pack') || t.includes('--config')
+        );
+        if (hasDangerousGitArg) {
+          return { success: false, error: 'COMMAND_INJECTION_BLOCKED: argumentos git não permitidos no sandbox.' };
+        }
       }
     }
     if (kind === 'file_scan') {

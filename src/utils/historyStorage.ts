@@ -56,6 +56,13 @@ export function sanitizeChatMessage(msg: any): ChatMessage | null {
   const text = typeof msg.text === 'string' ? sanitizeStoredText(msg.text) : '';
   const timestamp = typeof msg.timestamp === 'string' && msg.timestamp ? msg.timestamp : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   
+  const toolsCalled = Array.isArray(msg.toolsCalled)
+    ? msg.toolsCalled.filter((t: unknown): t is string => typeof t === 'string' && t.length > 0).slice(0, 50)
+    : undefined;
+  const tokens = typeof msg.tokens === 'number' && Number.isFinite(msg.tokens) && msg.tokens >= 0
+    ? msg.tokens
+    : undefined;
+
   const sanitized: ChatMessage = {
     id,
     sender,
@@ -63,6 +70,8 @@ export function sanitizeChatMessage(msg: any): ChatMessage | null {
     timestamp,
     status: msg.status || 'completed',
     modelUsed: typeof msg.modelUsed === 'string' ? msg.modelUsed : undefined,
+    ...(toolsCalled && toolsCalled.length > 0 ? { toolsCalled } : {}),
+    ...(tokens !== undefined ? { tokens } : {}),
     errorMessage: typeof msg.errorMessage === 'string' ? msg.errorMessage : undefined,
     errorCode: msg.errorCode || undefined,
     source: msg.source === 'voice' ? 'voice' : 'text',

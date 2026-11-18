@@ -293,14 +293,16 @@ export const emailFetchAndReadTool: ToolDefinition<{
           const uidMatch = /SEARCH\s+([\d\s]+)$/i.exec(searchLine);
           const uids = (uidMatch?.[1] || '').trim().split(/\s+/).filter(u => /^\d+$/.test(u)).slice(-maxMsgs).reverse();
           if (uids.length === 0) return null;
-          fetchCommand = `UID FETCH ${uids.join(',')} (BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])`;
+          fetchCommand = params.readBody
+            ? `UID FETCH ${uids.join(',')} (BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)] BODY.PEEK[TEXT]<0.2000>)`
+            : `UID FETCH ${uids.join(',')} (BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])`;
           return [fetchCommand];
         }
       );
 
-      // Parse das respostas SEARCH e FETCH
-      const searchLine = res.data.find(l => /^(\*\s+)?SEARCH/i.test(l) || l.toUpperCase().includes('SEARCH'));
-      const uidMatch = searchLine?.match(/SEARCH(.*)/i);
+      // Parse das respostas SEARCH e FETCH com âncora estrita
+      const searchLine = res.data.find(l => /^\*\s*SEARCH\b/i.test(l));
+      const uidMatch = searchLine?.match(/^\*\s*SEARCH(.*)$/i);
       const uids = (uidMatch?.[1] || '').trim().split(/\s+/).filter(u => /^\d+$/.test(u)).slice(-maxMsgs).reverse();
 
       if (uids.length === 0) {
@@ -527,9 +529,11 @@ export const emailSendOrReplyTool: ToolDefinition<{
       socket.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
 
-        // Multi-line: aguarda "XXX " (espaço após código) para agir
-        const lastLine = buffer.split('\r\n').filter(Boolean).pop() || '';
-        if (!/^\d{3}(\s|$)/.test(lastLine)) return;
+        // Garante linha completa terminada em \r\n antes de consumir código final "XXX "
+        if (!buffer.endsWith('\r\n')) return;
+        const lines = buffer.split('\r\n').filter(Boolean);
+        const lastLine = lines[lines.length - 1] || '';
+        if (!/^\d{3}(?:\s|$)/.test(lastLine)) return;
         buffer = '';
 
         const code = parseInt(lastLine.slice(0, 3), 10);
@@ -544,12 +548,6 @@ export const emailSendOrReplyTool: ToolDefinition<{
             // STARTTLS na porta 587:Upgrade do socket antes de autenticar
             if (!useImplicitTls && !upgradedToTls) {
               const plain = socket;
-              // BUG FIX (recursão infinita pós-STARTTLS): o handler de dados do
-              // socket seguro precisa reemitir para o TRANSPORTE ORIGINAL (plain,
-              // que carrega o parser principal). Referenciar `socket` aqui era
-              // errado — após `socket = secure`, `socket.emit('data')` apontaria
-              // para o próprio `secure`, causando recursão infinita/stack overflow
-              // no primeiro pacote pós-handshake. Capturamos o transporte ANTES.
               const transport = socket;
               stage = 'tls_wait'; // bloqueia o handler genérico durante o upgrade
               plain.write('STARTTLS\r\n');
@@ -567,8 +565,7 @@ export const emailSendOrReplyTool: ToolDefinition<{
                   secure.on('data', (c) => transport.emit('data', c));
                   socket = secure;
                 } else {
-                  stage = 'ehlo';
-                  socket.emit('error', new Error(`STARTTLS_FAILED: ${resp.trim().slice(0, 120)}`));
+                  smtpError(`STARTTLS_FAILED: ${resp.trim().slice(0, 120)}`);
                 }
               });
               return; // stage continua 'ehlo'; o callback acima retoma o fluxo

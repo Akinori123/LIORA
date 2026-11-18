@@ -56,8 +56,8 @@ async function loadEvents(): Promise<CalendarEvent[]> {
 
 async function saveEvents(events: CalendarEvent[]): Promise<void> {
   await fsp.mkdir(CALENDAR_DIR, { recursive: true });
-  // Escrita atômica: tmp + rename (proteção contra corrupção)
-  const tmp = `${EVENTS_FILE}.tmp`;
+  // Escrita atômica com sufixo único: evita colisão entre saves concorrentes
+  const tmp = `${EVENTS_FILE}.${process.pid}.${Date.now()}-${Math.random().toString(36).slice(2, 7)}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(events, null, 2), 'utf8');
   await fsp.rename(tmp, EVENTS_FILE);
 }

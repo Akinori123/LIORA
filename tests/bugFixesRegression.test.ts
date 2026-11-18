@@ -7,7 +7,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import os from 'os';
+import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import { parsePcCommandIntent } from '../src/utils/pcCommandParser';
 import { parseTimeCommandIntent } from '../src/utils/timeCommandParser';
 import { fileSearchAndReadTool } from '../src/tools/pcControlTools';
@@ -75,22 +77,35 @@ test('REG-03: fileSearchAndReadTool funciona sem rootPath e bloqueia prefixo irm
 });
 
 test('REG-04: save_place_alias + resolve_place_alias faz roundtrip de apelido com múltiplas palavras', async () => {
-  const saved = await savePlaceAliasTool.execute(
-    {
-      alias: 'Casa do Amigo',
-      address: 'Shopping Palladium, Ponta Grossa'
-    },
-    { sessionId: 'reg-test', timestamp: new Date().toISOString() }
-  );
-  assert.strictEqual(saved.success, true);
+  const prevEnv = process.env.LIORA_MEMORY_DIR;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liora-reg04-mem-'));
+  process.env.LIORA_MEMORY_DIR = tempDir;
 
-  const resolved = await resolvePlaceAliasTool.execute(
-    { alias: 'Casa do Amigo' },
-    { sessionId: 'reg-test', timestamp: new Date().toISOString() }
-  );
-  assert.strictEqual(resolved.success, true);
-  assert.strictEqual(resolved.resolved, true);
-  assert.strictEqual(resolved.address, 'Shopping Palladium, Ponta Grossa');
+  try {
+    const saved = await savePlaceAliasTool.execute(
+      {
+        alias: 'Casa do Amigo',
+        address: 'Shopping Palladium, Ponta Grossa'
+      },
+      { sessionId: 'reg-test', timestamp: new Date().toISOString() }
+    );
+    assert.strictEqual(saved.success, true);
+
+    const resolved = await resolvePlaceAliasTool.execute(
+      { alias: 'Casa do Amigo' },
+      { sessionId: 'reg-test', timestamp: new Date().toISOString() }
+    );
+    assert.strictEqual(resolved.success, true);
+    assert.strictEqual(resolved.resolved, true);
+    assert.strictEqual(resolved.address, 'Shopping Palladium, Ponta Grossa');
+  } finally {
+    if (prevEnv === undefined) {
+      delete process.env.LIORA_MEMORY_DIR;
+    } else {
+      process.env.LIORA_MEMORY_DIR = prevEnv;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('REG-05: DevicesManager não falsifica isCharging=true nem batteryLevel=100 quando bateria é null', async () => {

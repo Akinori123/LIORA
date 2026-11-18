@@ -31,7 +31,7 @@ describe('Aba Dispositivos, Hardware & PULO (DevicesManager Suite)', () => {
     const manager = new DevicesManager(permissionEngine);
     const devices = manager.getDevices();
 
-    assert.ok(devices.length >= 4, 'Deve haver ao menos 4 dispositivos padrão registrados');
+    assert.ok(devices.length >= 1, 'Deve haver ao menos 1 dispositivo padrão (Host Local) registrado');
     const host = manager.getDevice('dev-1');
     assert.ok(host);
     assert.strictEqual(host.type, 'pc');

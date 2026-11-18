@@ -12,6 +12,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 // arraste, zoom por wheel/pinch com limites saudáveis e damping orgânico.
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { OrbState } from '../types';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../store/lioraStore';
 import { getThemeColors, ThemeColors } from '../utils/themeColors';
 
@@ -148,7 +149,12 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
   // UnrealBloomPass sem suporte a HalfFloat no WebView2), o componente troca
   // automaticamente para o núcleo 2D elegante em vez de ficar em tela preta eterna.
   const [renderBlackScreen, setRenderBlackScreen] = React.useState(false);
-  const { settings, isGenerating: isProcessing } = useLioraStore();
+  const { settings, isProcessing } = useLioraStore(
+    useShallow((s) => ({
+      settings: s.settings,
+      isProcessing: s.isGenerating
+    }))
+  );
 
   // Stable references for in-place updates without canvas unmounting or GC spikes
   const coreMatRef = useRef<THREE.ShaderMaterial | null>(null);
@@ -307,6 +313,14 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
       composer.addPass(new UnrealBloomPass(new THREE.Vector2(width, height), 0.7, 0.35, 0.85));
     } catch (err) {
       console.warn('[LioraOrb] WebGL composer failed, switching to 2D core:', err);
+      try {
+        if (renderer.domElement.parentNode === container) {
+          container.removeChild(renderer.domElement);
+        }
+        renderer.dispose();
+      } catch {
+        // Ignora erro secundário durante limpeza defensiva
+      }
       setHasWebGLError(true);
       return;
     }

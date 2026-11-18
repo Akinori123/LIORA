@@ -13,6 +13,12 @@ export type PermissionDecisionEffect = 'ALLOW' | 'DENY';
 /** Perfis de segurança do sistema */
 export type SecurityProfileName = 'STRICT' | 'STANDARD' | 'DEVELOPER';
 
+/** Política granular por ferramenta no Tool Registry (Desenvolvedor) */
+export type ToolPermissionPolicy = 'default' | 'always_allow' | 'always_require_consent';
+
+/** Mapa persistente de políticas por ferramenta */
+export type ToolPolicyMap = Record<string, ToolPermissionPolicy>;
+
 /** Códigos de negação estruturados e auditáveis */
 export type PermissionDenialCode =
   | 'NO_POLICY_CONFIGURED'
@@ -148,6 +154,13 @@ export interface IPermissionEngine {
     parametersHash: string,
     sessionId: string
   ): { success: boolean; denialCode?: PermissionDenialCode; consentAuditId?: string };
+
+  getToolPolicy(toolName: string): ToolPermissionPolicy;
+  setToolPolicy(toolName: string, policy: ToolPermissionPolicy): void;
+  getToolPolicies(): ToolPolicyMap;
+  setToolPolicies(policies: ToolPolicyMap): void;
+  getGlobalAutoApprove(): boolean;
+  setGlobalAutoApprove(enabled: boolean): void;
 
   getAuditEvents(): readonly SecurityAuditEvent[];
   clearAuditEvents(): void;

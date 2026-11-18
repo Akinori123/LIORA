@@ -123,9 +123,9 @@ export function rankMemories(
     // Multiplicador por confiança
     const confidenceMult = typeof entry.confidence === 'number' ? Math.max(0.1, entry.confidence) : 1.0;
 
-    // Fusão híbrida (60% semântica vetorial + 40% lexical normalizado)
-    const hybridBase = queryVector 
-      ? (normalizedLexicalScore > 0 ? (normalizedLexicalScore * 0.4 + semanticScore * 2.0 * 0.6) : (semanticScore * 2.0))
+    // Fusão híbrida consistente (60% semântica vetorial + 40% lexical normalizado)
+    const hybridBase = queryVector
+      ? (normalizedLexicalScore * 0.4 + semanticScore * 2.0 * 0.6)
       : normalizedLexicalScore;
 
     const finalScore = hybridBase * categoryMult * confidenceMult;

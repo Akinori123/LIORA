@@ -420,6 +420,8 @@ export class IntegrationsVault {
   private keychainFallbackActive = false;
   private validOAuthStates: Map<string, { provider: IntegrationProviderId; expiresAt: number }> = new Map();
   private manuallyDisconnectedIds: Set<string> = new Set();
+  private envSyncInFlight: Promise<boolean> | null = null;
+  private lastEnvSyncAt = 0;
 
   constructor(bus: EventBus = eventBus) {
     this.bus = bus;
@@ -552,20 +554,36 @@ export class IntegrationsVault {
 
   public async syncWithBackendEnv(fetchFn: typeof fetch = fetch): Promise<boolean> {
     if (typeof fetchFn !== 'function') return false;
-    try {
-      const res = await fetchFn('/api/env/keys/status', {
-        headers: { Accept: 'application/json' }
-      });
-      const contentType = res.headers?.get?.('content-type') || '';
-      if (!res.ok || (contentType && !contentType.includes('application/json'))) {
-        return false;
-      }
-      const data = await res.json();
-      if (!data || typeof data !== 'object') return false;
-      return this.hydrateFromBackendEnv(data);
-    } catch {
-      return false;
+    const isDefaultFetch = fetchFn === fetch;
+    if (isDefaultFetch) {
+      if (this.envSyncInFlight) return this.envSyncInFlight;
+      if (Date.now() - this.lastEnvSyncAt < 2000) return false;
     }
+
+    const run = (async () => {
+      try {
+        const res = await fetchFn('/api/env/keys/status', {
+          headers: { Accept: 'application/json' }
+        });
+        const contentType = res.headers?.get?.('content-type') || '';
+        if (!res.ok || (contentType && !contentType.includes('application/json'))) {
+          return false;
+        }
+        const data = await res.json();
+        if (!data || typeof data !== 'object') return false;
+        if (isDefaultFetch) this.lastEnvSyncAt = Date.now();
+        return this.hydrateFromBackendEnv(data);
+      } catch {
+        return false;
+      } finally {
+        if (isDefaultFetch) this.envSyncInFlight = null;
+      }
+    })();
+
+    if (isDefaultFetch) {
+      this.envSyncInFlight = run;
+    }
+    return run;
   }
 
   public getServices(): IntegrationServiceConfig[] {

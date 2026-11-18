@@ -15,7 +15,7 @@
  * Presets incluídos para os provedores mais comuns (Gmail, Outlook, Yahoo).
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Mail, Lock, Server, X, Eye, EyeOff, ChevronDown, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react';
 
 interface EmailSetupModalProps {
@@ -54,6 +54,29 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
   const [smtpPort, setSmtpPort] = useState(String(PROVIDER_PRESETS[0].smtpPort));
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setEmail('');
+      setPassword('');
+      setPresetId('gmail');
+      setImapHost(PROVIDER_PRESETS[0].imapHost);
+      setImapPort(String(PROVIDER_PRESETS[0].imapPort));
+      setSmtpHost(PROVIDER_PRESETS[0].smtpHost);
+      setSmtpPort(String(PROVIDER_PRESETS[0].smtpPort));
+      setError(null);
+      setShowPassword(false);
+      setIsSubmitting(false);
+    }
+  }, [isOpen]);
 
   const preset = useMemo(() => PROVIDER_PRESETS.find(p => p.id === presetId)!, [presetId]);
   const isCustom = presetId === 'custom';
@@ -106,20 +129,30 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
     setIsSubmitting(true);
     try {
       const success = await onConnect(rawKey);
+      if (!isMountedRef.current) return;
       if (success) {
         onClose();
       } else {
         setError('O cofre recusou a conexão. Verifique os dados e tente novamente.');
       }
     } catch (err: any) {
-      setError(err?.message || 'Falha de rede ao gravar no cofre.');
+      if (isMountedRef.current) {
+        setError(err?.message || 'Falha de rede ao gravar no cofre.');
+      }
     } finally {
-      setIsSubmitting(false);
+      if (isMountedRef.current) {
+        setIsSubmitting(false);
+      }
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Conectar ${serviceName}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+    >
       <div className="bg-[#111111] border border-[#333333] rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[#222222] p-4 sticky top-0 bg-[#111111] z-10">
@@ -132,7 +165,7 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
               <p className="text-[10px] text-[#888888]">Configuração guiada IMAP / SMTP</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-[#888888] hover:text-white p-1">
+          <button type="button" onClick={onClose} aria-label="Fechar configuração de e-mail" className="text-[#888888] hover:text-white p-1">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -193,6 +226,7 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-3 top-2.5 text-[#888888] hover:text-white"
+                aria-label={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
                 title={showPassword ? 'Ocultar' : 'Mostrar'}
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}

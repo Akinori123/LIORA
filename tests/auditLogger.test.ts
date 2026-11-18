@@ -210,14 +210,16 @@ test('T-PROF-02: Profiles - STANDARD e DEVELOPER não concedem privilégios de e
   const engineDev = new PermissionEngine(DEVELOPER_PROFILE);
   const context = createValidContext();
 
-  // R1 continua bloqueado sob STANDARD e DEVELOPER
+  // R1 continua exigindo confirmação sob STANDARD e DEVELOPER
   const resStdR1 = await engineStandard.evaluate('system_exec_simulated', { command: 'git status' }, context);
   assert.strictEqual(resStdR1.decision, 'DENY');
-  assert.strictEqual(resStdR1.code, 'DENY_R1_BLOCKED_IN_PHASE_6_2B');
+  assert.strictEqual(resStdR1.code, 'REQUIRES_USER_CONFIRMATION');
+  assert.strictEqual(resStdR1.requiredConfirmation, true);
 
   const resDevR1 = await engineDev.evaluate('system_exec_simulated', { command: 'git status' }, context);
   assert.strictEqual(resDevR1.decision, 'DENY');
-  assert.strictEqual(resDevR1.code, 'DENY_R1_BLOCKED_IN_PHASE_6_2B');
+  assert.strictEqual(resDevR1.code, 'REQUIRES_USER_CONFIRMATION');
+  assert.strictEqual(resDevR1.requiredConfirmation, true);
 
   // R3 permanece categoricamente proibido sob qualquer perfil
   const resDevR3 = await engineDev.evaluate('critical_tool', {}, context, { riskLevel: 'R3' });

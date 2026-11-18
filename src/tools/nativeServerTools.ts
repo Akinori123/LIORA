@@ -470,14 +470,21 @@ export const nativeCalculateRouteTool: ToolDefinition<
     if (!hasValidCoords) {
       const targetDest = destination?.trim() || 'Destino';
       const result = await launchGpsNavigation(targetDest, 'auto', origin);
+      const isSim = Boolean(result.simulated);
       return {
         success: result.success,
         destination: targetDest,
         origin: origin || 'localização atual',
         url: result.url,
         provider: result.provider,
-        message: `Navegação GPS iniciada para "${targetDest}" a partir da sua localização atual.`,
-        simulated: false,
+        message: !result.success
+          ? `Falha ao abrir navegação GPS para "${targetDest}": ${result.error || 'navegador indisponível'}.`
+          : isSim
+            ? `[MODO WEB PREVIEW - SIMULADO] Rota GPS preparada para "${targetDest}" (ambiente headless sem display gráfico para abrir abas).`
+            : `Navegação GPS iniciada para "${targetDest}" a partir da sua localização atual.`,
+        simulated: isSim,
+        ...(result.runtimeMode ? { runtimeMode: result.runtimeMode } : {}),
+        ...(result.error ? { error: result.error } : {}),
         timestamp: new Date().toISOString()
       };
     }

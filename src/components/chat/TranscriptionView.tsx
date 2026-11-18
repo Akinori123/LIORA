@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { 
   formatTranscriptionPlainText, 
@@ -42,7 +43,19 @@ export const TranscriptionView: React.FC = () => {
     approveConsent,
     rejectConsent,
     expireConsent
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow((s) => ({
+      messages: s.messages,
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      isGenerating: s.isGenerating,
+      setConversationSubTab: s.setConversationSubTab,
+      pendingConsent: s.pendingConsent,
+      approveConsent: s.approveConsent,
+      rejectConsent: s.rejectConsent,
+      expireConsent: s.expireConsent
+    }))
+  );
 
   const [isPaused, setIsPaused] = useState(false);
   const [frozenMessages, setFrozenMessages] = useState<ChatMessage[] | null>(null);
@@ -172,7 +185,7 @@ export const TranscriptionView: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[#0A0A0A]">
+    <div className="flex-1 flex flex-col overflow-hidden bg-[#0A0A0A] relative">
       {/* Header Toolbar */}
       <div className="px-4 sm:px-8 py-3.5 border-b border-[#222222] bg-[#0E0E0E] flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div>
@@ -251,7 +264,7 @@ export const TranscriptionView: React.FC = () => {
         <div className="flex items-center gap-1.5 line-clamp-1">
           <Info className="w-3.5 h-3.5 text-[#888888] shrink-0" />
           <span>
-            Origem: <strong>Chat textual em tempo real</strong>. Transcrição contínua de áudio depende da futura integração de voz (Gemini Live API).
+            Origem: <strong>Conversa & Voz em Tempo Real</strong> (Chat textual & Gemini Live API).
           </span>
         </div>
         {isGenerating && (

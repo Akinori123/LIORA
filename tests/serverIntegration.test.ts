@@ -206,7 +206,7 @@ test('SRV-03: HTTP Integration - POST /api/tools/execute denies R1 tool (system_
     const data = await res.json() as any;
     assert.strictEqual(data.success, false);
     assert.strictEqual(data.decision, 'DENY');
-    assert.strictEqual(data.code, 'DENY_R1_BLOCKED_IN_PHASE_6_2B');
+    assert.strictEqual(data.code, 'REQUIRES_USER_CONFIRMATION');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

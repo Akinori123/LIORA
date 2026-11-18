@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect, useState, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../store/lioraStore';
 import { speechService } from '../services/speechService';
 import { voiceLiveClient } from '../services/voiceLiveClient';
@@ -24,6 +25,8 @@ import { parsePcCommandIntent, PcCommandMatch } from '../utils/pcCommandParser';
 import { parseTimeCommandIntent, TimeQueryMatch } from '../utils/timeCommandParser';
 import { launchGpsNavigation, launchPlacesSearch } from '../tools/navigation/navigationActionTool';
 import { executePcAction } from '../tools/pc/pcActionLauncher';
+import { commandDeduplicator, DEFAULT_COMMAND_DEDUPE_WINDOW_MS } from '../utils/commandDeduplicator';
+import { parseConsentVoiceDecision } from '../utils/consentVoiceParser';
 
 export const GlobalVoiceBar: React.FC = () => {
   const { 
@@ -40,7 +43,23 @@ export const GlobalVoiceBar: React.FC = () => {
     isVaultKeyMissing,
     vaultDiagnosticMessage,
     runVaultDiagnostics
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow((s) => ({
+      isVoiceActive: s.isVoiceActive,
+      orbState: s.orbState,
+      toggleVoice: s.toggleVoice,
+      sendMessage: s.sendMessage,
+      setOrbState: s.setOrbState,
+      setActiveTab: s.setActiveTab,
+      isGenerating: s.isGenerating,
+      isSidebarExpanded: s.isSidebarExpanded,
+      isTelemetryOpen: s.isTelemetryOpen,
+      activeTab: s.activeTab,
+      isVaultKeyMissing: s.isVaultKeyMissing,
+      vaultDiagnosticMessage: s.vaultDiagnosticMessage,
+      runVaultDiagnostics: s.runVaultDiagnostics
+    }))
+  );
 
   const [transcript, setTranscript] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -48,6 +67,7 @@ export const GlobalVoiceBar: React.FC = () => {
   const [frequencyBins, setFrequencyBins] = useState<number[]>([0, 0, 0, 0, 0, 0, 0, 0]);
   const [showDiagnosticModal, setShowDiagnosticModal] = useState(false);
   const [windowWidth, setWindowWidth] = useState<number>(typeof window !== 'undefined' ? window.innerWidth : 1280);
+  const isMountedRef = useRef<boolean>(true);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const vadSpeakingRef = useRef<boolean>(false);
   const vadStartTimeRef = useRef<number>(0);
@@ -60,7 +80,6 @@ export const GlobalVoiceBar: React.FC = () => {
   useEffect(() => {
     setOrbStateRef.current = setOrbState;
   }, [setOrbState]);
-  const lastExecutedCommandRef = useRef<{ key: string; time: number }>({ key: '', time: 0 });
 
   // FIX C2: espelho do orbState em ref para o ciclo de vida da voz NÃO depender
   // de estados que mudam durante a sessão (orbState). Sem isso, o effect de voz
@@ -82,7 +101,7 @@ export const GlobalVoiceBar: React.FC = () => {
   const scheduleVoiceTimer = (cb: () => void, ms: number) => {
     const id = setTimeout(() => {
       voiceTimersRef.current.delete(id);
-      cb();
+      if (isMountedRef.current) cb();
     }, ms);
     voiceTimersRef.current.add(id);
     return id;
@@ -94,6 +113,7 @@ export const GlobalVoiceBar: React.FC = () => {
     }
     orbResetTimerRef.current = setTimeout(() => {
       orbResetTimerRef.current = null;
+      if (!isMountedRef.current) return;
       if (speechService.isSpeaking()) return;
       const currentVoiceActive = useLioraStore.getState().isVoiceActive;
       setOrbState(currentVoiceActive ? 'LISTENING' : 'IDLE');
@@ -104,9 +124,13 @@ export const GlobalVoiceBar: React.FC = () => {
   };
 
   useEffect(() => {
-    const handleResize = () => setWindowWidth(window.innerWidth);
+    isMountedRef.current = true;
+    const handleResize = () => {
+      if (isMountedRef.current) setWindowWidth(window.innerWidth);
+    };
     window.addEventListener('resize', handleResize);
     return () => {
+      isMountedRef.current = false;
       window.removeEventListener('resize', handleResize);
       voiceTimersRef.current.forEach(t => clearTimeout(t));
       voiceTimersRef.current.clear();
@@ -194,6 +218,7 @@ export const GlobalVoiceBar: React.FC = () => {
     } catch (err) {
       console.warn('[GlobalVoiceBar] Falha ao acionar rota de GPS:', err);
     }
+    if (!isMountedRef.current) return;
 
     const appName = routeIntent.provider === 'waze' ? 'Waze' : 'Google Maps';
     const isSimulated = Boolean((routeResult as any).simulated || routeResult.dryRun);
@@ -257,6 +282,7 @@ export const GlobalVoiceBar: React.FC = () => {
     } catch (err) {
       console.warn('[GlobalVoiceBar] Falha ao acionar busca de locais:', err);
     }
+    if (!isMountedRef.current) return;
 
     const isSimulated = Boolean((searchResult as any).simulated || searchResult.dryRun);
     const spokenMessage = searchResult.success
@@ -319,6 +345,7 @@ export const GlobalVoiceBar: React.FC = () => {
         error: pcErr?.message || 'Erro desconhecido'
       };
     }
+    if (!isMountedRef.current) return;
 
     const store = useLioraStore.getState();
 
@@ -329,7 +356,7 @@ export const GlobalVoiceBar: React.FC = () => {
         auditId: `consent-${now}`,
         ruleId: 'voice-pc-rule',
         toolName: result.consentToolName,
-        riskLevel: 'R2',
+        riskLevel: result.consentRiskLevel || 'R1',
         parameters: result.consentParams || {},
         consentToken: '',
         sessionId: store.activeSessionId || 'operator-voice-session',
@@ -384,7 +411,7 @@ export const GlobalVoiceBar: React.FC = () => {
       category: 'tool',
       summary: pcMatch.type === 'app_launch' ? `💻 Executar App: ${pcMatch.appName}` : `💻 Ação de Sistema: ${pcMatch.action}`,
       details: `${result.message} (Executável: ${pcMatch.type === 'app_launch' ? pcMatch.executable : pcMatch.action})`,
-      riskLevel: 'R1',
+      riskLevel: result.consentRiskLevel || 'R1',
       status: result.success ? 'success' : 'error',
       simulated: isSimulated
     });
@@ -440,8 +467,114 @@ export const GlobalVoiceBar: React.FC = () => {
     });
   };
 
+  // Interceptação priorizada de confirmação/recusa falada durante consentimento pendente R1/R2
+  const handlePendingConsentVoice = (rawText: string, isFinalSpeech: boolean): boolean => {
+    const store = useLioraStore.getState();
+    if (store.pendingConsent?.status !== 'PENDING') {
+      return false;
+    }
+
+    const clean = String(rawText || '').trim();
+    if (!clean) return true;
+
+    const decision = parseConsentVoiceDecision(clean);
+    if (!decision && !isFinalSpeech) {
+      // Aguarda frase concluir se fala parcial ainda não contém palavra-chave de decisão
+      return true;
+    }
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    if (decision) {
+      const dedupeKey = `voice_consent:${store.pendingConsent.auditId}:${decision}`;
+      const lock = commandDeduplicator.checkAndLock(dedupeKey, Date.now(), DEFAULT_COMMAND_DEDUPE_WINDOW_MS);
+      if (lock.isDuplicate) {
+        return true;
+      }
+      setTranscript('');
+      setErrorMessage(null);
+    }
+
+    eventBus.publish('liora:voice_transcript', { text: clean, role: 'user' });
+    return true;
+  };
+
+  // Dispatcher determinístico unificado com janela de idempotência de 3000ms
+  const tryDispatchDeterministicVoiceCommand = (clean: string, isFinal: boolean): boolean => {
+    const navMatch = parseNavigationIntent(clean);
+    const pcMatch = !navMatch ? parsePcCommandIntent(clean) : null;
+    const timeMatch = !navMatch && !pcMatch ? parseTimeCommandIntent(clean) : null;
+    const routeIntent = !navMatch && !pcMatch && !timeMatch ? parseRouteIntent(clean) : null;
+    const placesIntent = !navMatch && !pcMatch && !timeMatch && !routeIntent ? parsePlacesSearchIntent(clean) : null;
+
+    const matchedKey = navMatch
+      ? `voice_dispatch:nav:${navMatch.tab}`
+      : pcMatch
+        ? `voice_dispatch:pc:${pcMatch.type}:${pcMatch.type === 'app_launch' ? pcMatch.executable : pcMatch.action}`
+        : timeMatch
+          ? `voice_dispatch:time:${timeMatch.spokenFeedback}`
+          : routeIntent
+            ? `voice_dispatch:route:${routeIntent.provider}:${routeIntent.destination.toLowerCase()}`
+            : placesIntent
+              ? `voice_dispatch:places:${placesIntent.query.toLowerCase()}`
+              : null;
+
+    if (!matchedKey) return false;
+
+    const KNOWN_EXES = ['notepad', 'calc', 'control', 'ms-settings:', 'taskmgr', 'explorer', 'chrome', 'msedge', 'spotify', 'code', 'powershell', 'mspaint', 'steam', 'discord', 'whatsapp', 'winword', 'excel', 'powerpnt', 'opera', 'telegram', 'vlc', 'obs64'];
+    if (!isFinal && pcMatch && pcMatch.type === 'app_launch' && !KNOWN_EXES.includes(pcMatch.executable)) {
+      return true;
+    }
+
+    const lock = commandDeduplicator.checkAndLock(matchedKey, Date.now(), DEFAULT_COMMAND_DEDUPE_WINDOW_MS);
+    if (lock.isDuplicate) {
+      console.info(`[GlobalVoiceBar] Comando de voz duplicado bloqueado na janela de ${DEFAULT_COMMAND_DEDUPE_WINDOW_MS}ms: ${matchedKey}`);
+      return true;
+    }
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    if (navMatch) {
+      handleDeterministicNavigation(navMatch);
+      return true;
+    }
+    if (pcMatch) {
+      void handleDeterministicPcCommand(pcMatch);
+      return true;
+    }
+    if (timeMatch) {
+      handleDeterministicTimeQuery(timeMatch);
+      return true;
+    }
+    if (routeIntent) {
+      void handleDeterministicRoute(routeIntent);
+      return true;
+    }
+    if (placesIntent) {
+      void handleDeterministicPlacesSearch(placesIntent);
+      return true;
+    }
+
+    return false;
+  };
+
+  const liveHandlersRef = useRef({
+    handlePendingConsentVoice,
+    tryDispatchDeterministicVoiceCommand
+  });
+  liveHandlersRef.current = {
+    handlePendingConsentVoice,
+    tryDispatchDeterministicVoiceCommand
+  };
+
   useEffect(() => {
-    voiceLiveClient.setCallbacks({
+    const unsubscribe = voiceLiveClient.subscribeCallbacks({
       onStatusChange: (status) => {
         if (status === 'SPEAKING') {
           setOrbStateRef.current('SPEAKING');
@@ -467,39 +600,19 @@ export const GlobalVoiceBar: React.FC = () => {
       },
       onTranscription: (text, role) => {
         if (role === 'user') {
+          const clean = String(text || '').trim();
           setTranscript(text);
-          // P1: publica a fala do usuário no eventBus — o GlobalConsentOverlay
-          // escuta por "confirmar"/"cancelar" enquanto há consentimento pendente.
-          eventBus.publish('liora:voice_transcript', { text, role });
 
-          // Interceptação determinística secundária (redundância para o canal Live)
-          const navMatch = parseNavigationIntent(text);
-          if (navMatch) {
-            handleDeterministicNavigation(navMatch);
+          // Se há consentimento R1/R2 pendente, intercepta com prioridade máxima e impede comandos extras
+          if (liveHandlersRef.current.handlePendingConsentVoice(clean, true)) {
             return;
           }
 
-          const pcMatch = parsePcCommandIntent(text);
-          if (pcMatch) {
-            void handleDeterministicPcCommand(pcMatch);
-            return;
-          }
+          // Publica transcrição para listeners auxiliares quando não está em janela de bloqueio
+          eventBus.publish('liora:voice_transcript', { text: clean, role });
 
-          const timeMatch = parseTimeCommandIntent(text);
-          if (timeMatch) {
-            handleDeterministicTimeQuery(timeMatch);
-            return;
-          }
-
-          const routeIntent = parseRouteIntent(text);
-          if (routeIntent) {
-            handleDeterministicRoute(routeIntent);
-            return;
-          }
-
-          const placesIntent = parsePlacesSearchIntent(text);
-          if (placesIntent) {
-            handleDeterministicPlacesSearch(placesIntent);
+          // Interceptação determinística secundária com trava compartilhada de 3000ms
+          if (clean.length >= 2 && liveHandlersRef.current.tryDispatchDeterministicVoiceCommand(clean, true)) {
             return;
           }
         }
@@ -516,6 +629,7 @@ export const GlobalVoiceBar: React.FC = () => {
         });
       }
     });
+    return unsubscribe;
   }, []);
 
   useEffect(() => {
@@ -539,43 +653,13 @@ export const GlobalVoiceBar: React.FC = () => {
       return;
     }
 
-    // Bug hunt (race condition): durante o consentimento pendente, a fala do usuário
-    // ("confirmar"/"cancelar") deve ir APENAS ao GlobalConsentOverlay — se também
-    // fosse despachada como nova mensagem de chat, geraria resposta duplicada e
-    //consumiria o turno. Aqui o VAD cede a palavra ao overlay.
-    if (store.pendingConsent?.status === 'PENDING') {
-      eventBus.publish('liora:voice_transcript', { text, role: 'user' });
+    // Durante o consentimento pendente, a fala vai apenas ao GlobalConsentOverlay
+    if (handlePendingConsentVoice(text, true)) {
       return;
     }
 
-    // Interceptação determinística de navegação ANTES de invocar o LLM
-    const navMatch = parseNavigationIntent(text);
-    if (navMatch) {
-      handleDeterministicNavigation(navMatch);
-      return;
-    }
-
-    const pcMatch = parsePcCommandIntent(text);
-    if (pcMatch) {
-      void handleDeterministicPcCommand(pcMatch);
-      return;
-    }
-
-    const timeMatch = parseTimeCommandIntent(text);
-    if (timeMatch) {
-      handleDeterministicTimeQuery(timeMatch);
-      return;
-    }
-
-    const routeIntent = parseRouteIntent(text);
-    if (routeIntent) {
-      handleDeterministicRoute(routeIntent);
-      return;
-    }
-
-    const placesIntent = parsePlacesSearchIntent(text);
-    if (placesIntent) {
-      handleDeterministicPlacesSearch(placesIntent);
+    // Interceptação determinística com trava compartilhada de 3000ms ANTES do LLM
+    if (tryDispatchDeterministicVoiceCommand(text.trim(), true)) {
       return;
     }
 
@@ -667,19 +751,21 @@ export const GlobalVoiceBar: React.FC = () => {
               return;
             }
             const audioBlob = await speechService.getRecordedAudioBlob();
+            if (!isMountedRef.current || !useLioraStore.getState().isVoiceActive) return;
             if (audioBlob) {
               try {
                 speechService.unlockAudio();
                 const transRes = await speechService.transcribeAudio(audioBlob);
+                if (!isMountedRef.current || !useLioraStore.getState().isVoiceActive) return;
                 if (transRes.success && transRes.text && transRes.hasSpeech) {
                   await dispatchVoiceCommand(transRes.text, audioBlob);
-                } else {
+                } else if (isMountedRef.current) {
                   console.info('[GlobalVoiceBar VAD] Áudio capturado sem fala reconhecível.');
                   setOrbState('LISTENING');
                 }
               } catch (err) {
                 console.error('[GlobalVoiceBar VAD] Erro na transcrição de áudio:', err);
-                setOrbState('LISTENING');
+                if (isMountedRef.current) setOrbState('LISTENING');
               }
             }
           }, 750);
@@ -761,72 +847,15 @@ export const GlobalVoiceBar: React.FC = () => {
 
         const clean = text.trim();
         if (clean.length >= 2) {
-          // ══════════════════════════════════════════════════════════════════════
-          // INTERCEPTAÇÃO DETERMINÍSTICA UNIVERSAL (PC, NAVEGAÇÃO, HORÁRIO & MAPAS):
-          // O Web Speech API é a fonte primária de transcrição textual do microfone.
-          // Comandos de PC ("abra o bloco de notas", "abra a calculadora", "abra o chrome",
-          // "painel de controle"), abas ("abrir configurações", "automações"), relógio
-          // e mapas SÃO EXECUTADOS IMEDIATAMENTE no host com verificação real e honesta.
-          // O Gemini Live é interrompido (CLIENT_INTERRUPTED) com supressão de áudio
-          // de 6 segundos para blindar totalmente contra voz duplicada.
-          // ══════════════════════════════════════════════════════════════════════
-          const navMatch = parseNavigationIntent(clean);
-          const pcMatch = !navMatch ? parsePcCommandIntent(clean) : null;
-          const timeMatch = (!navMatch && !pcMatch) ? parseTimeCommandIntent(clean) : null;
-          const routeIntent = (!navMatch && !pcMatch && !timeMatch) ? parseRouteIntent(clean) : null;
-          const placesIntent = (!navMatch && !pcMatch && !timeMatch && !routeIntent) ? parsePlacesSearchIntent(clean) : null;
+          // Prioridade máxima: se há overlay R1/R2 aberto, reconhece "autorizar"/"confirmar"/"sim"/"cancelar"
+          // mesmo em resultados parciais (interim) e bloqueia disparo paralelo de comandos/chat.
+          if (handlePendingConsentVoice(clean, isFinal)) {
+            return;
+          }
 
-          const matchedKey = navMatch 
-            ? `nav:${navMatch.tab}` 
-            : pcMatch 
-              ? `pc:${pcMatch.type}:${pcMatch.type === 'app_launch' ? pcMatch.executable : pcMatch.action}` 
-              : timeMatch
-                ? `time:${timeMatch.spokenFeedback}`
-                : routeIntent 
-                  ? `route:${routeIntent.destination}` 
-                  : placesIntent 
-                    ? `places:${placesIntent.query}` 
-                    : null;
-
-          if (matchedKey) {
-            // Guarda anti-fala-parcial (interim): se o usuário ainda está falando, bloqueia apps genéricos desconhecidos
-            const KNOWN_EXES = ['notepad', 'calc', 'control', 'ms-settings:', 'taskmgr', 'explorer', 'chrome', 'msedge', 'spotify', 'code', 'powershell', 'mspaint', 'steam', 'discord', 'whatsapp', 'winword', 'excel', 'powerpnt', 'opera', 'telegram', 'vlc', 'obs64'];
-            if (!isFinal && pcMatch && pcMatch.type === 'app_launch' && !KNOWN_EXES.includes(pcMatch.executable)) {
-              return;
-            }
-
-            const now = Date.now();
-            if (now - lastExecutedCommandRef.current.time < 2500 && lastExecutedCommandRef.current.key === matchedKey) {
-              // Deduplicação: descarta disparo repetido da mesma frase entre interim e final
-              return;
-            }
-            lastExecutedCommandRef.current = { key: matchedKey, time: now };
-
-            if (silenceTimerRef.current) {
-              clearTimeout(silenceTimerRef.current);
-              silenceTimerRef.current = null;
-            }
-
-            if (navMatch) {
-              handleDeterministicNavigation(navMatch);
-              return;
-            }
-            if (pcMatch) {
-              void handleDeterministicPcCommand(pcMatch);
-              return;
-            }
-            if (timeMatch) {
-              handleDeterministicTimeQuery(timeMatch);
-              return;
-            }
-            if (routeIntent) {
-              void handleDeterministicRoute(routeIntent);
-              return;
-            }
-            if (placesIntent) {
-              void handleDeterministicPlacesSearch(placesIntent);
-              return;
-            }
+          // Interceptação determinística unificada com deduplicação de 3000ms
+          if (tryDispatchDeterministicVoiceCommand(clean, isFinal)) {
+            return;
           }
 
           // Se for fala conversacional comum (não-determinística):
@@ -936,6 +965,7 @@ export const GlobalVoiceBar: React.FC = () => {
   const handleGrantMicPermission = async () => {
     setErrorMessage(null);
     const result = await speechService.requestMicrophonePermission();
+    if (!isMountedRef.current) return;
     if (result.success) {
       setOrbState('LISTENING');
     } else if (result.error) {
@@ -965,6 +995,7 @@ export const GlobalVoiceBar: React.FC = () => {
             </p>
           </div>
           <button
+            type="button"
             onClick={() => setActiveTab('integrations')}
             className="shrink-0 px-3 py-1.5 bg-[#FF2B2B] hover:bg-red-600 text-white text-xs font-bold rounded-lg shadow transition-all hover:scale-105 flex items-center gap-1"
             title="Ir para o Cofre de Integrações para configurar a chave"
@@ -984,6 +1015,7 @@ export const GlobalVoiceBar: React.FC = () => {
             <p className="text-xs font-semibold leading-tight truncate">{errorMessage}</p>
           </div>
           <button
+            type="button"
             onClick={() => setErrorMessage(null)}
             className="shrink-0 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold rounded-lg"
           >
@@ -1017,18 +1049,11 @@ export const GlobalVoiceBar: React.FC = () => {
             </span>
 
             {/* Espectro de Frequência Extenso e Prominente (Web Audio API) */}
-            <div 
-              role="button"
-              tabIndex={0}
+            <button
+              type="button"
               aria-label="Autorizar ou calibrar o microfone"
-              className="flex-1 flex items-end justify-between gap-1 sm:gap-1.5 px-4 py-2 bg-[#080808] rounded-2xl border border-[#282828] h-11 cursor-pointer hover:border-[#FF2B2B] transition-all shadow-inner min-w-[180px] max-w-md"
+              className="flex-1 flex items-end justify-between gap-1 sm:gap-1.5 px-4 py-2 bg-[#080808] rounded-2xl border border-[#282828] h-11 cursor-pointer hover:border-[#FF2B2B] transition-all shadow-inner min-w-[180px] max-w-md text-left"
               onClick={handleGrantMicPermission}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  void handleGrantMicPermission();
-                }
-              }}
               title="Clique para autorizar ou calibrar o microfone"
             >
               {Array.from({ length: 20 }).map((_, idx) => {
@@ -1049,13 +1074,14 @@ export const GlobalVoiceBar: React.FC = () => {
                   />
                 );
               })}
-            </div>
+            </button>
           </div>
         </div>
 
         {/* Ações Diretas */}
         <div className="flex items-center gap-2.5 shrink-0">
           <button
+            type="button"
             onClick={() => setShowDiagnosticModal(!showDiagnosticModal)}
             className={`p-3 border rounded-2xl transition-all hover:scale-105 ${
               showDiagnosticModal 
@@ -1069,6 +1095,7 @@ export const GlobalVoiceBar: React.FC = () => {
           </button>
 
           <button
+            type="button"
             onClick={() => setActiveTab('conversation')}
             className="p-3 bg-[#121212] hover:bg-[#1E1E1E] text-[#A8A8A8] hover:text-white border border-[#2A2A2A] rounded-2xl transition-all hover:scale-105"
             aria-label="Abrir tela de conversa completa"
@@ -1078,6 +1105,7 @@ export const GlobalVoiceBar: React.FC = () => {
           </button>
 
           <button
+            type="button"
             onClick={handleStopVoice}
             className="flex items-center gap-1.5 px-4 py-2.5 bg-red-950/90 hover:bg-red-900 border border-red-700/60 text-red-200 rounded-2xl text-xs font-bold transition-all shadow-md hover:scale-105"
             aria-label="Pausar voz e encerrar microfone"

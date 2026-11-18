@@ -23,7 +23,6 @@ import {
 } from 'lucide-react';
 import { DeviceEntity, DeviceType } from '../../types/devices';
 import { useLioraStore } from '../../store/lioraStore';
-import { devicesManager } from '../../services/devicesManager';
 
 interface DevicePairingModalProps {
   isOpen: boolean;
@@ -98,9 +97,12 @@ function generateQrMatrix(token: string): boolean[][] {
 }
 
 export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, onClose }) => {
-  const { addDevice } = useLioraStore();
+  const addDevice = useLioraStore((s) => s.addDevice);
   const [activeTab, setActiveTab] = useState<TabType>('smartphone');
   const eventSourceRef = useRef<EventSource | null>(null);
+  const isMountedRef = useRef<boolean>(true);
+  const isOpenRef = useRef<boolean>(isOpen);
+  isOpenRef.current = isOpen;
 
   // Aba 1: Smartphone — PAREAMENTO REAL via PULO (QR → página web no celular → registro no PC)
   const [sessionToken, setSessionToken] = useState<string | null>(null);
@@ -130,7 +132,6 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   const [vehicleName, setVehicleName] = useState('Veículo Cockpit Principal');
   const [vehicleConnType, setVehicleConnType] = useState<'obd2_bt' | 'canbus_usb' | 'pulo_tablet'>('obd2_bt');
   const [vehicleProtocol, setVehicleProtocol] = useState('ISO 15765-4 (CAN 500k/11bit)');
-  const [vehicleVin, setVehicleVin] = useState('');
   const [isPairingVehicle, setIsPairingVehicle] = useState(false);
 
   // Feedback geral
@@ -140,14 +141,16 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   const scheduleTimer = (cb: () => void, ms: number) => {
     const id = setTimeout(() => {
       timersRef.current.delete(id);
-      cb();
+      if (isMountedRef.current && isOpenRef.current) cb();
     }, ms);
     timersRef.current.add(id);
     return id;
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       timersRef.current.forEach(t => clearTimeout(t));
       timersRef.current.clear();
     };
@@ -169,11 +172,13 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
         connected: false,
         ip: '—',
         macAddress: '—',
-        osInfo: vehicleConnType === 'pulo_tablet' 
-          ? 'Android Auto / AAOS Companion (aguardando handshake)' 
-          : vehicleConnType === 'obd2_bt' 
-            ? 'Adaptador OBD-II ELM327 Bluetooth (aguardando handshake)' 
-            : 'Controlador USB CAN Bus (aguardando handshake)',
+        osInfo: `${
+          vehicleConnType === 'pulo_tablet'
+            ? 'Android Auto / AAOS Companion'
+            : vehicleConnType === 'obd2_bt'
+              ? 'Adaptador OBD-II ELM327 Bluetooth'
+              : 'Controlador USB CAN Bus'
+        } · ${vehicleProtocol} (aguardando handshake)`,
         battery: undefined,
         lastSeen: 'Nunca conectado',
         capabilities: ['obd2_diagnostics', 'canbus_telemetry', 'pulo_geofence', 'drive_mode_hud'],
@@ -181,7 +186,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
         telemetry: undefined
       };
 
-      devicesManager.addDevice(newCar);
+      addDevice(newCar);
       setIsPairingVehicle(false);
       setSuccessToast(`Nó veicular '${newCar.name}' registrado. Aguardando primeiro handshake PULO/OBD para ativar telemetria real.`);
       scheduleTimer(() => {
@@ -190,7 +195,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
     }, 800);
   };
 
-  // Timer de expiração do token
+  // Reset de estado e limpeza ao fechar/desmontar modal
   useEffect(() => {
     if (!isOpen) {
       timersRef.current.forEach(t => clearTimeout(t));
@@ -200,6 +205,9 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
         eventSourceRef.current = null;
       }
       setSuccessToast(null);
+      setIsScanning(false);
+      setScanCompleted(false);
+      setDiscoveredList([]);
       setTvPinInput('');
       setTvPinError(null);
       setPairingTvId(null);
@@ -207,21 +215,37 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       setPairError(null);
       setSessionToken(null);
       setPairUrl(null);
+      setCopied(false);
+      setExpiresIn(120);
+      setManualName('');
+      setManualType('smarthome');
+      setManualIp('');
+      setManualPort('8123');
+      setManualProtocol('ws');
+      setManualError(null);
+      setVehicleName('Veículo Cockpit Principal');
+      setVehicleConnType('obd2_bt');
+      setVehicleProtocol('ISO 15765-4 (CAN 500k/11bit)');
+      setIsPairingVehicle(false);
       return;
     }
 
-    const interval = setInterval(() => {
-      setExpiresIn((prev) => (prev > 0 ? prev - 1 : 0));
-    }, 1000);
-
     return () => {
-      clearInterval(interval);
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
     };
   }, [isOpen]);
+
+  // Countdown ativo somente enquanto aguarda pareamento real (pairStatus === 'waiting')
+  useEffect(() => {
+    if (!isOpen || pairStatus !== 'waiting') return;
+    const interval = setInterval(() => {
+      setExpiresIn((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isOpen, pairStatus]);
 
   if (!isOpen) return null;
 
@@ -238,6 +262,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
     try {
       const res = await fetch('/api/pair/token', { method: 'POST' });
       const data = await res.json();
+      if (!isMountedRef.current || !isOpenRef.current) return;
       if (!data.success) throw new Error(data.error || 'Falha ao emitir token');
       setSessionToken(data.token);
       setPairUrl(data.pairUrl);
@@ -257,6 +282,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
         }
         es.close();
         if (eventSourceRef.current === es) eventSourceRef.current = null;
+        if (!isMountedRef.current || !isOpenRef.current) return;
         if (payload?.paired && payload?.device) {
           addDevice(payload.device as DeviceEntity);
           setPairStatus('paired');
@@ -270,10 +296,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       es.onerror = () => {
         es.close();
         if (eventSourceRef.current === es) eventSourceRef.current = null;
+        if (!isMountedRef.current || !isOpenRef.current) return;
         setPairStatus(prev => prev === 'waiting' ? 'error' : prev);
         setPairError(prev => prev || 'Conexão com o servidor de pareamento interrompida.');
       };
     } catch (err: any) {
+      if (!isMountedRef.current || !isOpenRef.current) return;
       setPairStatus('error');
       setPairError(err?.message || 'Falha de rede ao emitir token de pareamento.');
     }
@@ -292,16 +320,20 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
       try {
         const res = await fetch('/api/devices/scan', { method: 'POST' });
         const data = await res.json();
+        if (!isMountedRef.current || !isOpenRef.current) return;
         if (!data.success) throw new Error(data.error || 'Varredura indisponível');
         setDiscoveredList(Array.isArray(data.devices) ? data.devices : []);
         if (!data.devices || data.devices.length === 0) {
           setTvPinError('Nenhum dispositivo de exibição encontrado na rede local. Verifique se a TV está na mesma rede e ligada.');
         }
       } catch (err: any) {
+        if (!isMountedRef.current || !isOpenRef.current) return;
         setTvPinError(`Varredura indisponível: ${err?.message || 'servidor local não respondeu'}. Conecte-se manualmente pelo painel de integrações.`);
       } finally {
-        setIsScanning(false);
-        setScanCompleted(true);
+        if (isMountedRef.current && isOpenRef.current) {
+          setIsScanning(false);
+          setScanCompleted(true);
+        }
       }
     };
     void runScan();
@@ -373,7 +405,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
   const qrMatrix = generateQrMatrix(pairUrl || sessionToken || 'LIORA-PULO-PAIRING');
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Pareamento de Dispositivo"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in"
+    >
       <div className="w-full max-w-2xl bg-[#0C0C0C] border border-[#262626] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="px-6 py-4 bg-[#111111] border-b border-[#222222] flex items-center justify-between shrink-0">
@@ -391,9 +428,11 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="p-1.5 text-[#888888] hover:text-white hover:bg-[#1E1E1E] rounded-xl transition-colors"
             title="Fechar (Esc)"
+            aria-label="Fechar modal de pareamento"
           >
             <X className="w-5 h-5" />
           </button>
@@ -408,10 +447,11 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
         )}
 
         {/* Subtabs bar */}
-        <div className="flex items-center px-6 pt-3 gap-2 border-b border-[#1E1E1E] bg-[#0E0E0E] shrink-0">
+        <div className="flex items-center px-6 pt-3 gap-2 border-b border-[#1E1E1E] bg-[#0E0E0E] shrink-0 overflow-x-auto">
           <button
+            type="button"
             onClick={() => setActiveTab('smartphone')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 shrink-0 ${
               activeTab === 'smartphone'
                 ? 'border-[var(--accent-primary)] text-white bg-[#141414]'
                 : 'border-transparent text-[#888888] hover:text-[#CCCCCC]'
@@ -422,8 +462,9 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
           </button>
 
           <button
+            type="button"
             onClick={() => setActiveTab('smarttv')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 shrink-0 ${
               activeTab === 'smarttv'
                 ? 'border-[var(--accent-primary)] text-white bg-[#141414]'
                 : 'border-transparent text-[#888888] hover:text-[#CCCCCC]'
@@ -434,8 +475,9 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
           </button>
 
           <button
+            type="button"
             onClick={() => setActiveTab('manual')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 shrink-0 ${
               activeTab === 'manual'
                 ? 'border-[var(--accent-primary)] text-white bg-[#141414]'
                 : 'border-transparent text-[#888888] hover:text-[#CCCCCC]'
@@ -446,8 +488,9 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
           </button>
 
           <button
+            type="button"
             onClick={() => setActiveTab('vehicle')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition-all border-b-2 shrink-0 ${
               activeTab === 'vehicle'
                 ? 'border-[var(--accent-primary)] text-white bg-[#141414]'
                 : 'border-transparent text-[#888888] hover:text-[#CCCCCC]'
@@ -504,19 +547,25 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                         {pairUrl || sessionToken || 'Aguardando emissão...'}
                       </div>
                       <button
+                        type="button"
+                        disabled={!pairUrl && !sessionToken}
                         onClick={() => {
-                          if (pairUrl) navigator.clipboard.writeText(pairUrl);
+                          const valueToCopy = pairUrl || sessionToken;
+                          if (!valueToCopy) return;
+                          navigator.clipboard?.writeText(valueToCopy);
                           setCopied(true);
                           scheduleTimer(() => setCopied(false), 2000);
                         }}
-                        className="px-3.5 py-2.5 bg-[#1C1C1C] hover:bg-[#252525] border border-[#333333] text-white rounded-xl transition-colors flex items-center gap-1.5 text-xs font-mono shrink-0"
+                        className="px-3.5 py-2.5 bg-[#1C1C1C] hover:bg-[#252525] border border-[#333333] text-white rounded-xl transition-colors flex items-center gap-1.5 text-xs font-mono shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                         title="Copiar link de pareamento"
                       >
                         {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                         <span>{copied ? 'Copiado!' : 'Copiar'}</span>
                       </button>
                       <button
+                        type="button"
                         onClick={startRealPairing}
+                        aria-label="Regerar token de pareamento"
                         className="p-2.5 bg-[#1C1C1C] hover:bg-[#252525] border border-[#333333] text-[#A8A8A8] hover:text-white rounded-xl transition-colors shrink-0"
                         title="Regerar token de pareamento efêmero"
                       >
@@ -609,7 +658,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                       className="p-4 bg-[#141414] border border-[#262626] rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                     >
                       <div className="flex items-center gap-3">
-                        <div className="p-2.5 bg-[#1A1A1A] border border-[#2E2E2E] rounded-xl text-purple-400">
+                        <div className="p-2.5 bg-[#1A1A1A] border border-[#2E2E2E] rounded-xl text-[var(--accent-primary)]">
                           <Tv className="w-5 h-5" />
                         </div>
                         <div>
@@ -628,12 +677,13 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                             value={tvPinInput}
                             onChange={(e) => setTvPinInput(e.target.value.replace(/\D/g, ''))}
                             placeholder="PIN da TV"
+                            aria-label="Código PIN da Smart TV"
                             className="w-24 bg-[#1C1C1C] border border-[#333333] focus:border-[var(--accent-primary)] rounded-lg px-2 py-1.5 text-xs text-white text-center font-mono placeholder-[#666666] focus:outline-none"
                           />
                           <button
                             type="button"
                             onClick={() => handleConfirmTvPin(tv)}
-                            className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold transition-colors"
+                            className="px-3 py-1.5 bg-[var(--accent-primary)] hover:opacity-90 text-white rounded-lg text-xs font-semibold transition-colors"
                           >
                             Vincular
                           </button>
@@ -644,6 +694,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                               setTvPinInput('');
                               setTvPinError(null);
                             }}
+                            aria-label="Cancelar pareamento da TV"
                             className="p-1.5 text-[#888888] hover:text-white"
                           >
                             <X className="w-3.5 h-3.5" />
@@ -664,17 +715,26 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                       )}
                     </div>
                   ))}
-
-                  {tvPinError && (
-                    <div className="p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-xs text-red-300 flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                      <span>{tvPinError}</span>
-                    </div>
-                  )}
                 </div>
               )}
 
-              {!isScanning && !scanCompleted && discoveredList.length === 0 && (
+              {!isScanning && tvPinError && (
+                <div className="p-3 bg-red-950/60 border border-red-800/80 rounded-xl text-xs text-red-300 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                  <span>{tvPinError}</span>
+                </div>
+              )}
+
+              {!isScanning && scanCompleted && discoveredList.length === 0 && !tvPinError && (
+                <div className="p-6 text-center bg-[#111111] border border-[#222222] rounded-2xl space-y-2">
+                  <Tv className="w-9 h-9 text-[#555555] mx-auto" />
+                  <p className="text-xs text-[#A8A8A8]">
+                    Nenhuma Smart TV foi localizada na rede local nesta varredura.
+                  </p>
+                </div>
+              )}
+
+              {!isScanning && !scanCompleted && discoveredList.length === 0 && !tvPinError && (
                 <div className="p-8 text-center bg-[#111111] border border-[#222222] rounded-2xl space-y-2">
                   <Tv className="w-10 h-10 text-[#444444] mx-auto" />
                   <p className="text-xs text-[#888888]">

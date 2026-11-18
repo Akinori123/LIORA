@@ -31,12 +31,12 @@ function updateEnvFileSimulated(envPath: string, keyName: string, keyValue: stri
   fs.writeFileSync(envPath, content, 'utf8');
 }
 
-test('HVA-01: Identidade Vocal e Persona Feminina Fixa (Kore)', () => {
-  // A voz padrão do sistema deve ser rigorosamente a Kore
-  assert.strictEqual(DEFAULT_SETTINGS.ttsVoice, 'Kore', 'A persona vocal padrão da LIORA deve ser Kore.');
+test('HVA-01: Identidade Vocal e Persona Feminina Padrão (Aoede)', () => {
+  // A voz padrão do sistema é Aoede em pt-BR
+  assert.strictEqual(DEFAULT_SETTINGS.ttsVoice, 'Aoede', 'A persona vocal padrão da LIORA deve ser Aoede.');
   assert.strictEqual(DEFAULT_SETTINGS.language, 'pt-BR', 'O idioma prioritário deve ser Português do Brasil (pt-BR).');
 
-  // Inicialização do VoiceLiveClient sem parâmetro deve adotar Kore
+  // Inicialização do VoiceLiveClient sem parâmetro deve iniciar em IDLE
   const client = new VoiceLiveClient();
   assert.strictEqual(client.getStatus(), 'IDLE', 'O cliente de voz deve iniciar no estado IDLE.');
 });

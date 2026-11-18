@@ -56,17 +56,18 @@ test('DEV-03: Limpeza de Buffer (Clear Audit Trail) - Reset do buffer circular d
   assert.strictEqual(auditLogger.queryEvents().length, 0, 'O buffer de auditoria deve ficar completamente limpo após a ação');
 });
 
-test('DEV-04: Simulação de Consentimento R1 - Transição de DENY_R1_BLOCKED para ALLOW com token SHA-256 consumido', async () => {
+test('DEV-04: Simulação de Consentimento R1 - Transição de REQUIRES_USER_CONFIRMATION para ALLOW com token SHA-256 consumido', async () => {
   const sessionId = 'session-dev-r1';
   const toolName = 'system_exec_simulated';
   const params = { command: 'git status' };
   const pHash = computeParametersHash(params);
 
-  // 1. Sem consentimento: avaliação R1 é negada para execução direta
+  // 1. Sem consentimento: avaliação R1 exige confirmação humana explícita
   const context = { sessionId, clientIp: '127.0.0.1', serverTimestamp: Date.now() };
   const evalWithoutConsent = await permissionEngine.evaluate(toolName, params, context);
   assert.strictEqual(evalWithoutConsent.decision, 'DENY');
-  assert.strictEqual(evalWithoutConsent.code, 'DENY_R1_BLOCKED_IN_PHASE_6_2B');
+  assert.strictEqual(evalWithoutConsent.code, 'REQUIRES_USER_CONFIRMATION');
+  assert.strictEqual(evalWithoutConsent.requiredConfirmation, true);
 
   // 2. Com consentimento emitido e consumido
   const issued = await permissionEngine.issueConsentToken(toolName, pHash, sessionId);

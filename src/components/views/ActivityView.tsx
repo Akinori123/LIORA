@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { ActivityLogItem } from '../../types';
 import { 
@@ -22,7 +23,13 @@ import {
 } from 'lucide-react';
 
 export const ActivityView: React.FC = () => {
-  const { activityLogs, activeTask, clearActivityLogs } = useLioraStore();
+  const { activityLogs, activeTask, clearActivityLogs } = useLioraStore(
+    useShallow((s) => ({
+      activityLogs: s.activityLogs,
+      activeTask: s.activeTask,
+      clearActivityLogs: s.clearActivityLogs
+    }))
+  );
 
   // Filters state
   const [searchQuery, setSearchQuery] = useState('');
@@ -36,7 +43,17 @@ export const ActivityView: React.FC = () => {
   const [unseenCount, setUnseenCount] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const prevLogsLengthRef = useRef(activityLogs.length);
+  const prevTopLogIdRef = useRef<string | null>(activityLogs[0]?.id ?? null);
+  const revokeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (revokeTimerRef.current) {
+        clearTimeout(revokeTimerRef.current);
+        revokeTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Filter logs in real time
   const filteredLogs = useMemo(() => {
@@ -81,13 +98,30 @@ export const ActivityView: React.FC = () => {
     }
   };
 
-  // Detect incoming logs when user is scrolled down
+  // Detect incoming logs when user is scrolled down (even at 1000-item sliding window cap)
   useEffect(() => {
-    const diff = activityLogs.length - prevLogsLengthRef.current;
-    if (diff > 0 && isScrolledDown) {
-      setUnseenCount((prev) => prev + diff);
+    const currentTopId = activityLogs[0]?.id ?? null;
+    if (!isScrolledDown) {
+      prevTopLogIdRef.current = currentTopId;
+      return;
     }
-    prevLogsLengthRef.current = activityLogs.length;
+
+    if (!currentTopId) {
+      prevTopLogIdRef.current = null;
+      return;
+    }
+
+    const prevTopId = prevTopLogIdRef.current;
+    if (prevTopId !== currentTopId) {
+      if (!prevTopId) {
+        setUnseenCount((prev) => prev + activityLogs.length);
+      } else {
+        const idx = activityLogs.findIndex((log) => log.id === prevTopId);
+        const added = idx > 0 ? idx : 1;
+        setUnseenCount((prev) => prev + added);
+      }
+      prevTopLogIdRef.current = currentTopId;
+    }
   }, [activityLogs, isScrolledDown]);
 
   const scrollToTop = () => {
@@ -130,6 +164,11 @@ export const ActivityView: React.FC = () => {
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
+    if (revokeTimerRef.current) clearTimeout(revokeTimerRef.current);
+    revokeTimerRef.current = setTimeout(() => {
+      URL.revokeObjectURL(url);
+      revokeTimerRef.current = null;
+    }, 1000);
   };
 
   return (
@@ -197,7 +236,9 @@ export const ActivityView: React.FC = () => {
             />
             {searchQuery && (
               <button
+                type="button"
                 onClick={() => setSearchQuery('')}
+                aria-label="Limpar busca"
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-[#777777] hover:text-white"
               >
                 <X className="w-3.5 h-3.5" />
@@ -208,6 +249,7 @@ export const ActivityView: React.FC = () => {
           {/* Action Buttons: Export & Clear */}
           <div className="flex items-center gap-2 shrink-0">
             <button
+              type="button"
               onClick={handleExportJson}
               className="flex items-center gap-1.5 px-3 py-2 bg-[#161616] hover:bg-[#222222] border border-[#2B2B2B] rounded-xl text-xs text-[#CCCCCC] hover:text-white transition-colors"
               title="Exportar logs filtrados em formato JSON"
@@ -216,6 +258,7 @@ export const ActivityView: React.FC = () => {
               <span className="hidden sm:inline">JSON</span>
             </button>
             <button
+              type="button"
               onClick={handleExportCsv}
               className="flex items-center gap-1.5 px-3 py-2 bg-[#161616] hover:bg-[#222222] border border-[#2B2B2B] rounded-xl text-xs text-[#CCCCCC] hover:text-white transition-colors"
               title="Exportar logs filtrados em formato CSV"
@@ -224,6 +267,7 @@ export const ActivityView: React.FC = () => {
               <span className="hidden sm:inline">CSV</span>
             </button>
             <button
+              type="button"
               onClick={() => setIsClearModalOpen(true)}
               className="flex items-center gap-1.5 px-3 py-2 bg-[#161616] hover:bg-red-950/40 border border-[#2B2B2B] hover:border-red-900/60 rounded-xl text-xs text-[#888888] hover:text-red-400 transition-colors"
               title="Limpar todos os logs de auditoria"
@@ -243,6 +287,7 @@ export const ActivityView: React.FC = () => {
 
           {/* Category Filter */}
           <select
+            aria-label="Filtrar por categoria"
             value={filterCategory}
             onChange={(e) => setFilterCategory(e.target.value)}
             className="bg-[#161616] border border-[#2B2B2B] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -257,6 +302,7 @@ export const ActivityView: React.FC = () => {
 
           {/* Risk Level Filter */}
           <select
+            aria-label="Filtrar por nível de risco"
             value={filterRisk}
             onChange={(e) => setFilterRisk(e.target.value)}
             className="bg-[#161616] border border-[#2B2B2B] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -270,6 +316,7 @@ export const ActivityView: React.FC = () => {
 
           {/* Status Filter */}
           <select
+            aria-label="Filtrar por status"
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
             className="bg-[#161616] border border-[#2B2B2B] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -291,7 +338,7 @@ export const ActivityView: React.FC = () => {
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-bold text-white">Linha do Tempo de Eventos e Logs</h3>
-          <span className="text-xs font-mono text-[#777777]">Janela deslizante: 200 logs máx</span>
+          <span className="text-xs font-mono text-[#777777]">Janela deslizante: 1000 logs máx</span>
         </div>
         
         <div className="space-y-3">
@@ -389,6 +436,7 @@ export const ActivityView: React.FC = () => {
       {/* Floating Unseen Logs Pill when Scrolled Down */}
       {isScrolledDown && unseenCount > 0 && (
         <button
+          type="button"
           onClick={scrollToTop}
           className="fixed bottom-6 right-6 z-40 px-4 py-2.5 bg-[var(--accent-primary)] hover:opacity-90 text-white font-semibold text-xs rounded-full shadow-2xl shadow-[var(--accent-glow)] flex items-center gap-2 animate-bounce transition-all"
         >
@@ -412,7 +460,7 @@ export const ActivityView: React.FC = () => {
             </div>
 
             <p className="text-xs text-[#CCCCCC] leading-relaxed bg-[#161616] p-3 rounded-xl border border-[#262626]">
-              A limpeza removerá os registros do LocalStorage. Um log autorreferenciado de segurança (`R1`) será gerado automaticamente documentando a limpeza.
+              A limpeza removerá os registros do LocalStorage. Um log autorreferenciado de segurança (R1) será gerado automaticamente documentando a limpeza.
             </p>
 
             <div className="flex items-center justify-end gap-3 pt-2">

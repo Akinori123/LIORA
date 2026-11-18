@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { 
   Smartphone, 
@@ -21,21 +22,23 @@ import {
   Activity, 
   CheckCircle2, 
   AlertTriangle, 
-  Power, 
-  Send,
-  X,
-  Lock,
+  Power,
   Plus,
   Trash2,
   Car,
   Gauge,
-  Layers,
   Radio
 } from 'lucide-react';
-import { DeviceEntity, DeviceType } from '../../types/devices';
+import { DeviceType } from '../../types/devices';
 import { ToolRiskLevel } from '../../types';
 import { DevicePairingModal } from '../devices/DevicePairingModal';
 import { checkBridgeDiagnostics, BridgeStatusInfo } from '../../security/localBridge';
+
+function formatSafeTime(value: string | number | undefined): string {
+  if (!value) return '--:--:--';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '--:--:--' : d.toLocaleTimeString('pt-BR');
+}
 
 export const DevicesView: React.FC = () => {
   const { 
@@ -47,7 +50,18 @@ export const DevicesView: React.FC = () => {
     sendDeviceCommand,
     pingDevicesHealth,
     setActiveTab
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow((s) => ({
+      devices: s.devices,
+      deviceCommands: s.deviceCommands,
+      updateDeviceStatus: s.updateDeviceStatus,
+      removeDevice: s.removeDevice,
+      refreshDeviceTelemetry: s.refreshDeviceTelemetry,
+      sendDeviceCommand: s.sendDeviceCommand,
+      pingDevicesHealth: s.pingDevicesHealth,
+      setActiveTab: s.setActiveTab
+    }))
+  );
 
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(devices[0]?.id || null);
   const selectedDevice = devices.find(d => d.id === selectedDeviceId) || devices[0] || null;
@@ -65,36 +79,54 @@ export const DevicesView: React.FC = () => {
     riskLevel: ToolRiskLevel;
   } | null>(null);
 
-  const feedbackTimerRef = React.useRef<NodeJS.Timeout | null>(null);
-  const refreshTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+  const isMountedRef = React.useRef<boolean>(true);
+  const feedbackTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const runBridgeTest = async () => {
-    setIsTestingBridge(true);
+    if (isMountedRef.current) setIsTestingBridge(true);
     try {
       const diag = await checkBridgeDiagnostics();
+      if (!isMountedRef.current) return;
       setBridgeStatus(diag);
       setCommandFeedback(`Ponte validada: ${diag.activeBridge} (${diag.latencyMs}ms de latência)`);
     } catch {
-      setCommandFeedback('Falha ao comunicar com a ponte local.');
+      if (isMountedRef.current) setCommandFeedback('Falha ao comunicar com a ponte local.');
     } finally {
-      setIsTestingBridge(false);
-      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
-      feedbackTimerRef.current = setTimeout(() => setCommandFeedback(null), 4000);
+      if (isMountedRef.current) {
+        setIsTestingBridge(false);
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setCommandFeedback(null);
+        }, 4000);
+      }
     }
   };
 
   // Polling automático de telemetria e checagem inicial da ponte IPC
   useEffect(() => {
-    refreshDeviceTelemetry('dev-1');
+    isMountedRef.current = true;
+    let pollInFlight = false;
+
+    void refreshDeviceTelemetry('dev-1');
     pingDevicesHealth();
-    runBridgeTest();
+    void runBridgeTest();
 
     const interval = setInterval(() => {
-      refreshDeviceTelemetry('dev-1');
-      pingDevicesHealth();
+      if (pollInFlight) return;
+      pollInFlight = true;
+      void Promise.resolve(refreshDeviceTelemetry('dev-1'))
+        .catch(() => {})
+        .finally(() => {
+          pollInFlight = false;
+          if (isMountedRef.current) {
+            pingDevicesHealth();
+          }
+        });
     }, 4000);
 
     return () => {
+      isMountedRef.current = false;
       clearInterval(interval);
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
@@ -105,11 +137,16 @@ export const DevicesView: React.FC = () => {
     setIsRefreshing(true);
     try {
       await refreshDeviceTelemetry('dev-1');
+      if (!isMountedRef.current) return;
       pingDevicesHealth();
       await runBridgeTest();
     } finally {
-      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => setIsRefreshing(false), 500);
+      if (isMountedRef.current) {
+        if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setIsRefreshing(false);
+        }, 500);
+      }
     }
   };
 
@@ -139,11 +176,13 @@ export const DevicesView: React.FC = () => {
   const executeCommandDispatch = async (
     deviceId: string, 
     commandType: 'REBOOT' | 'SYNC_CONTEXT' | 'TOGGLE_STATE' | 'FETCH_TELEMETRY', 
-    riskLevel: ToolRiskLevel
+    riskLevel: ToolRiskLevel,
+    uiConfirmed: boolean = false
   ) => {
     setCommandFeedback(null);
     try {
-      const res = await sendDeviceCommand(deviceId, commandType, riskLevel);
+      const res = await sendDeviceCommand(deviceId, commandType, riskLevel, {}, { uiConfirmed });
+      if (!isMountedRef.current) return;
       if (res.status === 'EXECUTED') {
         setCommandFeedback(`Comando ${commandType} executado com sucesso.`);
       } else if (res.status === 'BLOCKED_BY_POLICY') {
@@ -156,10 +195,16 @@ export const DevicesView: React.FC = () => {
         setCommandFeedback(`Comando despachado: ${res.resultSummary}`);
       }
     } catch {
-      setCommandFeedback('Erro ao despachar comando para o dispositivo.');
+      if (isMountedRef.current) {
+        setCommandFeedback('Erro ao despachar comando para o dispositivo.');
+      }
     } finally {
-      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
-      feedbackTimerRef.current = setTimeout(() => setCommandFeedback(null), 4000);
+      if (isMountedRef.current) {
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setCommandFeedback(null);
+        }, 4000);
+      }
     }
   };
 
@@ -167,7 +212,7 @@ export const DevicesView: React.FC = () => {
     switch (type) {
       case 'pc': return <Laptop className="w-5 h-5 text-[var(--accent-primary)]" />;
       case 'android': return <Smartphone className="w-5 h-5 text-blue-400" />;
-      case 'tv': return <Tv className="w-5 h-5 text-purple-400" />;
+      case 'tv': return <Tv className="w-5 h-5 text-[var(--accent-primary)]" />;
       case 'smarthome': return <Home className="w-5 h-5 text-emerald-400" />;
       case 'printer': return <Printer className="w-5 h-5 text-amber-400" />;
       case 'car': return <Car className="w-5 h-5 text-[var(--accent-primary)]" />;
@@ -242,6 +287,7 @@ export const DevicesView: React.FC = () => {
             </span>
 
             <button
+              type="button"
               onClick={runBridgeTest}
               disabled={isTestingBridge}
               className="px-3 py-1.5 bg-[#171717] hover:bg-[#222222] border border-[#2E2E2E] rounded-xl text-xs font-mono text-[#CCCCCC] hover:text-white flex items-center gap-1.5 transition-colors disabled:opacity-50"
@@ -300,7 +346,7 @@ export const DevicesView: React.FC = () => {
                 </span>
               </div>
               <span className="text-[10px] font-mono text-[#666666]">
-                Polling Ativo: {new Date(tel.lastUpdated).toLocaleTimeString()}
+                Polling Ativo: {formatSafeTime(tel.lastUpdated)}
               </span>
             </div>
 
@@ -376,8 +422,7 @@ export const DevicesView: React.FC = () => {
           return (
             <div 
               key={dev.id} 
-              onClick={() => setSelectedDeviceId(dev.id)}
-              className={`bg-[#111111] border rounded-2xl p-5 flex flex-col justify-between cursor-pointer transition-all shadow-lg relative group ${
+              className={`bg-[#111111] border rounded-2xl p-5 flex flex-col justify-between transition-all shadow-lg relative group ${
                 isSelected ? 'border-[var(--accent-primary)] shadow-lg shadow-[var(--accent-glow)]' : 'border-[#222222] hover:border-[#333333]'
               }`}
             >
@@ -398,10 +443,9 @@ export const DevicesView: React.FC = () => {
                     )}
 
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        updateDeviceStatus(dev.id, !dev.connected);
-                      }}
+                      type="button"
+                      onClick={() => updateDeviceStatus(dev.id, !dev.connected)}
+                      aria-label={`Alternar status de conexão de ${dev.name}`}
                       className={`px-2.5 py-1 rounded-full text-[10px] font-mono border transition-all ${
                         dev.connected 
                           ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' 
@@ -421,14 +465,13 @@ export const DevicesView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="mt-5 pt-3 border-t border-[#222222] flex items-center justify-between">
-                <span className="text-[10px] font-mono text-[#A8A8A8]">ID: {dev.id}</span>
-                <div className="flex items-center gap-2">
+              <div className="mt-5 pt-3 border-t border-[#222222] flex items-center justify-between gap-2">
+                <span className="text-[10px] font-mono text-[#A8A8A8] truncate">ID: {dev.id}</span>
+                <div className="flex items-center gap-2 shrink-0">
                   {!isHost && (
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
+                      onClick={() => {
                         const nextDev = devices.find(d => d.id !== dev.id) || null;
                         removeDevice(dev.id);
                         if (selectedDevice?.id === dev.id) {
@@ -436,12 +479,25 @@ export const DevicesView: React.FC = () => {
                         }
                       }}
                       title="Desconectar e remover dispositivo"
+                      aria-label={`Remover dispositivo ${dev.name}`}
                       className="p-1 text-[#666666] hover:text-red-400 hover:bg-[#1C1C1C] rounded transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
-                  <span className="text-xs font-semibold text-[var(--accent-primary)]">Selecionar</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDeviceId(dev.id)}
+                    aria-pressed={isSelected}
+                    aria-label={`Selecionar dispositivo ${dev.name}`}
+                    className={`text-xs font-semibold px-2 py-1 rounded-lg transition-colors ${
+                      isSelected
+                        ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] border border-[var(--accent-border)]'
+                        : 'text-[var(--accent-primary)] hover:bg-[#1A1A1A]'
+                    }`}
+                  >
+                    {isSelected ? 'Selecionado' : 'Selecionar'}
+                  </button>
                 </div>
               </div>
             </div>
@@ -467,6 +523,7 @@ export const DevicesView: React.FC = () => {
 
             <div className="flex items-center gap-2 shrink-0 flex-wrap">
               <button
+                type="button"
                 onClick={() => handleCommandClick(selectedDevice.id, 'FETCH_TELEMETRY', 'R0')}
                 className="px-3 py-2 bg-[#171717] hover:bg-[#222222] border border-[#2E2E2E] rounded-xl text-xs font-mono text-white flex items-center gap-1.5 transition-colors"
               >
@@ -475,6 +532,7 @@ export const DevicesView: React.FC = () => {
               </button>
 
               <button
+                type="button"
                 onClick={() => handleCommandClick(selectedDevice.id, 'REBOOT', 'R1')}
                 className="px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-xl text-xs font-mono text-amber-400 flex items-center gap-1.5 transition-colors"
                 title="Requer confirmação de risco R1"
@@ -572,7 +630,7 @@ export const DevicesView: React.FC = () => {
 
                 <div className="flex items-center gap-3 shrink-0 text-[11px] font-mono text-[#888888]">
                   <span className="px-2 py-0.5 bg-[#1A1A1A] rounded text-[#CCCCCC]">{cmd.riskLevel}</span>
-                  <span>{new Date(cmd.timestamp).toLocaleTimeString()}</span>
+                  <span>{formatSafeTime(cmd.timestamp)}</span>
                 </div>
               </div>
             ))}
@@ -598,7 +656,7 @@ export const DevicesView: React.FC = () => {
               <div className="text-white font-bold">Dispositivo: {pendingConsentCommand.deviceName}</div>
               <div className="text-[#A8A8A8]">Comando: <span className="text-[var(--accent-primary)]">{pendingConsentCommand.commandType}</span></div>
               <div className="text-[#777777] text-[11px] font-sans pt-1 border-t border-[#222222]">
-                Esta ação enviará uma instrução direta para o hardware e será registrada na auditoria de segurança (`/activity`).
+                Esta ação enviará uma instrução direta para o hardware e será registrada na auditoria de segurança (<code className="text-[#A8A8A8] font-mono">/activity</code>).
               </div>
             </div>
 
@@ -616,7 +674,8 @@ export const DevicesView: React.FC = () => {
                   executeCommandDispatch(
                     pendingConsentCommand.deviceId, 
                     pendingConsentCommand.commandType, 
-                    pendingConsentCommand.riskLevel
+                    pendingConsentCommand.riskLevel,
+                    true
                   );
                   setPendingConsentCommand(null);
                 }}

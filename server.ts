@@ -12,7 +12,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { toolRegistry } from './src/tools/registry';
 import { installNativeServerTools } from './src/tools/nativeServerTools';
 // NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3) — registro no registry do lado cliente
-import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, openApplicationTool, openBrowserTool } from './src/tools/pcControlTools';
+import { pcTakeScreenshotTool, pcManageAppsTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, openApplicationTool, openBrowserTool, isOsDryRun } from './src/tools/pcControlTools';
 import { detectRuntimeEnvironment } from './src/utils/runtimeEnvironment';
 // AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — registro no registry do lado cliente
 import { webBrowserAgentTool } from './src/tools/web/browserAgentTool';
@@ -26,6 +26,7 @@ import { startBackgroundTaskTool, checkBackgroundTaskStatusTool, cancelBackgroun
 // FASE 4: COFRE CRIPTOGRAFADO — vault
 import { vaultStoreCredentialTool, vaultGetCredentialTool, vaultListKeysTool, vaultDeleteCredentialTool, vaultHealthCheckTool } from './src/tools/security/vaultTools';
 import { permissionEngine } from './src/security/permissionEngine';
+import { ToolPermissionPolicy, ToolPolicyMap } from './src/security/types';
 import { auditLogger } from './src/security/auditLogger';
 import { integrationsVault } from './src/services/integrationsVault';
 // CORREÇÃO (Etapa 6 — hash canônico do consentimento de UI coerente com o PermissionEngine)
@@ -35,21 +36,29 @@ import { semanticMemoryService } from './src/services/memory/semanticMemoryServi
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const isDirectRun = Boolean(process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+
 const DEFAULT_SYSTEM_INSTRUCTION = 
   "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
   "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
-  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Automações, Desenvolvedor, Integrações, Configurações). " +
+  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Cockpit, Automações, Desenvolvedor, Integrações, Configurações). " +
   "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade. " +
   "Quando o usuário pedir uma AÇÃO (abrir/navegar/consultar/criar/executar), você DEVE chamar a ferramenta apropriada em vez de apenas responder em texto. " +
   "NUNCA afirme que executou, criou, excluiu, pesquisou ou mostrou algo se a chamada de ferramenta não retornou success: true com dados reais. " +
-  "EXCLUSIVIDADE DE AÇÃO: chame NO MÁXIMO UMA ferramenta de abertura por turno (open_gps_navigation, maps_search_places, pc_manage_apps launch, open_application). " +
-  "Se o usuário pedir várias coisas (ex: 'farmácias E mercados'), priorize a mais relevante para a intenção principal e pergunte se deseja a outra — NUNCA abra múltiplas abas/janelas em paralelo. " +
+  "EXCLUSIVIDADE DE AÇÃO: para consultas paralelas de lugares distintos (ex: 'farmácias E mercados'), priorize a mais relevante e pergunte se deseja a outra — NUNCA abra múltiplas abas/janelas de mapas em paralelo. " +
   "BLINDAGEM ABSOLUTA CONTRA SUCESSO FALSO: você SÓ pode afirmar que executou uma ação se a resposta da ferramenta trouxe success: true. " +
   "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'Mestre, não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
-  "Ao encadear abrir um aplicativo e digitar nele, primeiro chame pc_manage_apps (launch), depois pc_simulate_input (type) com waitFocusMs para aguardar a janela ganhar foco. " +
+  "CICLO DE VIDA DAS FERRAMENTAS (INÍCIO, MEIO E FIM): Pense sempre na intenção completa do Mestre do início ao fim. Se ele pedir uma ação simples (ex: 'abra o bloco de notas'), execute a abertura via ferramenta e pergunte proativamente se deseja que você escreva algo, crie um relatório, anote ideias ou salve um arquivo. " +
+  "Se ele pedir ações compostas (ex: 'abra o bloco de notas e escreva um relatório/minhas ideias', 'abra outra aba', 'digite X e salve', 'feche o bloco de notas'), ENCADEIE as ferramentas necessárias passo a passo até concluir o objetivo: " +
+  "1) INÍCIO: abra/garanta o aplicativo (`pc_manage_apps` com action='launch' ou `open_application`) ou crie arquivo diretamente (`workspace_write_file` / `file_write_and_modify`); " +
+  "2) MEIO: para escrever no app aberto use `pc_simulate_input` com action='type' e `waitFocusMs: 800`, ou use `pc_simulate_input` com action='hotkey' para abrir nova aba (`Ctrl+T`), fechar aba (`Ctrl+W`), alternar abas (`Ctrl+Tab`) ou salvar (`Ctrl+S`); " +
+  "3) FIM: quando o Mestre pedir para encerrar ou fechar um app, use `pc_manage_apps` com action='kill' (processo) ou `pc_simulate_input` com action='hotkey' (`Alt+F4`). " +
+  "PERMISSÕES, CONSENTIMENTO E MODO DESENVOLVEDOR: Ferramentas R0 rodam automaticamente; ferramentas R1 e R2 pausam para autorização se a política não estiver liberada. " +
+  "Se uma ferramenta retornar `requiresConsent: true` ou `REQUIRES_USER_CONFIRMATION`, NUNCA finja que a ação ocorreu: explique exatamente qual etapa pausou e por quê (nível R1/R2), e oriente o Mestre que ele pode autorizar AGORA clicando em 'Aprovar' na tela ou dizendo por voz 'Confirmar' / 'Autorizar' (ou 'Cancelar' para abortar). " +
+  "Apenas se o Mestre quiser aprovação automática contínua sem interrupções futuras, informe que ele pode habilitar 'Auto-Consentimento Operador (R1/R2)' ou definir a política individual ('Sempre Permitir') na aba Desenvolvedor — você pode navegar até lá via `navigateToTab` se ele pedir. " +
+  "EXECUÇÃO HONESTA (REAL vs. SIMULADO): Se `simulated: true` estiver no retorno, declare explicitamente que a etapa ocorreu em `[Modo Simulado / Web Preview]` sem efeito físico no sistema operacional. " +
   "LOCAIS POR APELIDO: para navegar para 'minha casa', 'trabalho', 'faculdade' ou apelidos similares, chame PRIMEIRO resolve_place_alias para buscar o endereço na memória do usuário. " +
   "Se não estiver lá, pergunte o endereço e ensine a LIORA com save_place_alias ou addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
-  "Se uma ferramenta falhar ou não existir, informe o erro real e o que seria necessário — nunca simule sucesso. " +
   "Ordens de navegação de interface devem usar a ferramenta navigateToTab; ordens de consulta de sistema devem usar system_info ou getSystemStatus. " +
   "NAVEGAÇÃO E MAPAS: Você POSSUI ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado. Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown, com linguagem especificada e boas práticas de engenharia de software.";
@@ -327,6 +336,47 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     toolRegistry.registerTool(t);
   }
 
+  const securityPoliciesPath = path.join(os.homedir(), '.liora', 'security-policies.json');
+  const loadPersistedSecurityPolicies = () => {
+    if (isOsDryRun() || process.env.NODE_ENV === 'test') return;
+    try {
+      if (!fs.existsSync(securityPoliciesPath)) return;
+      const parsed = JSON.parse(fs.readFileSync(securityPoliciesPath, 'utf8'));
+      if (typeof parsed?.globalAutoApprove === 'boolean') {
+        permissionEngine.setGlobalAutoApprove(parsed.globalAutoApprove);
+      }
+      if (parsed?.policies && typeof parsed.policies === 'object' && !Array.isArray(parsed.policies)) {
+        const sanitized: ToolPolicyMap = {};
+        for (const [k, v] of Object.entries(parsed.policies)) {
+          if (v === 'always_allow' || v === 'always_require_consent') {
+            sanitized[k] = v as ToolPermissionPolicy;
+          }
+        }
+        permissionEngine.setToolPolicies(sanitized);
+      }
+    } catch (err) {
+      console.warn('[SecurityPolicies] Falha ao carregar políticas persistidas:', err);
+    }
+  };
+  const savePersistedSecurityPolicies = () => {
+    if (isOsDryRun() || process.env.NODE_ENV === 'test') return;
+    try {
+      fs.mkdirSync(path.dirname(securityPoliciesPath), { recursive: true });
+      fs.writeFileSync(
+        securityPoliciesPath,
+        JSON.stringify({
+          globalAutoApprove: permissionEngine.getGlobalAutoApprove(),
+          policies: permissionEngine.getToolPolicies(),
+          updatedAt: new Date().toISOString()
+        }, null, 2),
+        'utf8'
+      );
+    } catch (err) {
+      console.warn('[SecurityPolicies] Falha ao persistir políticas:', err);
+    }
+  };
+  loadPersistedSecurityPolicies();
+
   // BUG DE SEGURANÇA CRÍTICO CORRIGIDO (bypass do PermissionEngine no chat/Live):
   // o loop de function calling executava ferramentas via toolRegistry.executeTool
   // DIRETAMENTE — sem passar pelo PermissionEngine. O modelo podia pedir
@@ -344,7 +394,11 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     if (!toolDef) {
       return { toolName, success: false, error: `Ferramenta '${toolName}' não registrada.`, simulated: true, riskLevel: 'R0' as const, data: null };
     }
-    const risk = (toolDef.riskLevel || 'R0') as 'R0' | 'R1' | 'R2' | 'R3';
+    const risk = (
+      toolName === 'pc_manage_apps' && params?.action !== 'list'
+        ? 'R2'
+        : (toolDef.riskLevel || 'R0')
+    ) as 'R0' | 'R1' | 'R2' | 'R3';
     
     // Auto-consentimento auditado para ações utilitárias legítimas solicitadas pelo operador por voz
     const isOperatorSafeAction = 
@@ -370,8 +424,10 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       toolName === 'file_search_and_read' ||
       toolName === 'pc_take_screenshot';
 
+    const toolPolicy = permissionEngine.getToolPolicy(toolName);
+
     let consentToken: string | undefined = undefined;
-    if (isOperatorSafeAction && risk !== 'R0') {
+    if (isOperatorSafeAction && risk !== 'R0' && toolPolicy !== 'always_require_consent') {
       try {
         const parametersHash = computeParametersHash(params);
         const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, sessionId);
@@ -902,7 +958,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
           }
         });
       }
-      if (audio && audio.data && effectiveModel === 'gemini-3.8-flash') {
+      if (audio && audio.data && effectiveModel.startsWith('gemini-')) {
         userParts.push({
           inlineData: {
             data: audio.data,
@@ -1011,7 +1067,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
           }
         });
       }
-      if (audio && audio.data && effectiveModel === 'gemini-3.8-flash') {
+      if (audio && audio.data && effectiveModel.startsWith('gemini-')) {
         userParts.push({
           inlineData: {
             data: audio.data,
@@ -1172,45 +1228,57 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
               res.write(`data: ${JSON.stringify({ error: `Cota do Gemini excedida e falha no OpenRouter: ${fallbackErr?.message || 'Erro desconhecido'}` })}\n\n`);
               (res as any).flush?.();
             }
-          } else if (activeModel !== 'gemini-3.1-flash-lite') {
-            console.info(`[Model Router] Transitioning ${activeModel} to gemini-3.1-flash-lite.`);
-            activeModel = 'gemini-3.1-flash-lite';
-            const safeContents = sanitizeContentsForFallback(contents);
-            const stream = await chatStreamClient.models.generateContentStream({
-              model: activeModel,
-              contents: safeContents,
-              config: {
-                systemInstruction: effectiveSystemInstruction,
-              }
-            });
-            for await (const chunk of stream) {
-              if (isClientDisconnected) break;
-              const chunkText = chunk.text;
-              if (chunkText) {
-                streamedAnyChunk = true;
-                res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
-                (res as any).flush?.();
-              }
-            }
-          } else if (process.env.OPENROUTER_API_KEY) {
-            console.info(`[Model Router] Transitioning to OpenRouter backup.`);
-            res.write(`data: ${JSON.stringify({ failover: true, provider: 'openrouter', message: 'Serviço temporariamente indisponível. Alternando para o provedor de backup.' })}\n\n`);
-            (res as any).flush?.();
-            try {
-              await callOpenRouterFallback(contents, effectiveSystemInstruction, (delta) => {
-                if (!isClientDisconnected) {
-                  streamedAnyChunk = true;
-                  res.write(`data: ${JSON.stringify({ chunk: delta })}\n\n`);
-                  (res as any).flush?.();
-                }
-              });
-              activeModel = 'openrouter/fallback';
-            } catch (fallbackErr: any) {
-              console.warn(`[Model Router] OpenRouter backup error:`, fallbackErr?.message || fallbackErr);
-              throw streamErr;
-            }
           } else {
-            throw streamErr;
+            let geminiFallbackSucceeded = false;
+            if (activeModel !== 'gemini-3.1-flash-lite') {
+              try {
+                console.info(`[Model Router] Transitioning ${activeModel} to gemini-3.1-flash-lite.`);
+                activeModel = 'gemini-3.1-flash-lite';
+                const safeContents = sanitizeContentsForFallback(contents);
+                const stream = await chatStreamClient.models.generateContentStream({
+                  model: activeModel,
+                  contents: safeContents,
+                  config: {
+                    systemInstruction: effectiveSystemInstruction,
+                  }
+                });
+                for await (const chunk of stream) {
+                  if (isClientDisconnected) break;
+                  const chunkText = chunk.text;
+                  if (chunkText) {
+                    streamedAnyChunk = true;
+                    res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
+                    (res as any).flush?.();
+                  }
+                }
+                geminiFallbackSucceeded = true;
+              } catch (liteErr) {
+                console.warn(`[Model Router] gemini-3.1-flash-lite fallback failed:`, liteErr);
+              }
+            }
+
+            if (!geminiFallbackSucceeded && !streamedAnyChunk) {
+              if (activeOpenRouterKey && activeOpenRouterKey.trim().length >= 5) {
+                console.info(`[Model Router] Transitioning to OpenRouter backup.`);
+                res.write(`data: ${JSON.stringify({ failover: true, provider: 'openrouter', message: 'Serviço temporariamente indisponível. Alternando para o provedor de backup.' })}\n\n`);
+                (res as any).flush?.();
+                try {
+                  await callOpenRouterFallback(contents, effectiveSystemInstruction, (delta) => {
+                    if (!isClientDisconnected) {
+                      streamedAnyChunk = true;
+                      res.write(`data: ${JSON.stringify({ chunk: delta })}\n\n`);
+                      (res as any).flush?.();
+                    }
+                  }, activeOpenRouterKey);
+                  activeModel = 'openrouter/fallback';
+                } catch (fallbackErr: any) {
+                  console.warn(`[Model Router] OpenRouter backup error:`, fallbackErr?.message || fallbackErr);
+                  throw streamErr;
+                }
+              } else {
+                throw streamErr;
+              }
+            }
           }
         } else {
           throw streamErr;
@@ -1630,6 +1698,64 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     }
   });
 
+  // Granular Per-Tool Policies & Global Auto-Approve (Developer Tool Registry)
+  app.get('/api/security/tool-policies', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.json({
+      success: true,
+      globalAutoApprove: permissionEngine.getGlobalAutoApprove(),
+      policies: permissionEngine.getToolPolicies(),
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.put('/api/security/tool-policies', (req, res) => {
+    try {
+      const { globalAutoApprove, policies, toolName, policy } = req.body || {};
+
+      if (typeof globalAutoApprove === 'boolean') {
+        permissionEngine.setGlobalAutoApprove(globalAutoApprove);
+      }
+
+      if (policies && typeof policies === 'object' && !Array.isArray(policies)) {
+        const sanitized: ToolPolicyMap = {};
+        for (const [k, v] of Object.entries(policies)) {
+          if (v === 'default' || v === 'always_allow' || v === 'always_require_consent') {
+            sanitized[k] = v as ToolPermissionPolicy;
+          }
+        }
+        permissionEngine.setToolPolicies(sanitized);
+      }
+
+      if (typeof toolName === 'string' && toolName.trim()) {
+        if (policy === 'default' || policy === 'always_allow' || policy === 'always_require_consent') {
+          permissionEngine.setToolPolicy(toolName.trim(), policy);
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: `Política '${String(policy)}' inválida. Use 'default', 'always_allow' ou 'always_require_consent'.`,
+            code: 'INVALID_POLICY'
+          });
+        }
+      }
+
+      savePersistedSecurityPolicies();
+
+      res.setHeader('Content-Type', 'application/json');
+      res.json({
+        success: true,
+        globalAutoApprove: permissionEngine.getGlobalAutoApprove(),
+        policies: permissionEngine.getToolPolicies(),
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Falha ao atualizar políticas de ferramentas.'
+      });
+    }
+  });
+
   // Security Audit Log: Clear audit trail buffer (Marco 6.2E)
   app.delete(['/api/security/audit', '/api/audit'], (req, res) => {
     try {
@@ -1765,22 +1891,35 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         clientIp === '::ffff:127.0.0.1' ||
         clientIp.includes('127.0.0.1') ||
         req.hostname === 'localhost';
-      if (uiConsentToken === 'operator-direct-voice' && isLoopbackClient) {
+      const currentToolPolicy = permissionEngine.getToolPolicy(toolName);
+      if (
+        uiConsentToken === 'operator-direct-voice' &&
+        isLoopbackClient &&
+        currentToolPolicy !== 'always_require_consent'
+      ) {
         try {
           const parametersHash = computeParametersHash(parameters);
           const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, clientSessionId);
           issuedToken = issued.token;
           uiConsentValid = true;
         } catch {}
-      } else if (uiConsentToken) {
+      } else if (uiConsentToken && uiConsentToken !== 'operator-direct-voice') {
         const record = activeUiConsentTokens.get(uiConsentToken);
         if (record) {
-          const stillValid = record.expiresAt > Date.now()
-            && record.toolName === toolName;
+          let parametersHash = '';
+          try {
+            parametersHash = computeParametersHash(parameters);
+          } catch {
+            parametersHash = '';
+          }
+          const stillValid =
+            Boolean(parametersHash) &&
+            record.expiresAt > Date.now() &&
+            record.toolName === toolName &&
+            record.parametersHash === parametersHash;
           if (stillValid) {
             activeUiConsentTokens.delete(uiConsentToken); // consumo atômico (anti-replay)
             try {
-              const parametersHash = computeParametersHash(parameters);
               const issued = await permissionEngine.issueConsentToken(toolName, parametersHash, clientSessionId);
               issuedToken = issued.token;
               uiConsentValid = true;
@@ -1789,8 +1928,12 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         }
       }
 
-      // riskLevel explícito do registry (resolve R1/R2 para tools fora da whitelist R0)
-      const toolRiskLevel = toolDef?.riskLevel as any;
+      // riskLevel explícito do registry (resolve R1/R2 e escala pc_manage_apps mutável para R2)
+      const toolRiskLevel = (
+        toolName === 'pc_manage_apps' && parameters?.action !== 'list'
+          ? 'R2'
+          : toolDef?.riskLevel
+      ) as any;
       // Consentimento HMAC emitido pelo PermissionEngine após validação do token de UI
       const evaluation = await permissionEngine.evaluate(toolName, parameters, context, {
         riskLevel: toolRiskLevel,
@@ -1825,6 +1968,8 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
           decision: 'DENY',
           riskLevel: evaluation.riskLevel,
           code: evaluation.code || 'SECURITY_CONSTRAINT_VIOLATION',
+          requiredConfirmation: Boolean(evaluation.requiredConfirmation),
+          parametersHash: evaluation.parametersHash,
           error: evaluation.reason,
           simulated: true,
           timestamp: evaluation.timestamp,
@@ -1986,10 +2131,6 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     }
   }, HEARTBEAT_INTERVAL_MS);
   activeWsHeartbeat = wsHeartbeat;
-  wss.on('connection', (ws) => {
-    (ws as any).isAlive = true;
-    ws.on('pong', () => { (ws as any).isAlive = true; });
-  });
   // Não deixa o timer segurar o encerramento do processo (stopServer dos testes)
   if (typeof wsHeartbeat === 'object' && wsHeartbeat !== null && 'unref' in wsHeartbeat) {
     (wsHeartbeat as any).unref();
@@ -2001,6 +2142,8 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       return;
     }
 
+    (ws as any).isAlive = true;
+    ws.on('pong', () => { (ws as any).isAlive = true; });
     activeConnections.add(ws);
 
     let liveSession: any = null;
@@ -2097,11 +2240,22 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
         if (payload.type === 'START_LIVE') {
           if (liveState === 'ACTIVE' && liveSession) {
-            ws.send(JSON.stringify({ 
-              type: 'GEMINI_LIVE_READY', 
-              alreadyActive: true, 
-              message: 'Sessão Gemini Live já se encontra ativa.' 
-            }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ 
+                type: 'GEMINI_LIVE_READY', 
+                alreadyActive: true, 
+                message: 'Sessão Gemini Live já se encontra ativa.' 
+              }));
+            }
+            return;
+          }
+          if (liveState === 'CONNECTING') {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'GEMINI_LIVE_CONNECTING',
+                message: 'Sessão Gemini Live já está conectando. Aguarde a inicialização.'
+              }));
+            }
             return;
           }
 
@@ -2226,22 +2380,24 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                         const execResult = await executeToolWithPolicy(toolName, toolParams, `voice-live-${liveSessionId}`);
 
                         // Notifica a UI em tempo real (mesmo contrato de data.toolExecuted do chat)
-                        ws.send(JSON.stringify({
-                          type: 'TOOL_EXECUTED',
-                          toolName,
-                          parameters: (execResult as any).parameters || toolParams,
-                          success: execResult.success,
-                          simulated: execResult.simulated,
-                          requiresConsent: Boolean((execResult as any).requiresConsent),
-                          code: (execResult as any).code,
-                          error: execResult.error,
-                          riskLevel: execResult.riskLevel,
-                          resultSummary: execResult.success
-                            ? (execResult.data?.message || 'Executado e verificado no servidor local.')
-                            : (execResult.error || 'Falhou'),
-                          data: execResult.data,
-                          timestamp: new Date().toISOString()
-                        }));
+                        if (ws.readyState === WebSocket.OPEN) {
+                          ws.send(JSON.stringify({
+                            type: 'TOOL_EXECUTED',
+                            toolName,
+                            parameters: (execResult as any).parameters || toolParams,
+                            success: execResult.success,
+                            simulated: execResult.simulated,
+                            requiresConsent: Boolean((execResult as any).requiresConsent),
+                            code: (execResult as any).code,
+                            error: execResult.error,
+                            riskLevel: execResult.riskLevel,
+                            resultSummary: execResult.success
+                              ? (execResult.data?.message || 'Executado e verificado no servidor local.')
+                              : (execResult.error || 'Falhou'),
+                            data: execResult.data,
+                            timestamp: new Date().toISOString()
+                          }));
+                        }
 
                         // FIX BUG-3: sendToolOutput não existe no @google/genai v2.x.
                         // Usa sendClientContent com functionResponse (formato correto da API Gemini Live).
@@ -2261,16 +2417,18 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                         });
                       } catch (toolErr: any) {
                         console.error('[Gemini Live] Erro ao executar ferramenta:', toolErr);
-                        ws.send(JSON.stringify({
-                          type: 'TOOL_EXECUTED',
-                          toolName,
-                          success: false,
-                          simulated: true,
-                          error: toolErr?.message || 'Falha desconhecida na execução da ferramenta.',
-                          riskLevel: 'R1',
-                          resultSummary: toolErr?.message || 'Falhou',
-                          timestamp: new Date().toISOString()
-                        }));
+                        if (ws.readyState === WebSocket.OPEN) {
+                          ws.send(JSON.stringify({
+                            type: 'TOOL_EXECUTED',
+                            toolName,
+                            success: false,
+                            simulated: true,
+                            error: toolErr?.message || 'Falha desconhecida na execução da ferramenta.',
+                            riskLevel: 'R1',
+                            resultSummary: toolErr?.message || 'Falhou',
+                            timestamp: new Date().toISOString()
+                          }));
+                        }
                       }
                     })();
                   }
@@ -2296,6 +2454,11 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
               }
             });
 
+            if (ws.readyState !== WebSocket.OPEN) {
+              cleanupLive();
+              return;
+            }
+
             liveState = 'ACTIVE';
 
             // Timeout de segurança: 15 minutos de duração máxima de sessão
@@ -2309,22 +2472,26 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
               }
             }, 15 * 60 * 1000);
 
-            ws.send(JSON.stringify({
-              type: 'GEMINI_LIVE_READY',
-              model: requestedModel,
-              voice: requestedVoice,
-              sampleRateIn: 16000,
-              sampleRateOut: 24000,
-              message: 'Sessão Gemini Live multimodal inicializada com sucesso.'
-            }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'GEMINI_LIVE_READY',
+                model: requestedModel,
+                voice: requestedVoice,
+                sampleRateIn: 16000,
+                sampleRateOut: 24000,
+                message: 'Sessão Gemini Live multimodal inicializada com sucesso.'
+              }));
+            }
 
           } catch (err: any) {
             cleanupLive();
             console.error('[Gemini Live] Falha ao conectar:', err);
-            ws.send(JSON.stringify({
-              type: 'GEMINI_LIVE_ERROR',
-              message: err?.message || 'Falha ao conectar à API Gemini Live.'
-            }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'GEMINI_LIVE_ERROR',
+                message: err?.message || 'Falha ao conectar à API Gemini Live.'
+              }));
+            }
           }
           return;
         }
@@ -2516,7 +2683,6 @@ export async function stopServer(): Promise<void> {
 export { startServer };
 
 // Auto-start apenas quando executado diretamente como processo (não quando importado por testes)
-const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isDirectRun) {
   // Bug hunt (unhandled rejection): startServer pode falhar (porta ocupada, EACCES)
   // — registra e encerra com código não-zero em vez de derrubar o processo silenciosamente.

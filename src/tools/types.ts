@@ -33,6 +33,7 @@ export interface ToolExecutionContext {
   sessionId?: string;
   allowedWorkspaceRoot?: string;
   timestamp?: string;
+  skipDedupe?: boolean;
 }
 
 import type { VerificationEvidence } from './verifier';

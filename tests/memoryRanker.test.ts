@@ -108,18 +108,29 @@ test('MEM-03: Respeito rigoroso aos limites de orçamento (Top-4 e Max 400 carac
 
 test('MEM-04: Integração de rankeamento contextual com memórias do store', () => {
   const store = useLioraStore.getState();
-  const storeMemories = store.memoryEntries;
-  assert.ok(storeMemories.length > 0, 'O store deve conter memórias iniciais');
+  const prevMemories = store.memoryEntries;
+  try {
+    store.addMemory({
+      category: 'preference',
+      key: 'tema_visual',
+      value: 'Preto, Branco e Vermelho (#FF2B2B)',
+      confidence: 1.0
+    });
+    const storeMemories = useLioraStore.getState().memoryEntries;
+    assert.ok(storeMemories.length > 0, 'O store deve conter a memória adicionada');
 
-  // Consulta por tema e visual
-  const rankedTheme = rankMemories('quero usar tema visual vermelho', storeMemories);
-  assert.ok(rankedTheme.length > 0);
-  const topMatch = rankedTheme[0];
-  assert.strictEqual(topMatch.entry.key, 'tema_visual');
-  assert.ok(topMatch.entry.value.includes('#FF2B2B'));
+    // Consulta por tema e visual
+    const rankedTheme = rankMemories('quero usar tema visual vermelho', storeMemories);
+    assert.ok(rankedTheme.length > 0);
+    const topMatch = rankedTheme[0];
+    assert.strictEqual(topMatch.entry.key, 'tema_visual');
+    assert.ok(topMatch.entry.value.includes('#FF2B2B'));
 
-  // Formatação do bloco contextual
-  const block = formatMemoryContextBlock(rankedTheme, 400);
-  assert.ok(block.includes('tema_visual: Preto, Branco e Vermelho (#FF2B2B)'));
-  assert.ok(block.includes('Diretriz: Utilize essas informações de forma natural'));
+    // Formatação do bloco contextual
+    const block = formatMemoryContextBlock(rankedTheme, 400);
+    assert.ok(block.includes('tema_visual: Preto, Branco e Vermelho (#FF2B2B)'));
+    assert.ok(block.includes('Diretriz: Utilize essas informações de forma natural'));
+  } finally {
+    useLioraStore.setState({ memoryEntries: prevMemories });
+  }
 });

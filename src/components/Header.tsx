@@ -4,11 +4,20 @@
  */
 
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../store/lioraStore';
-import { Mic, MicOff, Shield, Server, Sparkles, Menu, ExternalLink } from 'lucide-react';
+import { Mic, MicOff, Shield, Server, Sparkles, Menu } from 'lucide-react';
 
 export const Header: React.FC = () => {
-  const { activeTab, orbState, isVoiceActive, toggleVoice, setActiveTab, toggleMobileDrawer } = useLioraStore();
+  const { activeTab, isVoiceActive, toggleVoice, setActiveTab, toggleMobileDrawer } = useLioraStore(
+    useShallow((s) => ({
+      activeTab: s.activeTab,
+      isVoiceActive: s.isVoiceActive,
+      toggleVoice: s.toggleVoice,
+      setActiveTab: s.setActiveTab,
+      toggleMobileDrawer: s.toggleMobileDrawer
+    }))
+  );
 
   const getPageTitle = () => {
     switch (activeTab) {
@@ -17,6 +26,7 @@ export const Header: React.FC = () => {
       case 'activity': return 'Atividade & Auditoria de Tarefas';
       case 'memory': return 'Memória & Contexto Duradouro';
       case 'devices': return 'Dispositivos & Continuidade PULO';
+      case 'cockpit': return 'Cockpit & Veículo';
       case 'automations': return 'Automações & Proatividade';
       case 'developer': return 'Agente de Desenvolvimento & Git';
       case 'integrations': return 'Integrações, Modelos & MCP';
@@ -30,6 +40,7 @@ export const Header: React.FC = () => {
       {/* Zone 1: Mobile Hamburger & Page Title */}
       <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
         <button
+          type="button"
           onClick={toggleMobileDrawer}
           className="md:hidden p-2 rounded-lg bg-[#141414] hover:bg-[#1F1F1F] text-[#A8A8A8] hover:text-white border border-[#262626] transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--accent-primary)] shrink-0"
           aria-label="Abrir menu de navegação"
@@ -57,7 +68,9 @@ export const Header: React.FC = () => {
       {/* Zone 3: Primary Action */}
       <div className="flex items-center gap-3 shrink-0">
         <button
+          type="button"
           onClick={toggleVoice}
+          aria-label={isVoiceActive ? 'Encerrar voz' : 'Iniciar voz'}
           className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-all shadow-md ${
             isVoiceActive 
               ? 'text-white animate-pulse' 
@@ -70,9 +83,11 @@ export const Header: React.FC = () => {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab('integrations')}
           className="p-2 bg-[#171717] hover:bg-[#222222] border border-[#333333] rounded-lg text-[#A8A8A8] hover:text-white transition-colors"
           title="Modelos & Provedores"
+          aria-label="Abrir integrações de modelos e provedores"
         >
           <Sparkles className="w-4 h-4" />
         </button>

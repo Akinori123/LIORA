@@ -10,6 +10,7 @@
 
 import { ToolDefinition } from '../types';
 import { isTauriEnvironment, invokeTauri } from '../../security/localBridge';
+import { shouldUseWebPreviewDesktopFallback } from '../../utils/runtimeEnvironment';
 
 export type GpsNavigationProvider = 'google_maps' | 'waze' | 'auto';
 export type GpsOrigin = string | { lat: number; lng: number };
@@ -100,7 +101,16 @@ export async function launchGpsNavigation(
   destination: string,
   provider: GpsNavigationProvider = 'auto',
   origin?: GpsOrigin
-): Promise<{ success: boolean; url: string; provider: string; originMode: string; dryRun?: boolean }> {
+): Promise<{
+  success: boolean;
+  url: string;
+  provider: string;
+  originMode: string;
+  dryRun?: boolean;
+  simulated?: boolean;
+  runtimeMode?: string;
+  error?: string;
+}> {
   const route = formatGpsNavigationUrl(destination, provider, origin);
   const { url, provider: resolvedProvider, originMode } = route;
 
@@ -140,7 +150,17 @@ export async function launchGpsNavigation(
         })
       });
       if (res.ok) {
-        return { success: true, url, provider: resolvedProvider, originMode };
+        const body = await res.json().catch(() => null);
+        const execData = body?.data ?? body;
+        return {
+          success: execData?.success !== false,
+          url,
+          provider: resolvedProvider,
+          originMode,
+          simulated: Boolean(execData?.simulated),
+          runtimeMode: execData?.runtimeMode,
+          error: execData?.error
+        };
       }
     } catch (fetchErr) {
       console.warn('[NavigationTool] Falha ao delegar abertura ao servidor:', fetchErr);
@@ -149,6 +169,18 @@ export async function launchGpsNavigation(
 
   // 3. Ambiente Node.js (Servidor Express)
   if (typeof window === 'undefined') {
+    // Cloud / Web Preview headless Linux sem display gráfico: sinaliza modo simulado honesto
+    if (shouldUseWebPreviewDesktopFallback()) {
+      return {
+        success: true,
+        url,
+        provider: resolvedProvider,
+        originMode,
+        simulated: true,
+        runtimeMode: 'web-preview-simulated'
+      };
+    }
+
     try {
       const { exec } = await import('child_process');
       const os = await import('os');
@@ -163,15 +195,24 @@ export async function launchGpsNavigation(
           ? `open ${JSON.stringify(url)}`
           : `xdg-open ${JSON.stringify(url)}`;
 
-      await new Promise<void>((resolveOpen) => {
+      const execErrMsg = await new Promise<string | undefined>((resolveOpen) => {
         exec(openCmd, { timeout: 10000, windowsHide: true }, (err) => {
-          if (err) console.warn('[NavigationTool] exec retornou erro:', err.message);
-          resolveOpen();
+          if (err) {
+            console.warn('[NavigationTool] exec retornou erro:', err.message);
+            resolveOpen(err.message || 'Falha ao acionar navegador do sistema.');
+          } else {
+            resolveOpen(undefined);
+          }
         });
       });
+
+      if (execErrMsg) {
+        return { success: false, url, provider: resolvedProvider, originMode, error: execErrMsg };
+      }
       return { success: true, url, provider: resolvedProvider, originMode };
-    } catch (nodeErr) {
+    } catch (nodeErr: any) {
       console.warn('[NavigationTool] Falha ao abrir via Node child_process:', nodeErr);
+      return { success: false, url, provider: resolvedProvider, originMode, error: nodeErr?.message };
     }
   }
 
@@ -251,6 +292,13 @@ export const openGpsNavigationTool: ToolDefinition<{
         ? `com partida em "${origin}"`
         : 'com partida na sua localização GPS atual';
 
+    const isSim = Boolean(result.simulated);
+    const message = !result.success
+      ? `Falha ao abrir navegação no ${appLabel}: ${result.error || 'navegador indisponível'}. URL gerada: ${result.url}`
+      : isSim
+        ? `[MODO WEB PREVIEW - SIMULADO] Rota preparada no ${appLabel} para "${destination.trim()}" ${originDesc} (ambiente headless sem display gráfico para abrir abas).`
+        : `Navegação iniciada no ${appLabel} para "${destination.trim()}" ${originDesc}.`;
+
     const response = {
       success: result.success,
       url: result.url,
@@ -258,10 +306,14 @@ export const openGpsNavigationTool: ToolDefinition<{
       destination: destination.trim(),
       originMode: result.originMode,
       origin: typeof resolvedOrigin === 'string' ? resolvedOrigin : resolvedOrigin ? `${resolvedOrigin.lat},${resolvedOrigin.lng}` : undefined,
-      message: `Navegação iniciada no ${appLabel} para "${destination.trim()}" ${originDesc}.`,
-      simulated: false
+      message,
+      simulated: isSim,
+      ...(result.runtimeMode ? { runtimeMode: result.runtimeMode } : {}),
+      ...(result.error ? { error: result.error } : {})
     };
-    setIntentLock(intentKey, response);
+    if (response.success) {
+      setIntentLock(intentKey, response);
+    }
     return response;
   }
 };
@@ -341,7 +393,15 @@ function setIntentLock(key: string, result: any): void {
 export async function launchPlacesSearch(
   query: string,
   nearLocation?: string
-): Promise<{ success: boolean; url: string; query: string; dryRun?: boolean }> {
+): Promise<{
+  success: boolean;
+  url: string;
+  query: string;
+  dryRun?: boolean;
+  simulated?: boolean;
+  runtimeMode?: string;
+  error?: string;
+}> {
   const { url, query: resolvedQuery } = formatPlacesSearchUrl(query, nearLocation);
 
   if (isBrowserDryRun()) {
@@ -380,7 +440,16 @@ export async function launchPlacesSearch(
         })
       });
       if (res.ok) {
-        return { success: true, url, query: resolvedQuery };
+        const body = await res.json().catch(() => null);
+        const execData = body?.data ?? body;
+        return {
+          success: execData?.success !== false,
+          url,
+          query: resolvedQuery,
+          simulated: Boolean(execData?.simulated),
+          runtimeMode: execData?.runtimeMode,
+          error: execData?.error
+        };
       }
     } catch (fetchErr) {
       console.warn('[PlacesTool] Falha ao delegar abertura ao servidor:', fetchErr);
@@ -389,6 +458,17 @@ export async function launchPlacesSearch(
 
   // 3. Ambiente Node.js (Servidor Express)
   if (typeof window === 'undefined') {
+    // Cloud / Web Preview headless Linux sem display gráfico: sinaliza modo simulado honesto
+    if (shouldUseWebPreviewDesktopFallback()) {
+      return {
+        success: true,
+        url,
+        query: resolvedQuery,
+        simulated: true,
+        runtimeMode: 'web-preview-simulated'
+      };
+    }
+
     try {
       const { exec } = await import('child_process');
       const os = await import('os');
@@ -402,15 +482,24 @@ export async function launchPlacesSearch(
           ? `open ${JSON.stringify(url)}`
           : `xdg-open ${JSON.stringify(url)}`;
 
-      await new Promise<void>((resolveOpen) => {
+      const execErrMsg = await new Promise<string | undefined>((resolveOpen) => {
         exec(openCmd, { timeout: 10000, windowsHide: true }, (err) => {
-          if (err) console.warn('[PlacesTool] exec retornou erro:', err.message);
-          resolveOpen();
+          if (err) {
+            console.warn('[PlacesTool] exec retornou erro:', err.message);
+            resolveOpen(err.message || 'Falha ao abrir busca no navegador.');
+          } else {
+            resolveOpen(undefined);
+          }
         });
       });
+
+      if (execErrMsg) {
+        return { success: false, url, query: resolvedQuery, error: execErrMsg };
+      }
       return { success: true, url, query: resolvedQuery };
-    } catch (nodeErr) {
+    } catch (nodeErr: any) {
       console.warn('[PlacesTool] Falha ao abrir via Node child_process:', nodeErr);
+      return { success: false, url, query: resolvedQuery, error: nodeErr?.message };
     }
   }
 
@@ -463,15 +552,26 @@ export const mapsSearchPlacesTool: ToolDefinition<{
       ? `em ${nearLocation.trim()}`
       : 'próximo à sua localização atual';
 
+    const isSim = Boolean(result.simulated);
+    const message = !result.success
+      ? `Falha ao abrir busca "${query.trim()}" no Google Maps: ${result.error || 'navegador indisponível'}.`
+      : isSim
+        ? `[MODO WEB PREVIEW - SIMULADO] Busca preparada no Google Maps para "${query.trim()}" ${locDesc} (ambiente headless sem display gráfico para abrir abas).`
+        : `Buscando "${query.trim()}" no Google Maps ${locDesc}.`;
+
     const response = {
       success: result.success,
       url: result.url,
       query: query.trim(),
       nearLocation: nearLocation?.trim(),
-      message: `Buscando "${query.trim()}" no Google Maps ${locDesc}.`,
-      simulated: false
+      message,
+      simulated: isSim,
+      ...(result.runtimeMode ? { runtimeMode: result.runtimeMode } : {}),
+      ...(result.error ? { error: result.error } : {})
     };
-    setIntentLock(intentKey, response);
+    if (response.success) {
+      setIntentLock(intentKey, response);
+    }
     return response;
   }
 };

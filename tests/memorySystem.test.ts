@@ -87,9 +87,10 @@ describe('Aba Memória & Contexto (MemorySystem Suite)', () => {
       { id: 'imp-2', category: 'project', key: 'framework', value: 'Vite + React + Express', confidence: 1.0, updatedAt: '2026-10-22' }
     ];
 
-    useLioraStore.getState().importMemories(importData, 'merge');
+    const count = useLioraStore.getState().importMemories(importData, 'merge');
 
     const memories = useLioraStore.getState().memoryEntries;
+    assert.strictEqual(count, 2, 'importMemories deve retornar a contagem exata de itens importados');
     assert.strictEqual(memories.length, 5, 'Deveria combinar os 3 existentes com os 2 importados');
   });
 
@@ -101,4 +102,38 @@ describe('Aba Memória & Contexto (MemorySystem Suite)', () => {
     assert.ok(ranked.length > 0);
     assert.strictEqual(ranked[0].entry.key, 'idioma');
   });
+
+  test('MEM-06: importMemories filtra entradas inválidas e protege replace contra lista vazia/corrompida', () => {
+    const initialCount = useLioraStore.getState().memoryEntries.length;
+
+    // Tentativa de replace com entradas inválidas (chave/valor vazios) não deve apagar o cofre
+    const invalidPayload = [
+      { id: 'bad-1', category: 'fact', key: '   ', value: 'sem chave', confidence: 0.9, updatedAt: '2026-10-22' },
+      { id: 'bad-2', category: 'fact', key: 'sem_valor', value: '   ', confidence: 0.9, updatedAt: '2026-10-22' },
+      null
+    ] as unknown as MemoryEntry[];
+
+    const invalidImported = useLioraStore.getState().importMemories(invalidPayload, 'replace');
+    assert.strictEqual(invalidImported, 0);
+    assert.strictEqual(
+      useLioraStore.getState().memoryEntries.length,
+      initialCount,
+      'Modo replace não deve limpar memórias existentes se nenhuma entrada válida foi fornecida'
+    );
+
+    // Payload misto: filtra inválidas, normaliza categoria desconhecida e limita confiança em [0, 1]
+    const mixedPayload = [
+      { id: 'ok-1', category: 'invalida' as any, key: 'cidade', value: 'Ponta Grossa', confidence: 2.5, updatedAt: '2026-10-22' },
+      { id: 'bad-3', category: 'fact', key: '', value: 'vazio', confidence: 0.5, updatedAt: '2026-10-22' }
+    ] as MemoryEntry[];
+
+    const mixedImported = useLioraStore.getState().importMemories(mixedPayload, 'replace');
+    assert.strictEqual(mixedImported, 1);
+    const saved = useLioraStore.getState().memoryEntries;
+    assert.strictEqual(saved.length, 1);
+    assert.strictEqual(saved[0].key, 'cidade');
+    assert.strictEqual(saved[0].category, 'preference');
+    assert.strictEqual(saved[0].confidence, 1);
+  });
 });
+

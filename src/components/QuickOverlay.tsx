@@ -30,15 +30,26 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
   const [inputText, setInputText] = useState('');
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [captureError, setCaptureError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     if (isOpen) {
+      setCaptureError(null);
       timer = setTimeout(() => inputRef.current?.focus(), 100);
     } else {
       setInputText('');
       setAttachedImage(null);
+      setCaptureError(null);
     }
     return () => {
       if (timer) clearTimeout(timer);
@@ -49,13 +60,18 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
 
   const handleCaptureScreen = async () => {
     setIsCapturing(true);
+    setCaptureError(null);
     try {
       const res = await captureScreen();
+      if (!isMountedRef.current) return;
       setAttachedImage(res.base64Data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('[QuickOverlay] Erro ao capturar tela:', err);
+      if (isMountedRef.current) {
+        setCaptureError(err?.message || 'Não foi possível capturar a tela atual. Verifique as permissões do navegador/sistema.');
+      }
     } finally {
-      setIsCapturing(false);
+      if (isMountedRef.current) setIsCapturing(false);
     }
   };
 
@@ -70,7 +86,12 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 bg-black/75 backdrop-blur-md transition-all animate-fade-in">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="LIORA Quick Launcher"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-20 bg-black/75 backdrop-blur-md transition-all animate-fade-in"
+    >
       <div className="w-full max-w-2xl bg-[#111111] border border-[#333333] rounded-2xl shadow-2xl overflow-hidden space-y-0 relative">
         {/* Header Bar */}
         <div className="flex items-center justify-between px-5 py-3.5 bg-[#161616] border-b border-[#222222] text-xs font-mono">
@@ -81,9 +102,11 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
             <span className="text-[#A8A8A8] text-[11px]">Alt + Space</span>
           </div>
           <button 
+            type="button"
             onClick={onClose}
             className="text-[#888888] hover:text-white transition-colors p-1"
             title="Fechar (Esc)"
+            aria-label="Fechar Quick Launcher"
           >
             <X className="w-4 h-4" />
           </button>
@@ -91,6 +114,20 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
 
         {/* Form Input */}
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
+          {captureError && (
+            <div className="p-2.5 bg-red-950/60 border border-red-800/80 rounded-lg text-xs text-red-300 flex items-center justify-between gap-2">
+              <span>{captureError}</span>
+              <button
+                type="button"
+                onClick={() => setCaptureError(null)}
+                aria-label="Dispensar erro de captura"
+                className="text-red-300 hover:text-white p-0.5"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Image Preview attachment if present */}
           {attachedImage && (
             <div className="relative inline-block border border-[var(--accent-primary)] rounded-lg p-1 bg-[#161616] animate-fade-in">
@@ -104,6 +141,7 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
                 onClick={() => setAttachedImage(null)}
                 className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 shadow hover:bg-red-600 transition-colors"
                 title="Remover Captura"
+                aria-label="Remover captura de tela"
               >
                 <X className="w-3 h-3" />
               </button>

@@ -34,47 +34,51 @@ export class SemanticMemoryService {
   /**
    * Inicializa o serviço carregando memórias do SQLite, VectorStore e Markdown
    */
-  public async init(): Promise<void> {
+  public async init(options: { skipDiskLoad?: boolean; skipStorageLoad?: boolean } = {}): Promise<void> {
     if (this.initialized) return;
 
-    await this.vectorStore.init();
+    await this.vectorStore.init({ skipStorageLoad: options.skipStorageLoad });
 
     // 1. Carrega do SQLite (ou StorageAdapter)
-    try {
-      const records = await storageAdapter.loadAll<MemoryEntry>('memories');
-      if (Array.isArray(records)) {
-        for (const item of records) {
-          if (item && item.id) {
-            this.memoryCache.set(item.id, item);
-            await this.vectorStore.upsert(
-              item.id,
-              `${item.category} ${item.key}: ${item.value}`,
-              item.category,
-              { key: item.key, value: item.value, confidence: item.confidence }
-            );
+    if (!options.skipStorageLoad) {
+      try {
+        const records = await storageAdapter.loadAll<MemoryEntry>('memories');
+        if (Array.isArray(records)) {
+          for (const item of records) {
+            if (item && item.id) {
+              this.memoryCache.set(item.id, item);
+              await this.vectorStore.upsert(
+                item.id,
+                `${item.category} ${item.key}: ${item.value}`,
+                item.category,
+                { key: item.key, value: item.value, confidence: item.confidence }
+              );
+            }
           }
         }
+      } catch (e) {
+        console.warn('[SemanticMemoryService] Falha ao carregar do storageAdapter:', e);
       }
-    } catch (e) {
-      console.warn('[SemanticMemoryService] Falha ao carregar do storageAdapter:', e);
     }
 
     // 2. Sincroniza com arquivos Markdown do disco (se disponíveis)
-    try {
-      const mdEntries = await this.markdownSync.syncFromDisk();
-      for (const entry of mdEntries) {
-        if (!this.memoryCache.has(entry.id)) {
-          this.memoryCache.set(entry.id, entry);
-          await this.vectorStore.upsert(
-            entry.id,
-            `${entry.category} ${entry.key}: ${entry.value}`,
-            entry.category,
-            { key: entry.key, value: entry.value, confidence: entry.confidence }
-          );
+    if (!options.skipDiskLoad) {
+      try {
+        const mdEntries = await this.markdownSync.syncFromDisk();
+        for (const entry of mdEntries) {
+          if (!this.memoryCache.has(entry.id)) {
+            this.memoryCache.set(entry.id, entry);
+            await this.vectorStore.upsert(
+              entry.id,
+              `${entry.category} ${entry.key}: ${entry.value}`,
+              entry.category,
+              { key: entry.key, value: entry.value, confidence: entry.confidence }
+            );
+          }
         }
+      } catch (e) {
+        console.warn('[SemanticMemoryService] Falha na sincronização com Markdown:', e);
       }
-    } catch (e) {
-      console.warn('[SemanticMemoryService] Falha na sincronização com Markdown:', e);
     }
 
     this.initialized = true;
@@ -115,10 +119,12 @@ export class SemanticMemoryService {
       { key: entry.key, value: entry.value, confidence: entry.confidence }
     );
 
-    // 4. Sincronização assíncrona com os arquivos Markdown
-    this.markdownSync.syncToDisk(Array.from(this.memoryCache.values())).catch((err) => {
+    // 4. Sincronização estruturada com os arquivos Markdown
+    try {
+      await this.markdownSync.syncToDisk(Array.from(this.memoryCache.values()));
+    } catch (err) {
       console.warn('[SemanticMemoryService] Falha ao atualizar arquivos Markdown:', err);
-    });
+    }
 
     return entry;
   }
@@ -170,7 +176,9 @@ export class SemanticMemoryService {
     if (existed) {
       await this.vectorStore.delete(id);
       await storageAdapter.delete('memories', id);
-      this.markdownSync.syncToDisk(Array.from(this.memoryCache.values())).catch(() => {});
+      try {
+        await this.markdownSync.syncToDisk(Array.from(this.memoryCache.values()));
+      } catch { /* ignore */ }
     }
     return existed;
   }

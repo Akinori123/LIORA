@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from './store/lioraStore';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
@@ -57,6 +58,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
             Um componente visual reportou uma anomalia. O núcleo permaneceu seguro e soberano.
           </p>
           <button
+            type="button"
             onClick={() => this.setState({ hasError: false })}
             className="mt-4 px-4 py-2 bg-[var(--accent-primary)] hover:opacity-90 text-white rounded-xl text-xs font-semibold transition-all shadow-md shadow-[var(--accent-glow)]"
           >
@@ -70,18 +72,31 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 }
 
 export default function App() {
-  const { activeTab, loadSettings, loadServices, setActiveTab, sendMessage } = useLioraStore();
+  const { activeTab, loadSettings, loadServices, syncToolPolicies, setActiveTab, sendMessage } = useLioraStore(
+    useShallow((s) => ({
+      activeTab: s.activeTab,
+      loadSettings: s.loadSettings,
+      loadServices: s.loadServices,
+      syncToolPolicies: s.syncToolPolicies,
+      setActiveTab: s.setActiveTab,
+      sendMessage: s.sendMessage
+    }))
+  );
   const [isQuickOverlayOpen, setIsQuickOverlayOpen] = React.useState(false);
 
   React.useEffect(() => {
     loadSettings();
     loadServices();
-  }, [loadSettings, loadServices]);
+    void syncToolPolicies();
+  }, [loadSettings, loadServices, syncToolPolicies]);
 
   // Ciclo autônomo do motor de automações (avalia regras temporais a cada 15 segundos)
   React.useEffect(() => {
     let isCancelled = false;
+    let isTicking = false;
     const interval = setInterval(async () => {
+      if (isTicking) return;
+      isTicking = true;
       try {
         const logs = await automationsEngine.tick();
         if (!isCancelled && logs.length > 0) {
@@ -92,6 +107,8 @@ export default function App() {
         }
       } catch (err) {
         console.warn('[Automations] Falha no tick:', err);
+      } finally {
+        isTicking = false;
       }
     }, 15000);
 
@@ -109,8 +126,8 @@ export default function App() {
       if ((e.altKey || e.metaKey) && (e.code === 'Space' || e.key === ' ')) {
         e.preventDefault();
         setIsQuickOverlayOpen((prev) => !prev);
-      } else if (e.key === 'Escape' && isQuickOverlayOpen) {
-        setIsQuickOverlayOpen(false);
+      } else if (e.key === 'Escape') {
+        setIsQuickOverlayOpen((prev) => (prev ? false : prev));
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.code === 'KeyL' || e.key.toLowerCase() === 'l')) {
         e.preventDefault();
         const store = useLioraStore.getState();
@@ -120,7 +137,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isQuickOverlayOpen]);
+  }, []);
 
   const handleQuickOverlaySubmit = async (promptText: string, imageBase64?: string) => {
     setActiveTab('conversation');

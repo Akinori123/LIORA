@@ -232,7 +232,19 @@ export function parsePcCommandIntent(input: string): PcCommandMatch | null {
     };
   }
 
-  // 3. Lançamento de Aplicativos Conhecidos
+  // 3. Guard anti-sequestro para comandos compostos, troca/criação de abas ou fechamento:
+  // Ex.: "abra o bloco de notas e escreva um relatório", "abra outra aba no navegador", "feche o bloco de notas"
+  // Esses fluxos têm início, meio e fim e devem ser orquestrados pelo LLM com encadeamento de ferramentas.
+  const hasChainedFollowUp =
+    /\b(?:e\s+(?:escrev\w*|digit\w*|anot\w*|salv\w*|fech\w*|pesquis\w*|busc\w*|envi\w*|cri\w*|ab[aeio]\w*|lei\w*|ler|coloc\w*|coloqu\w*|renome\w*|apag\w*)|depois|em\s+seguida|para\s+(?:escrev\w*|digit\w*|anot\w*|salv\w*)|(?:nova|outra|mais\s+uma)\s+aba|relatorio|ideias)\b/.test(normalized);
+  const hasCloseOrKillVerb =
+    /\b(?:fech[aeo]r?|encerr[aeo]r?|mat[aeo]r?|finaliz[aeo]r?|sair\s+d[oa])\b/.test(normalized);
+
+  if (hasChainedFollowUp || hasCloseOrKillVerb) {
+    return null;
+  }
+
+  // 4. Lançamento de Aplicativos Conhecidos
   const hasLaunchPrefix = LAUNCH_PREFIX_REGEX.test(normalized);
   let targetAppPhrase = normalized;
   if (hasLaunchPrefix) {

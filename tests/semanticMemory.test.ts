@@ -7,6 +7,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { VectorStore } from '../src/services/memory/vectorStore';
 import { MarkdownMemorySync } from '../src/services/memory/markdownSync';
 import { SemanticMemoryService } from '../src/services/memory/semanticMemoryService';
@@ -83,69 +86,88 @@ test('MEM-02: MarkdownMemorySync - Serialização e parsing bidirecional de Mark
 });
 
 test('MEM-03: SemanticMemoryService - Inserção, busca híbrida e prompt contextual', async () => {
-  const vectorStore = new VectorStore('test_service_vectors');
-  const markdownSync = new MarkdownMemorySync();
-  const service = new SemanticMemoryService(vectorStore, markdownSync);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liora-sem-mem-'));
+  try {
+    const vectorStore = new VectorStore(`test_service_vectors_${Date.now()}`);
+    const markdownSync = new MarkdownMemorySync(tempDir);
+    const service = new SemanticMemoryService(vectorStore, markdownSync);
+    await service.init({ skipDiskLoad: true, skipStorageLoad: true });
 
-  // 1. Armazena fatos estruturados
-  const fact1 = await service.storeFact('fact', 'estudo_idiomas', 'Jhonatan estuda russo e programação paralela OpenMP', 1.0);
-  assert.ok(fact1.id.startsWith('mem_'));
-  assert.strictEqual(fact1.key, 'estudo_idiomas');
+    // 1. Armazena fatos estruturados
+    const fact1 = await service.storeFact('fact', 'estudo_idiomas', 'Jhonatan estuda russo e programação paralela OpenMP', 1.0);
+    assert.ok(fact1.id.startsWith('mem_'));
+    assert.strictEqual(fact1.key, 'estudo_idiomas');
 
-  const fact2 = await service.storeFact('preference', 'modo_resposta', 'Respostas diretas, sem enrolação e com autoridade técnica', 0.95);
-  assert.ok(fact2.id);
+    const fact2 = await service.storeFact('preference', 'modo_resposta', 'Respostas diretas, sem enrolação e com autoridade técnica', 0.95);
+    assert.ok(fact2.id);
 
-  // 2. Busca híbrida (vetor + léxico)
-  const searchResults = service.search('língua russa estudos de computação', { threshold: 0.25, maxResults: 3 });
-  assert.ok(searchResults.length > 0, 'Deve retornar correspondências semânticas');
-  assert.strictEqual(searchResults[0].entry.key, 'estudo_idiomas');
+    // 2. Busca híbrida (vetor + léxico)
+    const searchResults = service.search('língua russa estudos de computação', { threshold: 0.25, maxResults: 3 });
+    assert.ok(searchResults.length > 0, 'Deve retornar correspondências semânticas');
+    assert.strictEqual(searchResults[0].entry.key, 'estudo_idiomas');
 
-  // 3. Geração de contexto para prompt do sistema
-  const promptContext = service.getContextPrompt('quais são meus estudos de idiomas?');
-  assert.ok(promptContext.includes('[SISTEMA - MEMÓRIA CONTEXTUAL RECUPERADA]'), 'Deve conter o cabeçalho contextual');
-  assert.ok(promptContext.includes('estudo_idiomas: Jhonatan estuda russo e programação paralela OpenMP'));
+    // 3. Geração de contexto para prompt do sistema
+    const promptContext = service.getContextPrompt('quais são meus estudos de idiomas?');
+    assert.ok(promptContext.includes('[SISTEMA - MEMÓRIA CONTEXTUAL RECUPERADA]'), 'Deve conter o cabeçalho contextual');
+    assert.ok(promptContext.includes('estudo_idiomas: Jhonatan estuda russo e programação paralela OpenMP'));
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('MEM-04: Ferramentas Nativas de Memória (memory_semantic_search, memory_store_fact, memory_list_context)', async () => {
-  // 1. Validação de esquema e metadados
-  assert.strictEqual(nativeMemorySemanticSearchTool.name, 'memory_semantic_search');
-  assert.strictEqual(nativeMemorySemanticSearchTool.riskLevel, 'R0');
-  assert.strictEqual(nativeMemorySemanticSearchTool.isSimulated, false);
+  const prevEnv = process.env.LIORA_MEMORY_DIR;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'liora-native-mem-'));
+  process.env.LIORA_MEMORY_DIR = tempDir;
 
-  assert.strictEqual(nativeMemoryStoreFactTool.name, 'memory_store_fact');
-  assert.strictEqual(nativeMemoryStoreFactTool.riskLevel, 'R1');
-  assert.strictEqual(nativeMemoryStoreFactTool.isSimulated, false);
+  try {
+    // 1. Validação de esquema e metadados
+    assert.strictEqual(nativeMemorySemanticSearchTool.name, 'memory_semantic_search');
+    assert.strictEqual(nativeMemorySemanticSearchTool.riskLevel, 'R0');
+    assert.strictEqual(nativeMemorySemanticSearchTool.isSimulated, false);
 
-  assert.strictEqual(nativeMemoryListContextTool.name, 'memory_list_context');
-  assert.strictEqual(nativeMemoryListContextTool.riskLevel, 'R0');
-  assert.strictEqual(nativeMemoryListContextTool.isSimulated, false);
+    assert.strictEqual(nativeMemoryStoreFactTool.name, 'memory_store_fact');
+    assert.strictEqual(nativeMemoryStoreFactTool.riskLevel, 'R1');
+    assert.strictEqual(nativeMemoryStoreFactTool.isSimulated, false);
 
-  // 2. Execução do memory_store_fact
-  const storeRes = await nativeMemoryStoreFactTool.execute({
-    category: 'fact',
-    key: 'veiculo_atual',
-    value: 'Carro conectado equipado com scanner OBD-II Bluetooth',
-    confidence: 1.0
-  });
-  assert.strictEqual(storeRes.success, true);
-  assert.strictEqual(storeRes.entry.key, 'veiculo_atual');
+    assert.strictEqual(nativeMemoryListContextTool.name, 'memory_list_context');
+    assert.strictEqual(nativeMemoryListContextTool.riskLevel, 'R0');
+    assert.strictEqual(nativeMemoryListContextTool.isSimulated, false);
 
-  // 3. Execução do memory_semantic_search
-  const searchRes = await nativeMemorySemanticSearchTool.execute({
-    query: 'telemetria automotiva e diagnóstico de carro',
-    threshold: 0.15
-  });
-  assert.strictEqual(searchRes.simulated, false);
-  assert.ok(searchRes.count >= 1, 'Deve encontrar a memória armazenada sobre o veículo');
-  assert.ok(searchRes.matches.some((m: { key: string }) => m.key === 'veiculo_atual'));
+    // 2. Execução do memory_store_fact
+    const storeRes = await nativeMemoryStoreFactTool.execute({
+      category: 'fact',
+      key: 'veiculo_atual',
+      value: 'Carro conectado equipado com scanner OBD-II Bluetooth',
+      confidence: 1.0
+    });
+    assert.strictEqual(storeRes.success, true);
+    assert.strictEqual(storeRes.entry.key, 'veiculo_atual');
 
-  // 4. Execução do memory_list_context
-  const contextRes = await nativeMemoryListContextTool.execute({
-    query: 'carro e telemetria',
-    maxCharacters: 400
-  });
-  assert.strictEqual(contextRes.simulated, false);
-  assert.ok(typeof contextRes.contextBlock === 'string');
+    // 3. Execução do memory_semantic_search
+    const searchRes = await nativeMemorySemanticSearchTool.execute({
+      query: 'telemetria automotiva e diagnóstico de carro',
+      threshold: 0.15
+    });
+    assert.strictEqual(searchRes.simulated, false);
+    assert.ok(searchRes.count >= 1, 'Deve encontrar a memória armazenada sobre o veículo');
+    assert.ok(searchRes.matches.some((m: { key: string }) => m.key === 'veiculo_atual'));
+
+    // 4. Execução do memory_list_context
+    const contextRes = await nativeMemoryListContextTool.execute({
+      query: 'carro e telemetria',
+      maxCharacters: 400
+    });
+    assert.strictEqual(contextRes.simulated, false);
+    assert.ok(typeof contextRes.contextBlock === 'string');
+  } finally {
+    if (prevEnv === undefined) {
+      delete process.env.LIORA_MEMORY_DIR;
+    } else {
+      process.env.LIORA_MEMORY_DIR = prevEnv;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('MEM-05: SemanticMemoryEngine - Projeção vetorial determinística de 32 dimensões', () => {

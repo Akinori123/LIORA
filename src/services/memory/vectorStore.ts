@@ -46,19 +46,21 @@ export class VectorStore<T = Record<string, any>> {
   /**
    * Inicializa o VectorStore carregando registros persistidos
    */
-  public async init(): Promise<void> {
+  public async init(options: { skipStorageLoad?: boolean } = {}): Promise<void> {
     if (this.initialized) return;
-    try {
-      const saved = await storageAdapter.loadAll<VectorRecord<T>>(this.tableName);
-      if (Array.isArray(saved)) {
-        for (const item of saved) {
-          if (item && item.id && Array.isArray(item.vector)) {
-            this.records.set(item.id, item);
+    if (!options.skipStorageLoad) {
+      try {
+        const saved = await storageAdapter.loadAll<VectorRecord<T>>(this.tableName);
+        if (Array.isArray(saved)) {
+          for (const item of saved) {
+            if (item && item.id && Array.isArray(item.vector)) {
+              this.records.set(item.id, item);
+            }
           }
         }
+      } catch (e) {
+        console.warn(`[VectorStore] Erro ao carregar registros de '${this.tableName}':`, e);
       }
-    } catch (e) {
-      console.warn(`[VectorStore] Erro ao carregar registros de '${this.tableName}':`, e);
     }
     this.initialized = true;
   }

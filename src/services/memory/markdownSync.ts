@@ -17,22 +17,41 @@ import { MemoryEntry } from '../../types';
 export class MarkdownMemorySync {
   private baseDir: string | null = null;
 
+  constructor(customDir?: string) {
+    if (customDir && customDir.trim()) {
+      this.baseDir = customDir.trim();
+    }
+  }
+
   /**
-   * Obtém o diretório de arquivos markdown de memória (~/.liora/memory)
+   * Obtém o diretório de arquivos markdown de memória (~/.liora/memory ou diretório isolado)
    */
   public async getMemoryDirectory(): Promise<string | null> {
-    if (this.baseDir) return this.baseDir;
+    if (this.baseDir) {
+      if (typeof window === 'undefined') {
+        try {
+          const fs = await import('fs');
+          if (!fs.existsSync(this.baseDir)) {
+            fs.mkdirSync(this.baseDir, { recursive: true });
+          }
+        } catch {}
+      }
+      return this.baseDir;
+    }
 
     if (typeof window === 'undefined') {
       try {
         const path = await import('path');
         const os = await import('os');
         const fs = await import('fs');
-        const dir = path.join(os.homedir(), '.liora', 'memory');
+        const envDir = process.env.LIORA_MEMORY_DIR?.trim();
+        const dir = envDir ? path.resolve(envDir) : path.join(os.homedir(), '.liora', 'memory');
         if (!fs.existsSync(dir)) {
           fs.mkdirSync(dir, { recursive: true });
         }
-        this.baseDir = dir;
+        if (!envDir) {
+          this.baseDir = dir;
+        }
         return dir;
       } catch {
         return null;
@@ -57,7 +76,12 @@ export class MarkdownMemorySync {
       return lines.join('\n');
     }
 
+    const deduped = new Map<string, MemoryEntry>();
     for (const entry of entries) {
+      deduped.set(entry.key.trim().toLowerCase(), entry);
+    }
+
+    for (const entry of deduped.values()) {
       lines.push(`- **${entry.key}**: ${entry.value}`);
     }
 

@@ -93,8 +93,7 @@ test('SET-03: Property sanitization and boundary clamping for invalid values', (
 
 test('SET-04: Dynamic theme switching and CSS variable application', () => {
   let appliedTheme = '';
-  let cssVarName = '';
-  let cssVarVal = '';
+  const cssVars: Record<string, string> = {};
 
   (global as any).document = {
     documentElement: {
@@ -103,8 +102,7 @@ test('SET-04: Dynamic theme switching and CSS variable application', () => {
       },
       style: {
         setProperty: (name: string, val: string) => {
-          cssVarName = name;
-          cssVarVal = val;
+          cssVars[name] = val;
         }
       }
     }
@@ -112,10 +110,11 @@ test('SET-04: Dynamic theme switching and CSS variable application', () => {
 
   settingsManager.applyTheme('emerald');
   assert.strictEqual(appliedTheme, 'emerald');
-  assert.strictEqual(cssVarName, '--accent-primary');
-  assert.strictEqual(cssVarVal, '#10b981');
+  assert.strictEqual(cssVars['--accent-primary'], '#10b981');
+  assert.ok(cssVars['--bg-base']);
 
   settingsManager.applyTheme('amber');
   assert.strictEqual(appliedTheme, 'amber');
-  assert.strictEqual(cssVarVal, '#f59e0b');
+  assert.strictEqual(cssVars['--accent-primary'], '#f59e0b');
+  assert.ok(cssVars['--bg-base']);
 });

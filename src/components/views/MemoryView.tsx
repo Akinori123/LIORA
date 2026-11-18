@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { MemoryEntry } from '../../types';
 import { sanitizeMemoryValue } from '../../utils/memoryRanker';
@@ -35,7 +36,16 @@ import {
 } from 'lucide-react';
 
 export const MemoryView: React.FC = () => {
-  const { memoryEntries, addMemory, updateMemory, deleteMemory, importMemories, sessions } = useLioraStore();
+  const { memoryEntries, addMemory, updateMemory, deleteMemory, importMemories, sessions } = useLioraStore(
+    useShallow((s) => ({
+      memoryEntries: s.memoryEntries,
+      addMemory: s.addMemory,
+      updateMemory: s.updateMemory,
+      deleteMemory: s.deleteMemory,
+      importMemories: s.importMemories,
+      sessions: s.sessions
+    }))
+  );
 
   // Search & Filters state
   const [searchQuery, setSearchQuery] = useState('');
@@ -49,6 +59,8 @@ export const MemoryView: React.FC = () => {
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
   const [newCategory, setNewCategory] = useState<'preference' | 'project' | 'fact' | 'routine'>('preference');
+  const [addFormError, setAddFormError] = useState<string | null>(null);
+  const [editFormError, setEditFormError] = useState<string | null>(null);
 
   // Modals state
   const [editingMemory, setEditingMemory] = useState<MemoryEntry | null>(null);
@@ -65,6 +77,14 @@ export const MemoryView: React.FC = () => {
   const [suggestedFacts, setSuggestedFacts] = useState<Array<{ category: 'preference' | 'project' | 'fact' | 'routine'; key: string; value: string }>>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Clusters ativos calculados pelo motor semântico
   const activeClusters = useMemo(() => {
@@ -113,7 +133,10 @@ export const MemoryView: React.FC = () => {
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newKey.trim() || !newValue.trim()) return;
+    if (!newKey.trim() || !newValue.trim()) {
+      setAddFormError('Preencha os campos Chave e Valor antes de salvar a memória.');
+      return;
+    }
 
     // Sanitization check
     const sanitized = sanitizeMemoryValue(newKey.trim(), newValue.trim());
@@ -125,13 +148,17 @@ export const MemoryView: React.FC = () => {
       confidence: 1.0
     });
 
+    setAddFormError(null);
     setNewKey('');
     setNewValue('');
   };
 
   const handleUpdate = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingMemory || !editingMemory.key.trim() || !editingMemory.value.trim()) return;
+    if (!editingMemory || !editingMemory.key.trim() || !editingMemory.value.trim()) {
+      setEditFormError('A chave e o valor da memória não podem ficar vazios.');
+      return;
+    }
 
     const sanitized = sanitizeMemoryValue(editingMemory.key.trim(), editingMemory.value.trim());
 
@@ -141,6 +168,7 @@ export const MemoryView: React.FC = () => {
       value: sanitized.sanitizedValue
     });
 
+    setEditFormError(null);
     setEditingMemory(null);
   };
 
@@ -162,16 +190,26 @@ export const MemoryView: React.FC = () => {
 
     const reader = new FileReader();
     reader.onload = (event) => {
+      if (!isMountedRef.current) return;
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (Array.isArray(parsed)) {
-          importMemories(parsed, 'merge');
-          notificationSystem.notify('Cofre de Memórias', `${parsed.length} memórias importadas com sucesso.`, 'success');
+          const importedCount = importMemories(parsed, 'merge');
+          if (importedCount > 0) {
+            notificationSystem.notify('Cofre de Memórias', `${importedCount} memórias válidas importadas com sucesso.`, 'success');
+          } else {
+            notificationSystem.notify('Importação Ignorada', 'Nenhuma memória válida (chave e valor não vazios) encontrada no arquivo.', 'warning');
+          }
         } else {
           notificationSystem.notify('Erro na Importação', 'O arquivo JSON deve conter uma lista válida de memórias.', 'warning');
         }
       } catch {
         notificationSystem.notify('Falha na Importação', 'Falha ao processar arquivo JSON. Verifique a sintaxe.', 'error');
+      }
+    };
+    reader.onerror = () => {
+      if (isMountedRef.current) {
+        notificationSystem.notify('Erro de Leitura', 'Não foi possível ler o arquivo selecionado.', 'error');
       }
     };
     reader.readAsText(file);
@@ -183,6 +221,16 @@ export const MemoryView: React.FC = () => {
     const suggestions: Array<{ category: 'preference' | 'project' | 'fact' | 'routine'; key: string; value: string }> = [];
     const existingKeys = new Set(memoryEntries.map(m => m.key.toLowerCase().trim()));
     const addedKeys = new Set<string>();
+    const nextUniqueKey = (prefix: string) => {
+      let n = 1;
+      let candidate = `${prefix}_${n}`;
+      while (existingKeys.has(candidate) || addedKeys.has(candidate)) {
+        n += 1;
+        candidate = `${prefix}_${n}`;
+      }
+      addedKeys.add(candidate);
+      return candidate;
+    };
 
     sessions.forEach(sess => {
       sess.messages.forEach(msg => {
@@ -204,9 +252,8 @@ export const MemoryView: React.FC = () => {
             const match = text.match(/prefiro\s+(.+)/i);
             if (match && match[1]) {
               const val = match[1].slice(0, 40).trim();
-              const key = `preferencia_${suggestions.length + 1}`;
-              if (!existingKeys.has(key) && !addedKeys.has(key)) {
-                addedKeys.add(key);
+              if (val) {
+                const key = nextUniqueKey('preferencia');
                 suggestions.push({ category: 'preference', key, value: val });
               }
             }
@@ -216,9 +263,8 @@ export const MemoryView: React.FC = () => {
             const match = text.match(/(trabalhando em|projeto)\s+(.+)/i);
             if (match && match[2]) {
               const val = match[2].slice(0, 40).trim();
-              const key = `projeto_${suggestions.length + 1}`;
-              if (!existingKeys.has(key) && !addedKeys.has(key)) {
-                addedKeys.add(key);
+              if (val) {
+                const key = nextUniqueKey('projeto');
                 suggestions.push({ category: 'project', key, value: val });
               }
             }
@@ -292,6 +338,7 @@ export const MemoryView: React.FC = () => {
         {/* Action Buttons: Auto-Extract, Export, Import */}
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
+            type="button"
             onClick={handleExtractSuggestions}
             className="flex items-center gap-2 px-3.5 py-2 bg-[var(--accent-bg)] hover:opacity-90 border border-[var(--accent-border)] text-[var(--accent-primary)] text-xs font-semibold rounded-xl transition-all shadow-lg shadow-[var(--accent-glow)]"
             title="Analisar conversas ativas e sugerir memórias relevantes"
@@ -301,6 +348,7 @@ export const MemoryView: React.FC = () => {
           </button>
 
           <button
+            type="button"
             onClick={handleExportVault}
             className="flex items-center gap-1.5 px-3 py-2 bg-[#161616] hover:bg-[#222222] border border-[#2B2B2B] rounded-xl text-xs text-[#CCCCCC] hover:text-white transition-colors"
             title="Exportar cofre de memórias em formato JSON"
@@ -310,6 +358,7 @@ export const MemoryView: React.FC = () => {
           </button>
 
           <button
+            type="button"
             onClick={() => fileInputRef.current?.click()}
             className="flex items-center gap-1.5 px-3 py-2 bg-[#161616] hover:bg-[#222222] border border-[#2B2B2B] rounded-xl text-xs text-[#CCCCCC] hover:text-white transition-colors"
             title="Importar cofre de memórias a partir de um arquivo JSON"
@@ -335,7 +384,9 @@ export const MemoryView: React.FC = () => {
             />
             {searchQuery && (
               <button
+                type="button"
                 onClick={() => setSearchQuery('')}
+                aria-label="Limpar pesquisa"
                 className="absolute right-3 top-3 text-[#777777] hover:text-white"
               >
                 <X className="w-4 h-4" />
@@ -352,6 +403,7 @@ export const MemoryView: React.FC = () => {
             ].map(m => (
               <button
                 key={m.id}
+                type="button"
                 onClick={() => setSearchMode(m.id as SearchMode)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
                   searchMode === m.id
@@ -365,11 +417,13 @@ export const MemoryView: React.FC = () => {
             ))}
 
             <button
+              type="button"
               onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
               className={`p-1.5 rounded-lg transition-colors text-xs ${
                 showAdvancedSearch ? 'text-[var(--accent-primary)] bg-[#222222]' : 'text-[#777777] hover:text-white'
               }`}
               title="Ajustar limiares de relevância"
+              aria-label="Ajustar limiares de relevância"
             >
               <Sliders className="w-3.5 h-3.5" />
             </button>
@@ -387,6 +441,7 @@ export const MemoryView: React.FC = () => {
             <div className="flex items-center gap-3">
               <input
                 type="range"
+                aria-label="Limiar mínimo de similaridade cosseno"
                 min="0.10"
                 max="0.80"
                 step="0.05"
@@ -408,6 +463,7 @@ export const MemoryView: React.FC = () => {
           {demoQueries.map((demo) => (
             <button
               key={demo.label}
+              type="button"
               onClick={() => setSearchQuery(demo.query)}
               className="text-[11px] px-2.5 py-1 bg-[#161616] hover:bg-[#222222] border border-[#2B2B2B] text-[#CCCCCC] hover:text-white rounded-lg transition-colors"
             >
@@ -429,6 +485,7 @@ export const MemoryView: React.FC = () => {
 
         <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
             onClick={() => setSelectedClusterFilter('all')}
             className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
               selectedClusterFilter === 'all'
@@ -441,6 +498,7 @@ export const MemoryView: React.FC = () => {
           {activeClusters.map(cl => (
             <button
               key={cl.id}
+              type="button"
               onClick={() => setSelectedClusterFilter(selectedClusterFilter === cl.name ? 'all' : cl.name)}
               className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 ${
                 selectedClusterFilter === cl.name
@@ -464,6 +522,7 @@ export const MemoryView: React.FC = () => {
         </h3>
         <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <select
+            aria-label="Categoria da nova memória"
             value={newCategory}
             onChange={(e) => setNewCategory(e.target.value as any)}
             className="bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)] transition-colors"
@@ -475,15 +534,23 @@ export const MemoryView: React.FC = () => {
           </select>
           <input
             type="text"
+            aria-label="Chave da memória"
             value={newKey}
-            onChange={(e) => setNewKey(e.target.value)}
+            onChange={(e) => {
+              setNewKey(e.target.value);
+              if (addFormError) setAddFormError(null);
+            }}
             placeholder="Chave (ex: editor_preferido)"
             className="bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white placeholder-[#777777] focus:outline-none focus:border-[var(--accent-primary)] transition-colors"
           />
           <input
             type="text"
+            aria-label="Valor da memória"
             value={newValue}
-            onChange={(e) => setNewValue(e.target.value)}
+            onChange={(e) => {
+              setNewValue(e.target.value);
+              if (addFormError) setAddFormError(null);
+            }}
             placeholder="Valor (ex: Visual Studio Code)"
             className="bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white placeholder-[#777777] focus:outline-none focus:border-[var(--accent-primary)] transition-colors"
           />
@@ -495,6 +562,12 @@ export const MemoryView: React.FC = () => {
             <span>Salvar Memória</span>
           </button>
         </form>
+        {addFormError && (
+          <p role="alert" className="mt-2.5 text-xs text-red-400 font-mono flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>{addFormError}</span>
+          </p>
+        )}
       </div>
 
       {/* Category Filter Pills & Results Count */}
@@ -514,6 +587,7 @@ export const MemoryView: React.FC = () => {
           ].map((pill) => (
             <button
               key={pill.id}
+              type="button"
               onClick={() => setSelectedCategoryFilter(pill.id)}
               className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
                 selectedCategoryFilter === pill.id
@@ -586,6 +660,7 @@ export const MemoryView: React.FC = () => {
               {/* Bottom Actions: Inspect Vector, Edit, Delete */}
               <div className="flex items-center justify-between pt-2 border-t border-[#1C1C1C]">
                 <button
+                  type="button"
                   onClick={() => handleOpenVectorInspector(mem, item.cluster, isSearchActive ? simPct : undefined)}
                   className="flex items-center gap-1.5 text-[11px] font-mono text-[#888888] hover:text-white px-2 py-1 rounded-lg bg-[#161616] hover:bg-[#202020] border border-[#282828] transition-colors"
                   title="Ver vetor denso de 32 dimensões"
@@ -596,16 +671,23 @@ export const MemoryView: React.FC = () => {
 
                 <div className="flex items-center gap-1">
                   <button
-                    onClick={() => setEditingMemory(mem)}
+                    type="button"
+                    onClick={() => {
+                      setEditFormError(null);
+                      setEditingMemory(mem);
+                    }}
                     className="p-1.5 text-[#888888] hover:text-white bg-[#171717] hover:bg-[#222222] border border-[#2E2E2E] rounded-xl transition-colors"
                     title="Editar memória"
+                    aria-label={`Editar memória ${mem.key}`}
                   >
                     <Pencil className="w-3.5 h-3.5" />
                   </button>
                   <button
+                    type="button"
                     onClick={() => setDeletingMemory(mem)}
                     className="p-1.5 text-[#888888] hover:text-red-400 bg-[#171717] hover:bg-[#222222] border border-[#2E2E2E] rounded-xl transition-colors"
                     title="Apagar memória"
+                    aria-label={`Apagar memória ${mem.key}`}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -641,7 +723,9 @@ export const MemoryView: React.FC = () => {
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setInspectingVector(null)}
+                aria-label="Fechar inspetor de vetor"
                 className="p-1 rounded-lg text-[#888888] hover:text-white hover:bg-[#1C1C1C]"
               >
                 <X className="w-4 h-4" />
@@ -697,6 +781,7 @@ export const MemoryView: React.FC = () => {
 
             <div className="flex justify-end pt-2">
               <button
+                type="button"
                 onClick={() => setInspectingVector(null)}
                 className="px-4 py-2 bg-[#161616] hover:bg-[#202020] text-xs font-semibold text-[#CCCCCC] hover:text-white rounded-xl border border-[#2B2B2B]"
               >
@@ -717,7 +802,12 @@ export const MemoryView: React.FC = () => {
                 <span>Editar Memória</span>
               </h3>
               <button
-                onClick={() => setEditingMemory(null)}
+                type="button"
+                onClick={() => {
+                  setEditFormError(null);
+                  setEditingMemory(null);
+                }}
+                aria-label="Fechar edição de memória"
                 className="p-1 rounded-lg text-[#888888] hover:text-white hover:bg-[#1C1C1C]"
               >
                 <X className="w-4 h-4" />
@@ -726,8 +816,9 @@ export const MemoryView: React.FC = () => {
 
             <form onSubmit={handleUpdate} className="space-y-3">
               <div>
-                <label className="text-[11px] font-mono text-[#888888] block mb-1">Categoria</label>
+                <label htmlFor="edit-memory-category" className="text-[11px] font-mono text-[#888888] block mb-1">Categoria</label>
                 <select
+                  id="edit-memory-category"
                   value={editingMemory.category}
                   onChange={(e) => setEditingMemory({ ...editingMemory, category: e.target.value as any })}
                   className="w-full bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -740,29 +831,47 @@ export const MemoryView: React.FC = () => {
               </div>
 
               <div>
-                <label className="text-[11px] font-mono text-[#888888] block mb-1">Chave</label>
+                <label htmlFor="edit-memory-key" className="text-[11px] font-mono text-[#888888] block mb-1">Chave</label>
                 <input
+                  id="edit-memory-key"
                   type="text"
                   value={editingMemory.key}
-                  onChange={(e) => setEditingMemory({ ...editingMemory, key: e.target.value })}
+                  onChange={(e) => {
+                    setEditingMemory({ ...editingMemory, key: e.target.value });
+                    if (editFormError) setEditFormError(null);
+                  }}
                   className="w-full bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)]"
                 />
               </div>
 
               <div>
-                <label className="text-[11px] font-mono text-[#888888] block mb-1">Valor</label>
+                <label htmlFor="edit-memory-value" className="text-[11px] font-mono text-[#888888] block mb-1">Valor</label>
                 <textarea
+                  id="edit-memory-value"
                   rows={3}
                   value={editingMemory.value}
-                  onChange={(e) => setEditingMemory({ ...editingMemory, value: e.target.value })}
+                  onChange={(e) => {
+                    setEditingMemory({ ...editingMemory, value: e.target.value });
+                    if (editFormError) setEditFormError(null);
+                  }}
                   className="w-full bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)] resize-none"
                 />
               </div>
 
+              {editFormError && (
+                <p role="alert" className="text-xs text-red-400 font-mono flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{editFormError}</span>
+                </p>
+              )}
+
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => setEditingMemory(null)}
+                  onClick={() => {
+                    setEditFormError(null);
+                    setEditingMemory(null);
+                  }}
                   className="px-4 py-2 rounded-xl text-xs font-semibold text-[#888888] hover:text-white bg-[#161616] border border-[#2B2B2B]"
                 >
                   Cancelar
@@ -836,7 +945,9 @@ export const MemoryView: React.FC = () => {
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setIsAutoExtractOpen(false)}
+                aria-label="Fechar sugestões de memórias"
                 className="p-1 rounded-lg text-[#888888] hover:text-white hover:bg-[#1C1C1C]"
               >
                 <X className="w-4 h-4" />
@@ -845,13 +956,14 @@ export const MemoryView: React.FC = () => {
 
             <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">
               {suggestedFacts.map((sug, idx) => (
-                <div key={sug.key} className="bg-[#161616] border border-[#262626] rounded-xl p-3 flex items-center justify-between gap-3">
+                <div key={`${sug.key}-${idx}`} className="bg-[#161616] border border-[#262626] rounded-xl p-3 flex items-center justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <span className="text-[10px] font-mono text-[var(--accent-primary)] uppercase font-bold">{sug.category}</span>
                     <h4 className="font-mono text-xs text-white font-semibold truncate">{sug.key}</h4>
                     <p className="text-xs text-[#A8A8A8] truncate">{sug.value}</p>
                   </div>
                   <button
+                    type="button"
                     onClick={() => handleApproveSuggestion(idx)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-primary)] hover:opacity-90 text-white text-xs font-semibold rounded-lg shrink-0 shadow-md shadow-[var(--accent-glow)] transition-all"
                   >
@@ -868,6 +980,7 @@ export const MemoryView: React.FC = () => {
 
             <div className="flex justify-end pt-2">
               <button
+                type="button"
                 onClick={() => setIsAutoExtractOpen(false)}
                 className="px-4 py-2 bg-[#161616] hover:bg-[#202020] text-xs font-semibold text-[#888888] hover:text-white rounded-xl border border-[#2B2B2B]"
               >

@@ -4,58 +4,58 @@
  */
 
 import React, { useEffect, useRef } from 'react';
-import { useLioraStore } from '../../store/lioraStore';
+import { CONSENT_AUTO_DISMISS_MS, useLioraStore } from '../../store/lioraStore';
 import { speechService } from '../../services/speechService';
 import { voiceLiveClient } from '../../services/voiceLiveClient';
 import { eventBus } from '../../utils/eventBus';
+import { parseConsentVoiceDecision } from '../../utils/consentVoiceParser';
 import { ConsentCard } from './ConsentCard';
 
 /**
- * P1 (consentimento por voz): o card de consentimento R1+ antes só renderizava
- * dentro da TranscriptionView. Agora é um overlay GLOBAL fixo — visível de
- * qualquer aba (Home, Cockpit, Automações...) — e aceita confirmação FALADA
- * ("confirmar"/"cancelar") pelo microfone, eliminando o deadlock de comandos
- * de voz de risco que expiravam silenciosamente após 60s.
+ * P1 (consentimento por voz): overlay GLOBAL fixo visível de qualquer aba.
+ * Aceita confirmação/recusa falada via `parseConsentVoiceDecision` e fecha
+ * automaticamente após 2500ms quando resolvido (APPROVED / REJECTED / EXPIRED).
  */
 export const GlobalConsentOverlay: React.FC = () => {
   const pendingConsent = useLioraStore((s) => s.pendingConsent);
   const approveConsent = useLioraStore((s) => s.approveConsent);
   const rejectConsent = useLioraStore((s) => s.rejectConsent);
   const expireConsent = useLioraStore((s) => s.expireConsent);
+  const setPendingConsent = useLioraStore((s) => s.setPendingConsent);
   const isVoiceActive = useLioraStore((s) => s.isVoiceActive);
   const activeTab = useLioraStore((s) => s.activeTab);
   const conversationSubTab = useLioraStore((s) => s.conversationSubTab);
 
   const pendingRef = useRef(pendingConsent);
-  useEffect(() => {
-    pendingRef.current = pendingConsent;
-  }, [pendingConsent]);
+  pendingRef.current = pendingConsent;
 
   // Confirmação falada: quando um consentimento R1+ está pendente e a voz está
-  // ativa, a LIORA pede aprovação em voz alta e escuta por "confirmar"/"cancelar".
+  // ativa, a LIORA pede aprovação em voz alta e escuta por comandos de voz
+  // ("autorizar", "pode executar", "confirmar", "pode fazer", "sim" / "cancelar", "negar", "não").
   useEffect(() => {
     if (!pendingConsent || pendingConsent.status !== 'PENDING') return;
 
     const announcement = pendingConsent.reason || `Operação ${pendingConsent.riskLevel} requer aprovação.`;
-    const spoken = `Atenção. ${announcement} Diga confirmar para autorizar, ou cancelar para recusar.`;
+    const spoken = `Atenção. ${announcement} Diga confirmar ou autorizar para prosseguir, ou cancelar para recusar.`;
 
     if (isVoiceActive) {
       voiceLiveClient.extendSuppression(6000);
-      speechService.speak(spoken, () => { }, () => { }, { isDeterministicOverride: true });
+      speechService.speak(spoken, () => {}, () => {}, { isDeterministicOverride: true });
     }
 
-    // Listener falado: aceita confirmação via canal de transcrição existente
+    let resolvedByVoice = false;
     const unsubscribe = eventBus.subscribe('liora:voice_transcript', (payload: any) => {
-      const text = String(payload?.text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      if (!text) return;
+      if (resolvedByVoice) return;
+      const latest = pendingRef.current;
+      if (!latest || latest.status !== 'PENDING') return;
 
-      const isApprove = /\b(confirmar?|autoriz[oa]r?|aprovar?|sim|ok|pode)\b/.test(text);
-      const isReject = /\b(cancelar?|recusar?|negar?|nao|parar?|stop)\b/.test(text);
-
-      if (isApprove) {
+      const decision = parseConsentVoiceDecision(String(payload?.text || ''));
+      if (decision === 'APPROVE') {
+        resolvedByVoice = true;
         speechService.stopSpeaking();
-        approveConsent();
-      } else if (isReject) {
+        void approveConsent();
+      } else if (decision === 'REJECT') {
+        resolvedByVoice = true;
         speechService.stopSpeaking();
         rejectConsent();
       }
@@ -63,16 +63,28 @@ export const GlobalConsentOverlay: React.FC = () => {
 
     return () => {
       unsubscribe();
-      speechService.stopSpeaking();
+      // Só silencia fala se ainda estava pendente no store (evita apagar feedback pós-aprovação)
+      if (useLioraStore.getState().pendingConsent?.status === 'PENDING') {
+        speechService.stopSpeaking();
+      }
     };
-  }, [pendingConsent, isVoiceActive, approveConsent, rejectConsent]);
+  }, [pendingConsent?.auditId, pendingConsent?.status, pendingConsent?.reason, pendingConsent?.riskLevel, isVoiceActive, approveConsent, rejectConsent]);
 
-  // Publica no eventBus quando a voz reconhece fala do usuário (integrado via
-  // GlobalVoiceBar que já tem acesso à transcrição)
+  // Failsafe visual de auto-fechamento: garante que o banner nunca fique preso
+  // quando o status mudar para APPROVED, REJECTED ou EXPIRED.
   useEffect(() => {
-    if (!pendingConsent || pendingConsent.status !== 'PENDING') return;
-    // Bridge de input manual: permite aprovar/rejeitar por clique no overlay também
-  }, [pendingConsent]);
+    if (!pendingConsent || pendingConsent.status === 'PENDING') return;
+
+    const resolvedAuditId = pendingConsent.auditId;
+    const timer = setTimeout(() => {
+      const current = useLioraStore.getState().pendingConsent;
+      if (current && current.auditId === resolvedAuditId && current.status !== 'PENDING') {
+        setPendingConsent(null);
+      }
+    }, CONSENT_AUTO_DISMISS_MS);
+
+    return () => clearTimeout(timer);
+  }, [pendingConsent?.auditId, pendingConsent?.status, setPendingConsent]);
 
   if (!pendingConsent) return null;
 

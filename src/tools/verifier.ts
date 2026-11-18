@@ -20,10 +20,46 @@ if (typeof window === 'undefined') {
   }
 }
 
+/**
+ * Resolve a raiz configurada do workspace real da LIORA (espelha nativeServerTools.resolveConfiguredWorkspaceRoot).
+ * Respeita settings.workspacePath persistido em globalThis.localStorage quando disponível.
+ */
+function resolveConfiguredWorkspaceRootForVerify(): string {
+  const defaultRoot =
+    pathModule && osModule && typeof pathModule.join === 'function' && typeof osModule.homedir === 'function'
+      ? pathModule.join(osModule.homedir(), '.liora', 'workspace')
+      : '.liora/workspace';
+
+  try {
+    const storage = (typeof globalThis !== 'undefined' && (globalThis as any).localStorage) || null;
+    const raw = storage ? storage.getItem('liora_global_settings_v1') : null;
+    if (raw && pathModule) {
+      const parsed = JSON.parse(raw);
+      const wp = parsed?.workspacePath;
+      if (typeof wp === 'string' && wp.trim()) {
+        const trimmed = wp.trim();
+        return pathModule.isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed)
+          ? trimmed
+          : pathModule.resolve(process.cwd(), trimmed);
+      }
+    }
+  } catch {
+    // fallback silencioso para ~/.liora/workspace
+  }
+
+  return defaultRoot;
+}
+
 /** Resolve o caminho absoluto do workspace real da LIORA (espelha nativeServerTools) */
-function getRealWorkspacePath(relativePath: string): string {
-  if (pathModule && osModule && typeof pathModule.join === 'function' && typeof osModule.homedir === 'function') {
-    const root = pathModule.join(osModule.homedir(), '.liora', 'workspace');
+function getRealWorkspacePath(relativePath: string, candidateAbsolutePath?: string): string {
+  if (pathModule && typeof pathModule.resolve === 'function') {
+    const root = pathModule.resolve(resolveConfiguredWorkspaceRootForVerify());
+    if (typeof candidateAbsolutePath === 'string' && candidateAbsolutePath.trim()) {
+      const resolvedCandidate = pathModule.resolve(candidateAbsolutePath.trim());
+      if (resolvedCandidate === root || resolvedCandidate.startsWith(root + pathModule.sep)) {
+        return resolvedCandidate;
+      }
+    }
     return pathModule.resolve(root, relativePath);
   }
   return relativePath;
@@ -83,19 +119,20 @@ export class VerifierEngine {
         };
       }
 
-      // Execução REAL: verifica o arquivo no disco (~/.liora/workspace)
+      // Execução REAL: verifica o arquivo no disco usando a raiz configurada
       // Execução SIMULADA: verifica no catálogo virtual em memória
       const isRealExecution = executionResult && executionResult.simulated === false;
       let actualContent: string | undefined;
       let storageLabel = '';
 
       if (isRealExecution && fsModule && typeof fsModule.readFileSync === 'function') {
-        const absPath = getRealWorkspacePath(filePath);
+        const absPath = getRealWorkspacePath(filePath, executionResult?.absolutePath);
         try {
           actualContent = fsModule.readFileSync(absPath, 'utf-8');
           storageLabel = `disco real (${absPath})`;
         } catch {
           actualContent = undefined;
+          storageLabel = `disco real (${absPath})`;
         }
       } else if (isRealExecution && executionResult?.success) {
         return {

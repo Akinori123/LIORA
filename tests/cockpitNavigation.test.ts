@@ -22,7 +22,8 @@ import {
 import {
   parseRouteIntent,
   parsePlacesSearchIntent,
-  parseNavigationIntent
+  parseNavigationIntent,
+  resolveCockpitDestination
 } from '../src/utils/navigationParser';
 import { nativeCalculateRouteTool } from '../src/tools/nativeServerTools';
 
@@ -230,4 +231,28 @@ test('NAV-10: nativeCalculateRouteTool aceita destino textual sem exigir coorden
   assert.ok(result.message.includes('São Paulo'));
   assert.ok(result.url.includes('destination=S%C3%A3o%20Paulo'));
 });
+
+test('NAV-11: resolveCockpitDestination resolve aliases salvos, sinaliza aliases sem endereço e preserva destinos livres', () => {
+  const places = [
+    { alias: 'Casa', key: 'casa', address: 'Rua das Flores, 123 - Ponta Grossa' },
+    { alias: 'Trabalho', key: 'trabalho', address: '' }
+  ];
+
+  assert.deepStrictEqual(resolveCockpitDestination('   ', places), { status: 'empty' });
+  assert.deepStrictEqual(resolveCockpitDestination('casa', places), {
+    status: 'resolved',
+    destination: 'Rua das Flores, 123 - Ponta Grossa',
+    fromAlias: 'Casa'
+  });
+  assert.deepStrictEqual(resolveCockpitDestination('Trabalho', places), {
+    status: 'unconfigured',
+    key: 'trabalho',
+    alias: 'Trabalho'
+  });
+  assert.deepStrictEqual(resolveCockpitDestination('Aeroporto Afonso Pena', places), {
+    status: 'resolved',
+    destination: 'Aeroporto Afonso Pena'
+  });
+});
+
 

@@ -71,6 +71,7 @@ export class VoiceLiveClient {
 
   private status: VoiceLiveStatus = 'IDLE';
   private callbacks: VoiceLiveCallbacks = {};
+  private subscribers = new Set<VoiceLiveCallbacks>();
   private config: VoiceLiveConfig = {};
   private nextStartTime = 0;
   private activeSources: AudioBufferSourceNode[] = [];
@@ -127,6 +128,41 @@ export class VoiceLiveClient {
     this.callbacks = { ...this.callbacks, ...callbacks };
   }
 
+  public subscribeCallbacks(callbacks: VoiceLiveCallbacks): () => void {
+    this.subscribers.add(callbacks);
+    return () => {
+      this.subscribers.delete(callbacks);
+    };
+  }
+
+  private emitStatusChange(status: VoiceLiveStatus) {
+    try { this.callbacks.onStatusChange?.(status); } catch {}
+    this.subscribers.forEach((sub) => {
+      try { sub.onStatusChange?.(status); } catch {}
+    });
+  }
+
+  private emitAudioLevel(level: number) {
+    try { this.callbacks.onAudioLevel?.(level); } catch {}
+    this.subscribers.forEach((sub) => {
+      try { sub.onAudioLevel?.(level); } catch {}
+    });
+  }
+
+  private emitTranscription(text: string, role: 'user' | 'model') {
+    try { this.callbacks.onTranscription?.(text, role); } catch {}
+    this.subscribers.forEach((sub) => {
+      try { sub.onTranscription?.(text, role); } catch {}
+    });
+  }
+
+  private emitError(errMsg: string) {
+    try { this.callbacks.onError?.(errMsg); } catch {}
+    this.subscribers.forEach((sub) => {
+      try { sub.onError?.(errMsg); } catch {}
+    });
+  }
+
   public setVoice(voice: 'Aoede' | 'Puck' | 'Charon' | 'Kore' | 'Fenrir') {
     if (['Aoede', 'Puck', 'Charon', 'Kore', 'Fenrir'].includes(voice)) {
       this.config.voice = voice;
@@ -171,7 +207,7 @@ export class VoiceLiveClient {
       audioGate.setLiveSessionActive(false);
       audioGate.releaseChannel('live_ws');
     }
-    this.callbacks.onStatusChange?.(newStatus);
+    this.emitStatusChange(newStatus);
   }
 
   /**
@@ -195,8 +231,14 @@ export class VoiceLiveClient {
 
     try {
       // 1. Configurar WebSocket
-      const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = typeof window !== 'undefined' && window.location.host ? window.location.host : 'localhost:3000';
+      const isNonHttpOrTauriOrigin =
+        typeof window !== 'undefined' &&
+        (typeof window.location?.protocol === 'string' && !window.location.protocol.startsWith('http') ||
+          String(window.location?.host || '').includes('tauri.localhost'));
+      const protocol = !isNonHttpOrTauriOrigin && typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = !isNonHttpOrTauriOrigin && typeof window !== 'undefined' && window.location.host
+        ? window.location.host
+        : 'localhost:3000';
       const wsUrl = `${protocol}//${host}/ws/voice`;
 
       // R3: fecha qualquer WebSocket remanescente antes de criar um novo (evita vazamento)
@@ -288,7 +330,7 @@ export class VoiceLiveClient {
     } catch (err: any) {
       console.error('[VoiceLiveClient] Erro ao iniciar sessão de voz:', err);
       const msg = err?.message || 'Falha ao iniciar microfone ou conexão com o servidor de voz.';
-      this.callbacks.onError?.(msg);
+      this.emitError(msg);
       this.stop();
       this.setStatus('ERROR');
       return false;
@@ -391,7 +433,7 @@ export class VoiceLiveClient {
     if (this.reconnectTimer) return;
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.warn('[VoiceLiveClient] Máximo de tentativas de reconexão atingido. Sessão encerrada.');
-      this.callbacks.onError?.('Canal de voz indisponível após 3 tentativas de reconexão. Verifique a conexão e reative a voz.');
+      this.emitError('Canal de voz indisponível após 3 tentativas de reconexão. Verifique a conexão e reative a voz.');
       this.setStatus('ERROR');
       return;
     }
@@ -456,7 +498,7 @@ export class VoiceLiveClient {
                   // P2: mantém o último dito pelo usuário para rankear memórias na próxima sessão
                   this.lastUserTranscript = String(payload.text).slice(0, 200);
                 }
-                this.callbacks.onTranscription?.(payload.text, payload.role || 'model');
+                this.emitTranscription(payload.text, payload.role || 'model');
               }
               break;
 
@@ -490,7 +532,7 @@ export class VoiceLiveClient {
               break;
 
             case 'GEMINI_LIVE_ERROR':
-              this.callbacks.onError?.(payload.message || 'Erro na sessão de voz ao vivo.');
+              this.emitError(payload.message || 'Erro na sessão de voz ao vivo.');
               if (payload.code === 'NO_API_KEY') {
                 this.setStatus('ERROR');
               }
@@ -520,7 +562,7 @@ export class VoiceLiveClient {
 
     this.ws.onerror = (err) => {
       console.error('[VoiceLiveClient] Erro no WebSocket:', err);
-      this.callbacks.onError?.('Conexão com o servidor de voz perdida.');
+      this.emitError('Conexão com o servidor de voz perdida.');
       // R3: erro de rede também agenda reconexão (o onclose subsequente não duplica
       // porque o scheduleReconnect é idempotente via reconnectTimer guard)
       this.scheduleReconnect();
@@ -583,7 +625,7 @@ export class VoiceLiveClient {
         }
         const rms = Math.sqrt(sumSquares / channelData.length);
         const volumeLevel = Math.min(1, rms * 5);
-        this.callbacks.onAudioLevel?.(volumeLevel);
+        this.emitAudioLevel(volumeLevel);
 
         // Detecção de Barge-In Acústico Local (Interrupção Instantânea em 0ms)
         if (this.status === 'SPEAKING' && (volumeLevel >= 0.15 || rms >= 0.028)) {
@@ -634,7 +676,7 @@ export class VoiceLiveClient {
     } catch (micErr: any) {
       console.warn('[VoiceLiveClient] Permissão de microfone negada ou indisponível:', micErr);
       this.isSimulatedMode = true;
-      this.callbacks.onError?.('Microfone inacessível. Verifique as permissões de gravação de áudio do sistema.');
+      this.emitError('Microfone inacessível. Verifique as permissões de gravação de áudio do sistema.');
     }
   }
 

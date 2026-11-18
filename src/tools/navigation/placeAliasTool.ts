@@ -56,26 +56,26 @@ export const resolvePlaceAliasTool: ToolDefinition<{
     try {
       const { useLioraStore } = await import('../../store/lioraStore');
       const { memoryEntries } = useLioraStore.getState();
+      const { semanticMemoryService } = await import('../../services/memory/semanticMemoryService');
       const norm = clean.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-      // 1. Correspondência por padrões conhecidos (casa/trabalho/etc.)
-      const patterns = ALIAS_PATTERNS.filter(p => p.pattern.test(norm));
-      for (const p of patterns) {
-        for (const canonical of p.canonical) {
-          const entry = memoryEntries.find(m =>
-            m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '') === canonical
-          );
-          if (entry?.value) {
-            resolvedAddress = entry.value;
-            matchedKey = entry.key;
-            break;
+      const checkEntries = (entries: Array<{ key: string; value: string }>) => {
+        // 1. Correspondência por padrões conhecidos (casa/trabalho/etc.)
+        const patterns = ALIAS_PATTERNS.filter(p => p.pattern.test(norm));
+        for (const p of patterns) {
+          for (const canonical of p.canonical) {
+            const entry = entries.find(m =>
+              m.key.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '') === canonical
+            );
+            if (entry?.value) {
+              resolvedAddress = entry.value;
+              matchedKey = entry.key;
+              return;
+            }
           }
         }
-        if (resolvedAddress) break;
-      }
 
-      // 2. Busca abrangente para locais personalizados ilimitados (amigos, família, favoritos)
-      if (!resolvedAddress) {
+        // 2. Busca abrangente para locais personalizados ilimitados
         const normSlug = norm.replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
         const normWords = norm.replace(/[^a-z0-9]+/g, ' ').trim();
         const normalizeMemKey = (key: string) => {
@@ -85,13 +85,12 @@ export const resolvePlaceAliasTool: ToolDefinition<{
           return { raw, stripped, words };
         };
 
-        // Prioriza correspondência exata antes de busca parcial (substring)
         const direct =
-          memoryEntries.find(m => {
+          entries.find(m => {
             const { raw, stripped, words } = normalizeMemKey(m.key);
             return raw === norm || stripped === normSlug || (normWords.length > 0 && words === normWords);
           }) ||
-          memoryEntries.find(m => {
+          entries.find(m => {
             const { raw, stripped, words } = normalizeMemKey(m.key);
             return (
               raw.includes(norm) ||
@@ -108,6 +107,14 @@ export const resolvePlaceAliasTool: ToolDefinition<{
           resolvedAddress = direct.value;
           matchedKey = direct.key;
         }
+      };
+
+      checkEntries(memoryEntries);
+
+      // Fallback para o SemanticMemoryService do servidor se não encontrou no store
+      if (!resolvedAddress) {
+        const semMatches = semanticMemoryService.search(clean, { threshold: 0.2, maxResults: 10 });
+        checkEntries(semMatches.map(r => r.entry));
       }
     } catch {
       // memória indisponível — segue como não resolvido
@@ -176,8 +183,15 @@ export const savePlaceAliasTool: ToolDefinition<{
 
     try {
       const { useLioraStore } = await import('../../store/lioraStore');
+      const { semanticMemoryService } = await import('../../services/memory/semanticMemoryService');
       const store = useLioraStore.getState();
-      const normKey = cleanAlias.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]/g, '_');
+      const normKey = cleanAlias
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9_]/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '');
       const memoryKey = `local_${normKey}`;
 
       store.addMemory({
@@ -186,6 +200,8 @@ export const savePlaceAliasTool: ToolDefinition<{
         category: 'preference',
         confidence: 1.0
       });
+
+      await semanticMemoryService.storeFact('preference', memoryKey, cleanAddress, 1.0).catch(() => {});
 
       return {
         success: true,

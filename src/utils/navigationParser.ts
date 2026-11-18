@@ -513,3 +513,45 @@ export function parsePlacesSearchIntent(input: string): PlacesSearchIntent | nul
     spokenFeedback
   };
 }
+
+export interface CockpitSavedPlace {
+  alias: string;
+  key: string;
+  address: string;
+}
+
+export type CockpitDestinationResolution =
+  | { status: 'empty' }
+  | { status: 'unconfigured'; key: string; alias: string }
+  | { status: 'resolved'; destination: string; fromAlias?: string };
+
+/**
+ * Resolve o texto digitado no Cockpit contra a lista de locais favoritos salvos.
+ * - Texto vazio -> 'empty'
+ * - Corresponde a um alias salvo sem endereço configurado -> 'unconfigured'
+ * - Corresponde a um alias salvo com endereço -> 'resolved' com endereço expandido
+ * - Outro destino literal -> 'resolved' com o texto original
+ */
+export function resolveCockpitDestination(
+  rawInput: string,
+  customPlaces: CockpitSavedPlace[]
+): CockpitDestinationResolution {
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return { status: 'empty' };
+  }
+
+  const matched = customPlaces.find(
+    (p) => p.alias.trim().toLowerCase() === trimmed.toLowerCase()
+  );
+  if (matched) {
+    const resolvedAddress = matched.address.trim();
+    if (!resolvedAddress) {
+      return { status: 'unconfigured', key: matched.key, alias: matched.alias };
+    }
+    return { status: 'resolved', destination: resolvedAddress, fromAlias: matched.alias };
+  }
+
+  return { status: 'resolved', destination: trimmed };
+}
+

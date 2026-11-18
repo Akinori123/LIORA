@@ -82,6 +82,7 @@ class SpeechService {
   private activeNeuralVoice: string = 'Aoede';
   private activeSpeakId: number = 0;
   private streamingEpoch: number = 0;
+  private isWarmingTtsCache: boolean = false;
 
   constructor() {
     this.initRecognition();
@@ -91,15 +92,10 @@ class SpeechService {
     audioGate.registerAbortHandler('offline_tts', () => {
       this.cancelOfflinePlayback();
     });
-    if (typeof window !== 'undefined') {
-      if (window.speechSynthesis) {
-        window.speechSynthesis.onvoiceschanged = () => {
-          try { window.speechSynthesis.getVoices(); } catch {}
-        };
-      }
-      setTimeout(() => {
-        this.warmTtsCache();
-      }, 1000);
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        try { window.speechSynthesis.getVoices(); } catch {}
+      };
     }
   }
 
@@ -108,7 +104,12 @@ class SpeechService {
       if (this.activeNeuralVoice !== voice) {
         this.activeNeuralVoice = voice;
         this.ttsAudioCache.clear();
-        this.warmTtsCache();
+        const isVoiceActive = Boolean(
+          typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState?.()?.isVoiceActive
+        );
+        if (isVoiceActive) {
+          void this.warmTtsCache();
+        }
       }
     }
   }
@@ -144,6 +145,13 @@ class SpeechService {
   }
 
   public async warmTtsCache() {
+    if (this.isWarmingTtsCache) return;
+    const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
+    if (!geminiKey || geminiKey.trim().length < 5) {
+      return;
+    }
+
+    this.isWarmingTtsCache = true;
     const defaultPhrases = [
       'Entendido.',
       'Certo.',
@@ -166,25 +174,29 @@ class SpeechService {
       'Abrindo Automações.',
       'Abrindo Dispositivos IoT.'
     ];
-    const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (geminiKey) headers['Authorization'] = `Bearer ${geminiKey}`;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${geminiKey}`
+    };
 
     const storeModel = (typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState()?.settings?.ttsModel)
       ? (window as any).__LIORA_STORE__.getState().settings.ttsModel
       : 'gemini-3.8-flash-lite-tts';
 
-    for (const phrase of defaultPhrases) {
-      if (this.ttsAudioCache.has(phrase.toLowerCase())) continue;
-      try {
-        const res = await fetch('/api/gemini/tts', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ text: phrase, voice: this.activeNeuralVoice, model: storeModel })
-        });
-        if (res.ok) {
+    try {
+      for (const phrase of defaultPhrases) {
+        if (this.ttsAudioCache.has(phrase.toLowerCase())) continue;
+        try {
+          const res = await fetch('/api/gemini/tts', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ text: phrase, voice: this.activeNeuralVoice, model: storeModel })
+          });
+          if (!res.ok) {
+            break;
+          }
           const data = await res.json();
-          if (data.fallbackToNative || data.code === 'QUOTA_EXHAUSTED') {
+          if (data.fallbackToNative || data.code === 'QUOTA_EXHAUSTED' || data.code === 'AUTH_ERROR') {
             break;
           }
           if (data.success && data.audioBase64) {
@@ -197,10 +209,12 @@ class SpeechService {
             const buffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
             this.ttsAudioCache.set(phrase.toLowerCase(), buffer);
           }
+        } catch {
+          break;
         }
-      } catch (e) {
-        break;
       }
+    } finally {
+      this.isWarmingTtsCache = false;
     }
   }
 
@@ -1029,18 +1043,16 @@ class SpeechService {
       onEnd?.();
       return;
     }
-    voiceManager.prepareForStreamPlayback();
-
     const isDeterministicOverride = Boolean(options?.isDeterministicOverride ?? audioGate.isLiveSuppressed());
 
     // Gate estrito de exclusão mútua: se o canal Live WS está ativo e não foi suprimido,
-    // nunca empilha uma segunda voz paralela via TTS.
+    // nunca empilha uma segunda voz paralela nem aborta o canal Live antes da hora.
     if (!audioGate.canAcquire('neural_tts', { isDeterministicOverride })) {
       onEnd?.();
       return;
     }
 
-    // Cancela qualquer fala, fetch ou buffer de áudio anterior antes de emitir nova voz
+    // Cancela qualquer fala, fetch ou buffer de áudio anterior antes de reivindicar canal no VoiceManager
     if (options?.preserveStreamingQueue) {
       this.cancelActiveAudio();
     } else {
@@ -1060,7 +1072,10 @@ class SpeechService {
       return;
     }
 
+    voiceManager.prepareForStreamPlayback();
+
     if (!audioGate.acquireChannel('neural_tts', { isDeterministicOverride })) {
+      voiceManager.releaseLock('stream');
       onEnd?.();
       return;
     }
@@ -1077,6 +1092,7 @@ class SpeechService {
         }
         if (speakId !== this.activeSpeakId) {
           audioGate.releaseChannel('neural_tts');
+          voiceManager.releaseLock('stream');
           onEnd?.();
           return;
         }
@@ -1090,6 +1106,7 @@ class SpeechService {
             this.currentAudioSource = null;
           }
           audioGate.releaseChannel('neural_tts');
+          voiceManager.releaseLock('stream');
           onEnd?.();
         };
 
@@ -1105,6 +1122,7 @@ class SpeechService {
 
     if (speakId !== this.activeSpeakId) {
       audioGate.releaseChannel('neural_tts');
+      voiceManager.releaseLock('stream');
       onEnd?.();
       return;
     }
@@ -1133,6 +1151,7 @@ class SpeechService {
       }
       if (speakId !== this.activeSpeakId) {
         audioGate.releaseChannel('neural_tts');
+        voiceManager.releaseLock('stream');
         onEnd?.();
         return;
       }
@@ -1141,11 +1160,13 @@ class SpeechService {
         const data = await res.json();
         if (speakId !== this.activeSpeakId) {
           audioGate.releaseChannel('neural_tts');
+          voiceManager.releaseLock('stream');
           onEnd?.();
           return;
         }
         if (data.fallbackToNative || data.code === 'QUOTA_EXHAUSTED' || !data.success) {
           audioGate.releaseChannel('neural_tts');
+          voiceManager.releaseLock('stream');
           console.warn('[SpeechService] Gemini TTS indisponível ou cota esgotada. Concluindo de forma limpa (sem voz robótica nativa em conflito).');
           onEnd?.();
           return;
@@ -1165,6 +1186,7 @@ class SpeechService {
           }
           if (speakId !== this.activeSpeakId) {
             audioGate.releaseChannel('neural_tts');
+            voiceManager.releaseLock('stream');
             onEnd?.();
             return;
           }
@@ -1172,6 +1194,7 @@ class SpeechService {
           const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
           if (speakId !== this.activeSpeakId) {
             audioGate.releaseChannel('neural_tts');
+            voiceManager.releaseLock('stream');
             onEnd?.();
             return;
           }
@@ -1194,6 +1217,7 @@ class SpeechService {
               this.currentAudioSource = null;
             }
             audioGate.releaseChannel('neural_tts');
+            voiceManager.releaseLock('stream');
             onEnd?.();
           };
 
@@ -1209,6 +1233,7 @@ class SpeechService {
       }
       if (e?.name === 'AbortError' || speakId !== this.activeSpeakId) {
         audioGate.releaseChannel('neural_tts');
+        voiceManager.releaseLock('stream');
         onEnd?.();
         return;
       }
@@ -1216,6 +1241,7 @@ class SpeechService {
     }
 
     audioGate.releaseChannel('neural_tts');
+    voiceManager.releaseLock('stream');
     onEnd?.();
   }
 
@@ -1234,6 +1260,7 @@ class SpeechService {
     // Gate de exclusão mútua: se API/Live estiver ativo, TTS offline é estritamente silenciado
     if (!audioGate.acquireChannel('offline_tts', { isDeterministicOverride })) {
       window.speechSynthesis.cancel();
+      voiceManager.releaseLock('local');
       onEnd?.();
       return;
     }
@@ -1264,6 +1291,7 @@ class SpeechService {
           this.currentUtterance = null;
         }
         audioGate.releaseChannel('offline_tts');
+        voiceManager.releaseLock('local');
         onEnd?.();
       };
 
@@ -1273,6 +1301,7 @@ class SpeechService {
           this.currentUtterance = null;
         }
         audioGate.releaseChannel('offline_tts');
+        voiceManager.releaseLock('local');
         onEnd?.();
       };
 
@@ -1281,6 +1310,7 @@ class SpeechService {
     } catch (err) {
       console.warn('[SpeechService Fallback TTS Exception]:', err);
       audioGate.releaseChannel('offline_tts');
+      voiceManager.releaseLock('local');
       onEnd?.();
     }
   }
@@ -1311,6 +1341,7 @@ class SpeechService {
       }
     }
     audioGate.releaseChannel('neural_tts');
+    voiceManager.releaseLock('stream');
   }
 
   private cancelOfflinePlayback() {
@@ -1321,6 +1352,7 @@ class SpeechService {
       this.currentUtterance = null;
     }
     audioGate.releaseChannel('offline_tts');
+    voiceManager.releaseLock('local');
   }
 
   private cancelActiveAudio() {

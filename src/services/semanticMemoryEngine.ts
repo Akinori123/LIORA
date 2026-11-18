@@ -139,11 +139,13 @@ class SemanticMemoryEngine {
       }
     }
 
-    // 2. Ativação de âncoras conceituais (Semantic Anchors)
-    for (const [conceptKey, anchor] of Object.entries(CONCEPT_ANCHORS)) {
+    // 2. Ativação de âncoras conceituais (Semantic Anchors com fronteira de palavra)
+    for (const anchor of Object.values(CONCEPT_ANCHORS)) {
       let anchorHits = 0;
       for (const kw of anchor.keywords) {
-        if (normalized.includes(kw)) {
+        const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`(?:^|[^a-z0-9_])${escapedKw}(?:$|[^a-z0-9_])`);
+        if (re.test(normalized)) {
           anchorHits += 1.5;
         }
       }

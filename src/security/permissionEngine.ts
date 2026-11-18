@@ -14,7 +14,9 @@ import {
   SecurityRequestContext, 
   UserConsentRecord,
   ToolRiskLevel,
-  IAuditLogger
+  IAuditLogger,
+  ToolPermissionPolicy,
+  ToolPolicyMap
 } from './types';
 import { computeParametersHash, CanonicalizationError } from './canonicalizer';
 import { toolRegistry } from '../tools/registry';
@@ -29,6 +31,8 @@ export class PermissionEngine implements IPermissionEngine {
   public readonly activeProfile: SecurityProfileConfig;
   private readonly consentRecords: Map<string, UserConsentRecord> = new Map();
   private readonly logger: IAuditLogger;
+  private readonly toolPolicies: Map<string, ToolPermissionPolicy> = new Map();
+  private globalAutoApprove: boolean = false;
   // BUG FIX (memory leak): consentRecords nunca era limpo — cada token emitido
   // (mesmo consumido ou expirado) ficava para sempre no Map. Com uso contínuo de
   // automações R1+, o mapa crescia indefinidamente. Tokens são removidos ao
@@ -41,6 +45,45 @@ export class PermissionEngine implements IPermissionEngine {
   ) {
     this.activeProfile = profile;
     this.logger = logger;
+  }
+
+  public getToolPolicy(toolName: string): ToolPermissionPolicy {
+    return this.toolPolicies.get(toolName) || 'default';
+  }
+
+  public setToolPolicy(toolName: string, policy: ToolPermissionPolicy): void {
+    if (!toolName) return;
+    if (policy === 'default') {
+      this.toolPolicies.delete(toolName);
+    } else if (policy === 'always_allow' || policy === 'always_require_consent') {
+      this.toolPolicies.set(toolName, policy);
+    }
+  }
+
+  public getToolPolicies(): ToolPolicyMap {
+    const out: ToolPolicyMap = {};
+    for (const [k, v] of this.toolPolicies.entries()) {
+      out[k] = v;
+    }
+    return out;
+  }
+
+  public setToolPolicies(policies: ToolPolicyMap): void {
+    this.toolPolicies.clear();
+    if (!policies || typeof policies !== 'object') return;
+    for (const [k, v] of Object.entries(policies)) {
+      if (v === 'always_allow' || v === 'always_require_consent') {
+        this.toolPolicies.set(k, v);
+      }
+    }
+  }
+
+  public getGlobalAutoApprove(): boolean {
+    return this.globalAutoApprove;
+  }
+
+  public setGlobalAutoApprove(enabled: boolean): void {
+    this.globalAutoApprove = Boolean(enabled);
   }
 
   /**
@@ -62,7 +105,7 @@ export class PermissionEngine implements IPermissionEngine {
     console.log('[PermissionEngine] [HANDSHAKE: requested]', {
       toolName,
       riskLevel: toolMetadata?.riskLevel || 'R0',
-      sessionId: context.sessionId,
+      sessionId: context?.sessionId,
       hasConsentToken: Boolean(consentToken),
       rawParametersKeys: typeof rawParameters === 'object' && rawParameters !== null ? Object.keys(rawParameters) : []
     });
@@ -134,21 +177,8 @@ export class PermissionEngine implements IPermissionEngine {
       return this.safelyLogAndReturn(result, context);
     }
 
-    // 4. Validação contra chaves proibidas da política ativa
-    if (this.activeProfile.deniedTools?.includes(toolName)) {
-      const result: PermissionEvaluationResult = {
-        decision: 'DENY',
-        toolName,
-        riskLevel: resolvedRiskLevel,
-        code: 'TOOL_EXPLICITLY_DENIED',
-        reason: `Ferramenta '${toolName}' está explicitamente negada pelo perfil '${this.activeProfile.profileName}'.`,
-        parametersHash,
-        evaluationTimeMs: Math.round(performance.now() - startTime),
-        timestamp,
-        auditId
-      };
-      return this.safelyLogAndReturn(result, context, parametersHash);
-    }
+    // 4. Resolução da política granular individual (precedência sobre toggle global)
+    const toolPolicy: ToolPermissionPolicy = this.getToolPolicy(toolName);
 
     // 5. Verificação de risco R3 (categoricamente proibido no web preview)
     if (resolvedRiskLevel === 'R3') {
@@ -166,11 +196,80 @@ export class PermissionEngine implements IPermissionEngine {
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
 
-    // 6. R2 — MUTAÇÃO DESTRUTIVA: permitida APENAS com consentimento HMAC válido.
-    // CORREÇÃO: antes era DENY categorico ('DENY_R2_NOT_PERMITTED_IN_PHASE_6_2'),
-    // o que impedia o núcleo de controle do PC (matar processos, cliques simulados,
-    // exclusão de arquivos) mesmo com consentimento. Agora o R2 segue o mesmo fluxo
-    // de consentimento do R1 — token HMAC anti-replay obrigatório.
+    // 6. Validação contra chaves proibidas da política ativa (respeitada salvo override granular explícito)
+    if (this.activeProfile.deniedTools?.includes(toolName) && toolPolicy === 'default') {
+      const result: PermissionEvaluationResult = {
+        decision: 'DENY',
+        toolName,
+        riskLevel: resolvedRiskLevel,
+        code: 'TOOL_EXPLICITLY_DENIED',
+        reason: `Ferramenta '${toolName}' está explicitamente negada pelo perfil '${this.activeProfile.profileName}'.`,
+        parametersHash,
+        evaluationTimeMs: Math.round(performance.now() - startTime),
+        timestamp,
+        auditId
+      };
+      return this.safelyLogAndReturn(result, context, parametersHash);
+    }
+
+    // 7. Política granular: 'always_require_consent' sobrescreve auto-approve global e R0
+    if (toolPolicy === 'always_require_consent') {
+      const consented = consentToken
+        ? this.consumeConsentToken(consentToken, toolName, parametersHash, context.sessionId)
+        : null;
+      if (consented?.success) {
+        const result: PermissionEvaluationResult = {
+          decision: 'ALLOW',
+          toolName,
+          riskLevel: resolvedRiskLevel,
+          reason: `Operação '${toolName}' (política: Sempre Exigir Consentimento) autorizada via consentimento HMAC explícito.`,
+          parametersHash,
+          consentAuditId: consented.consentAuditId,
+          evaluationTimeMs: Math.round(performance.now() - startTime),
+          timestamp,
+          auditId
+        };
+        return this.safelyLogAndReturn(result, context, parametersHash);
+      }
+      const result: PermissionEvaluationResult = {
+        decision: 'DENY',
+        toolName,
+        riskLevel: resolvedRiskLevel,
+        code: 'REQUIRES_USER_CONFIRMATION',
+        reason: `Ferramenta '${toolName}' configurada para sempre exigir confirmação humana explícita.`,
+        parametersHash,
+        requiredConfirmation: true,
+        evaluationTimeMs: Math.round(performance.now() - startTime),
+        timestamp,
+        auditId
+      };
+      console.log('[PermissionEngine] [HANDSHAKE: pending]', {
+        toolName,
+        riskLevel: resolvedRiskLevel,
+        code: 'REQUIRES_USER_CONFIRMATION',
+        policy: 'always_require_consent',
+        sessionId: context.sessionId,
+        parametersHash
+      });
+      return this.safelyLogAndReturn(result, context, parametersHash);
+    }
+
+    // 8. Política granular: 'always_allow' autoriza diretamente (R0/R1/R2) sem exigir token
+    if (toolPolicy === 'always_allow') {
+      const result: PermissionEvaluationResult = {
+        decision: 'ALLOW',
+        toolName,
+        riskLevel: resolvedRiskLevel,
+        reason: `Operação ${resolvedRiskLevel} '${toolName}' autorizada pela política granular 'Sempre Permitir'.`,
+        parametersHash,
+        evaluationTimeMs: Math.round(performance.now() - startTime),
+        timestamp,
+        auditId
+      };
+      return this.safelyLogAndReturn(result, context, parametersHash);
+    }
+
+    // 9. R2 — MUTAÇÃO DESTRUTIVA: permitida com consentimento HMAC válido ou Auto-Consentimento Global
     if (resolvedRiskLevel === 'R2') {
       const consented = consentToken
         ? this.consumeConsentToken(consentToken, toolName, parametersHash, context.sessionId)
@@ -183,6 +282,19 @@ export class PermissionEngine implements IPermissionEngine {
           reason: `Operação R2 '${toolName}' autorizada via consentimento HMAC explícito do operador.`,
           parametersHash,
           consentAuditId: consented.consentAuditId,
+          evaluationTimeMs: Math.round(performance.now() - startTime),
+          timestamp,
+          auditId
+        };
+        return this.safelyLogAndReturn(result, context, parametersHash);
+      }
+      if (this.globalAutoApprove) {
+        const result: PermissionEvaluationResult = {
+          decision: 'ALLOW',
+          toolName,
+          riskLevel: 'R2',
+          reason: `Operação R2 '${toolName}' autorizada via Auto-Consentimento Global do Operador.`,
+          parametersHash,
           evaluationTimeMs: Math.round(performance.now() - startTime),
           timestamp,
           auditId
@@ -210,7 +322,8 @@ export class PermissionEngine implements IPermissionEngine {
       });
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
-    // 7. R1 — AÇÃO LOCAL REVERSÍVEL: idem, exige consentimento HMAC (não mais DENY categorico).
+
+    // 10. R1 — AÇÃO LOCAL REVERSÍVEL: exige consentimento HMAC ou Auto-Consentimento Global
     if (resolvedRiskLevel === 'R1') {
       const consented = consentToken
         ? this.consumeConsentToken(consentToken, toolName, parametersHash, context.sessionId)
@@ -223,6 +336,19 @@ export class PermissionEngine implements IPermissionEngine {
           reason: `Operação R1 '${toolName}' autorizada via consentimento HMAC explícito do operador.`,
           parametersHash,
           consentAuditId: consented.consentAuditId,
+          evaluationTimeMs: Math.round(performance.now() - startTime),
+          timestamp,
+          auditId
+        };
+        return this.safelyLogAndReturn(result, context, parametersHash);
+      }
+      if (this.globalAutoApprove) {
+        const result: PermissionEvaluationResult = {
+          decision: 'ALLOW',
+          toolName,
+          riskLevel: 'R1',
+          reason: `Operação R1 '${toolName}' autorizada via Auto-Consentimento Global do Operador.`,
+          parametersHash,
           evaluationTimeMs: Math.round(performance.now() - startTime),
           timestamp,
           auditId
@@ -251,10 +377,9 @@ export class PermissionEngine implements IPermissionEngine {
       return this.safelyLogAndReturn(result, context, parametersHash);
     }
 
-    // 8. Verificação de risco R0 (Leitura/Consulta)
+    // 11. Verificação de risco R0 (Leitura/Consulta)
     if (resolvedRiskLevel === 'R0') {
-      // Requer presença na lista branca explícita do perfil
-      if (!this.activeProfile.allowedTools.includes(toolName)) {
+      if (!this.activeProfile.allowedTools.includes(toolName) && !this.globalAutoApprove) {
         const result: PermissionEvaluationResult = {
           decision: 'DENY',
           toolName,
@@ -269,7 +394,6 @@ export class PermissionEngine implements IPermissionEngine {
         return this.safelyLogAndReturn(result, context, parametersHash);
       }
 
-      // Autorização positiva concedida dentro do escopo da política
       const result: PermissionEvaluationResult = {
         decision: 'ALLOW',
         toolName,
@@ -332,7 +456,7 @@ export class PermissionEngine implements IPermissionEngine {
     if (this.consentRecords.size > PermissionEngine.MAX_CONSENT_RECORDS) {
       const now = Date.now();
       for (const [hash, rec] of this.consentRecords) {
-        if (rec.expiresAt < now) this.consentRecords.delete(hash);
+        if (rec.expiresAt < now || rec.consumed) this.consentRecords.delete(hash);
       }
       // Se ainda acima do teto (flood de tokens não-expirados), descarta os mais antigos
       while (this.consentRecords.size > PermissionEngine.MAX_CONSENT_RECORDS) {
@@ -425,11 +549,9 @@ export class PermissionEngine implements IPermissionEngine {
       return { success: false, denialCode: 'CONSENT_SESSION_MISMATCH', consentAuditId: record.consentAuditId };
     }
 
-    // Consumo atômico imediato
+    // Consumo atômico imediato: mantém record.consumed = true até expiração/GC
+    // para que tentativas de replay retornem CONSENT_TOKEN_ALREADY_USED.
     record.consumed = true;
-    // BUG FIX: remove o registro do mapa após consumo (não cresce indefinidamente)
-    // — o record local já carrega todos os dados necessários para a auditoria abaixo.
-    this.consentRecords.delete(tokenHash);
 
     // Registro seguro de auditoria do consumo
     try {

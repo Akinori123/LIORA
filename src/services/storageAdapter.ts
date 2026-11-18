@@ -162,6 +162,31 @@ class StorageAdapter {
   }
 
   /**
+   * Remove todos os registros de uma tabela (memória e localStorage) para restauração limpa
+   */
+  public async clearTable(table: string): Promise<void> {
+    if (this.memoryCache.has(table)) {
+      this.memoryCache.get(table)!.clear();
+    }
+
+    if (isTauriEnvironment()) {
+      try {
+        await invokeTauri<boolean>('clear_sqlite_table', { table });
+      } catch {
+        // fallback: tenta remover individualmente se comando nativo não existir
+      }
+    }
+
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(`liora_db_${table}`);
+      } catch (e) {
+        console.warn(`[StorageAdapter] Falha ao limpar tabela '${table}':`, e);
+      }
+    }
+  }
+
+  /**
    * Exporta um backup transacional completo de todas as tabelas em formato JSON unificado
    */
   public async exportFullBackup(): Promise<string> {
@@ -182,24 +207,36 @@ class StorageAdapter {
   /**
    * CORREÇÃO (bug de falsa promessa — havia export mas NUNCA import): restaura
    * um backup JSON completo gerado por exportFullBackup. Estratégia por tabela:
-   * Desktop (SQLite) → grava cada registro; Web → reescreve localStorage;
-   * sempre atualiza o cache em memória.
+   * limpa registros obsoletos da tabela antes de gravar, grava cada registro
+   * no Desktop (SQLite) ou Web (localStorage) e atualiza o cache em memória.
    */
   public async restoreFromBackup(backupJson: string): Promise<{ success: boolean; restored: Record<string, number>; error?: string }> {
     const restored: Record<string, number> = {};
     try {
       const backup = JSON.parse(backupJson);
-      if (!backup || typeof backup !== 'object' || !backup.tables) {
+      if (!backup || typeof backup !== 'object' || !backup.tables || typeof backup.tables !== 'object') {
         return { success: false, restored, error: 'BACKUP_INVALID: arquivo sem a estrutura esperada { tables: {...} }.' };
       }
 
       for (const [table, records] of Object.entries(backup.tables as Record<string, any[]>)) {
         if (!Array.isArray(records)) continue;
+        await this.clearTable(table);
         let count = 0;
         for (const payload of records) {
           if (payload === null || payload === undefined) continue;
-          // ID: usa o id embutido no payload se houver, senão gera
-          const id = (payload as any)?.id || `restore-${table}-${count}`;
+          const defaultKey =
+            table === 'sessions'
+              ? 'history_payload'
+              : table === 'settings'
+                ? 'global_preferences'
+                : table === 'memories' && Array.isArray(payload)
+                  ? 'collection'
+                  : table === 'automations' && Array.isArray(payload)
+                    ? 'rules_collection'
+                    : table === 'devices' && Array.isArray(payload)
+                      ? 'paired_list'
+                      : `restore-${table}-${count}`;
+          const id = (payload as any)?.id || defaultKey;
           try {
             await this.save(table, String(id), payload);
             count++;
@@ -208,7 +245,6 @@ class StorageAdapter {
         restored[table] = count;
       }
 
-      const total = Object.values(restored).reduce((a, b) => a + b, 0);
       return { success: true, restored };
     } catch (err: any) {
       return { success: false, restored, error: err?.message || 'BACKUP_PARSE_FAILED: JSON inválido.' };

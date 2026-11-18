@@ -14,7 +14,7 @@ interface AppShellProps {
 }
 
 export const AppShell: React.FC<AppShellProps> = ({ children }) => {
-  const { activeTab } = useLioraStore();
+  const activeTab = useLioraStore((s) => s.activeTab);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#050505] text-[#F5F5F5] font-sans antialiased">

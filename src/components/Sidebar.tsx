@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../store/lioraStore';
 import { NavTab } from '../types';
 import { 
@@ -31,7 +32,17 @@ export const Sidebar: React.FC = () => {
     orbState,
     isMobileDrawerOpen,
     closeMobileDrawer
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow((s) => ({
+      activeTab: s.activeTab,
+      setActiveTab: s.setActiveTab,
+      isSidebarExpanded: s.isSidebarExpanded,
+      toggleSidebar: s.toggleSidebar,
+      orbState: s.orbState,
+      isMobileDrawerOpen: s.isMobileDrawerOpen,
+      closeMobileDrawer: s.closeMobileDrawer
+    }))
+  );
 
   const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: 'Início', icon: <Cpu className="w-5 h-5" /> },
@@ -103,6 +114,7 @@ export const Sidebar: React.FC = () => {
 
           {/* Visible Close Button on Mobile */}
           <button 
+            type="button"
             onClick={closeMobileDrawer}
             className="md:hidden p-1.5 rounded-md hover:bg-[#1A1A1A] text-[#A8A8A8] hover:text-white transition-colors focus:outline-none shrink-0"
             style={{ '--tw-ring-color': 'var(--accent-primary)' } as any}
@@ -114,6 +126,7 @@ export const Sidebar: React.FC = () => {
 
           {/* Desktop Collapse Toggle */}
           <button 
+            type="button"
             onClick={toggleSidebar}
             className={`hidden md:flex items-center justify-center rounded-md hover:bg-[#1A1A1A] text-[#A8A8A8] hover:text-white transition-colors focus:outline-none shrink-0 ${
               isSidebarExpanded ? 'p-1.5' : 'p-1'
@@ -136,6 +149,7 @@ export const Sidebar: React.FC = () => {
             return (
               <button
                 key={item.id}
+                type="button"
                 onClick={() => setActiveTab(item.id)}
                 data-testid={`nav-item-${item.id}`}
                 aria-label={item.label}

@@ -94,6 +94,7 @@ pub struct LocalExecutionRequest {
     pub toolName: String,
     pub parameters: serde_json::Value,
     pub sessionId: Option<String>,
+    pub consentToken: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -282,7 +283,7 @@ pub async fn system_exec_sandbox(command_str: String, args: Vec<String>, payload
     if command_str.chars().any(|c| injection_charset.contains(c)) {
         return Err(format!("COMMAND_INJECTION_BLOCKED: caracteres perigosos no comando (hash: {}).", param_hash));
     }
-    if args.iter().any(|a| a.contains("--upload-pack") || a.contains("--config") || a.contains("-c") && command_str == "git") {
+    if command_str == "git" && args.iter().any(|a| a.contains("--upload-pack") || a.contains("--config") || a == "-c" || a.starts_with("-c=")) {
         return Err(format!("ARGUMENT_INJECTION_BLOCKED: argumento de execução de código bloqueado (hash: {}).", param_hash));
     }
     if args.len() > 32 {
@@ -347,7 +348,10 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
     let tool_name = payload.toolName.as_str();
     let params = &payload.parameters;
 
-    let consent_token = params.get("consentToken").and_then(|v| v.as_str());
+    let consent_token = payload
+        .consentToken
+        .as_deref()
+        .or_else(|| params.get("consentToken").and_then(|v| v.as_str()));
     let evaluation = evaluate_native_tool(tool_name, params, consent_token);
 
     if !evaluation.allowed {
@@ -372,8 +376,8 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
             let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let root = params.get("workspaceRoot").and_then(|v| v.as_str()).map(|s| s.to_string());
             match workspace_read_file(path, root).await {
-                Ok(content) => (true, Some(serde_json::json!({ "content": content })), None, "R1"),
-                Err(e) => (false, None, Some(e), "R1"),
+                Ok(content) => (true, Some(serde_json::json!({ "content": content })), None, "R0"),
+                Err(e) => (false, None, Some(e), "R0"),
             }
         }
         "workspace_write_file" => {
@@ -381,8 +385,8 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
             let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let root = params.get("workspaceRoot").and_then(|v| v.as_str()).map(|s| s.to_string());
             match workspace_write_file(path, content, root).await {
-                Ok(_) => (true, Some(serde_json::json!({ "written": true })), None, "R2"),
-                Err(e) => (false, None, Some(e), "R2"),
+                Ok(_) => (true, Some(serde_json::json!({ "written": true })), None, "R1"),
+                Err(e) => (false, None, Some(e), "R1"),
             }
         }
         "workspace_list_files" => {
@@ -601,8 +605,10 @@ pub async fn write_keychain_secret(service: String, secret: String) -> Result<bo
     } else {
         map.insert(service, serde_json::Value::String(secret));
     }
-    fs::write(&vault_path, serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?)
+    let temp_vault = dir.join(format!("vault_secure.{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temp_vault, serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    fs::rename(&temp_vault, &vault_path).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -720,7 +726,7 @@ pub async fn save_sqlite_record(table: String, id: String, payload_json: String)
 
     map.insert(id, parsed_payload);
 
-    let temp_file = db_dir.join(format!("{}.tmp", table));
+    let temp_file = db_dir.join(format!("{}.{}.tmp", table, uuid::Uuid::new_v4()));
     fs::write(&temp_file, serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
 
@@ -774,7 +780,7 @@ pub async fn delete_sqlite_record(table: String, id: String) -> Result<bool, Str
 
     map.remove(&id);
 
-    let temp_file = db_dir.join(format!("{}.tmp", table));
+    let temp_file = db_dir.join(format!("{}.{}.tmp", table, uuid::Uuid::new_v4()));
     fs::write(&temp_file, serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
 
@@ -837,6 +843,7 @@ pub async fn open_application(target: String) -> Result<bool, String> {
 
         std::process::Command::new("cmd")
             .args(["/C", "start", "", &target])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW: evita flash de console ao abrir apps no Windows
             .spawn()
             .map_err(|e| format!("Falha ao abrir '{}': {}", target, e))?
             .wait()
@@ -889,9 +896,9 @@ pub async fn list_processes() -> Result<Vec<ProcessInfo>, String> {
             .with_cpu(CpuRefreshKind::everything())
             .with_memory(MemoryRefreshKind::everything()),
     );
-    // Duas leituras necessárias para CPU delta estável
+    // Duas leituras necessárias para CPU delta estável (sleep não-bloqueante no executor Tokio)
     sys.refresh_all();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     sys.refresh_all();
 
     let mut procs: Vec<ProcessInfo> = sys
@@ -956,32 +963,6 @@ pub async fn kill_process(pid: u32, consent_token: String) -> Result<bool, Strin
 pub async fn get_volume() -> Result<serde_json::Value, String> {
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile", "-NonInteractive", "-Command",
-                r"(Get-AudioDevice -Playback).Volume"
-            ])
-            .output();
-
-        // Tenta via script PowerShell alternativo (compatível sem módulos externos)
-        let output2 = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile", "-NonInteractive", "-Command",
-                r"[Math]::Round((Get-AudioDevice -list | Where-Object Type -eq Playback | Select-Object -First 1).Volume)"
-            ])
-            .output();
-
-        // Fallback: usa COM via script mais simples
-        let output3 = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile", "-NonInteractive", "-Command",
-                r"$vol = (New-Object -ComObject WScript.Shell); $val = 50; [PSCustomObject]@{volume=$val} | ConvertTo-Json"
-            ])
-            .output();
-
-        // Tenta obter volume via wmic/nircmd fallback
-        let _ = (output, output2, output3);
-
         Ok(serde_json::json!({
             "volume": null,
             "simulated": false,

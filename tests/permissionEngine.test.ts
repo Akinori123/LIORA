@@ -58,26 +58,27 @@ test('4. Permission Engine - Policy STRICT denies workspace_read_file in this ph
   assert.ok(res.code === 'TOOL_EXPLICITLY_DENIED' || res.code === 'TOOL_NOT_IN_PROFILE_WHITELIST');
 });
 
-test('5. Permission Engine - Policy denies R1 (system_exec_simulated) in Phase 6.2B', async () => {
+test('5. Permission Engine - Policy requires user confirmation for R1 (system_exec_simulated)', async () => {
   const engine = new PermissionEngine(STRICT_PROFILE);
   const context = createValidContext();
 
   const res = await engine.evaluate('system_exec_simulated', { command: 'git status' }, context);
   assert.strictEqual(res.decision, 'DENY');
-  assert.strictEqual(res.code, 'DENY_R1_BLOCKED_IN_PHASE_6_2B');
+  assert.strictEqual(res.code, 'REQUIRES_USER_CONFIRMATION');
   assert.strictEqual(res.requiredConfirmation, true);
 });
 
-test('6. Permission Engine - Rejection of R2 and R3 risk levels', async () => {
+test('6. Permission Engine - Interactive consent for R2 and strict denial of R3 risk levels', async () => {
   const engine = new PermissionEngine(STRICT_PROFILE);
   const context = createValidContext();
 
-  // Ferramenta com risco R2
+  // Ferramenta com risco R2 exige confirmação explícita do operador
   const resR2 = await engine.evaluate('custom_r2_tool', {}, context, { riskLevel: 'R2' });
   assert.strictEqual(resR2.decision, 'DENY');
-  assert.strictEqual(resR2.code, 'DENY_R2_NOT_PERMITTED_IN_PHASE_6_2');
+  assert.strictEqual(resR2.code, 'REQUIRES_USER_CONFIRMATION');
+  assert.strictEqual(resR2.requiredConfirmation, true);
 
-  // Ferramenta com risco R3 (Crítico / Sistema)
+  // Ferramenta com risco R3 (Crítico / Sistema) permanece bloqueada
   const resR3 = await engine.evaluate('custom_r3_tool', {}, context, { riskLevel: 'R3' });
   assert.strictEqual(resR3.decision, 'DENY');
   assert.strictEqual(resR3.code, 'DENY_CRITICAL_BLOCKED');
@@ -100,7 +101,8 @@ test('7. Permission Engine - Client-side risk tampering is ignored (Server autho
   // O motor utiliza o nível de risco real da ferramenta no registro (R1), não o do payload
   assert.strictEqual(res.riskLevel, 'R1');
   assert.strictEqual(res.decision, 'DENY');
-  assert.strictEqual(res.code, 'DENY_R1_BLOCKED_IN_PHASE_6_2B');
+  assert.strictEqual(res.code, 'REQUIRES_USER_CONFIRMATION');
+  assert.strictEqual(res.requiredConfirmation, true);
 });
 
 test('8. Permission Engine - Invalid parameters failing canonicalization result in CANONICALIZATION_FAILED', async () => {

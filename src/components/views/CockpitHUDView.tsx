@@ -7,36 +7,50 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Gauge, 
   Compass, 
-  Zap, 
-  ShieldAlert, 
   Radio, 
   Volume2, 
-  VolumeX, 
   Mic, 
-  MicOff, 
   Navigation, 
   BatteryCharging, 
-  Thermometer, 
   AlertTriangle, 
   CheckCircle2, 
   Home, 
   RotateCcw,
   Sparkles,
   ChevronRight,
-  Wifi,
   MapPin,
   ExternalLink,
   Plus,
-  Briefcase
+  ShieldAlert
 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
-import { VehicleTelemetry, VehicleDiagnosticTroubleCode } from '../../types/devices';
+import { VehicleDiagnosticTroubleCode } from '../../types/devices';
 import { getVehicleTelemetry, isTauriEnvironment, invokeTauri } from '../../security/localBridge';
 import { speechService } from '../../services/speechService';
 import { launchGpsNavigation, GpsNavigationProvider } from '../../tools/navigation/navigationActionTool';
+import { resolveCockpitDestination } from '../../utils/navigationParser';
 
 export const CockpitHUDView: React.FC = () => {
-  const { sendMessage, orbState, isVoiceActive: isGlobalVoiceActive, toggleVoice, addActivityLog } = useLioraStore();
+  const {
+    sendMessage,
+    orbState,
+    isVoiceActive: isGlobalVoiceActive,
+    toggleVoice,
+    addActivityLog,
+    memoryEntries,
+    addMemory
+  } = useLioraStore(
+    useShallow((s) => ({
+      sendMessage: s.sendMessage,
+      orbState: s.orbState,
+      isVoiceActive: s.isVoiceActive,
+      toggleVoice: s.toggleVoice,
+      addActivityLog: s.addActivityLog,
+      memoryEntries: s.memoryEntries,
+      addMemory: s.addMemory
+    }))
+  );
 
   // Estados de Telemetria Veicular
   const [speedKmh, setSpeedKmh] = useState<number>(0);
@@ -59,7 +73,6 @@ export const CockpitHUDView: React.FC = () => {
   // antes era useState local, então o botão nunca acionava o GlobalVoiceBar e a voz
   // do Cockpit era um botão morto; agora lê/escreve isVoiceActive da store)
   const [puloHomeSignalSent, setPuloHomeSignalSent] = useState<boolean>(false);
-  const [hvacActive, setHvacActive] = useState<boolean>(true);
   const isVoiceActive = isGlobalVoiceActive;
   // Exaustão: rastreia se a telemetria veicular é REAL (adaptador OBD-II presente)
   // ou fallback — Regra 4 do AGENTS.md exige transparência de dados simulados.
@@ -73,9 +86,6 @@ export const CockpitHUDView: React.FC = () => {
   const [newPlaceAlias, setNewPlaceAlias] = useState('');
   const [newPlaceAddress, setNewPlaceAddress] = useState('');
 
-  const memoryEntries = useLioraStore((s) => s.memoryEntries);
-  const addMemory = useLioraStore((s) => s.addMemory);
-
   const saveAlias = async (key: string, value: string) => {
     const clean = value.trim();
     if (!clean) { setEditingAlias(null); return; }
@@ -85,10 +95,13 @@ export const CockpitHUDView: React.FC = () => {
       value: clean,
       confidence: 0.99
     });
+    if (!isMountedRef.current) return;
     setEditingAlias(null);
     setAliasDraft('');
     setRouteStatus(`Local '${key}' salvo na memória. Agora o destino navega automaticamente.`);
-    registerTimer(setTimeout(() => setRouteStatus(null), 5000));
+    scheduleTimer(routeTimerRef, () => {
+      if (isMountedRef.current) setRouteStatus(null);
+    }, 5000);
   };
 
   const customPlaces = React.useMemo(() => {
@@ -117,26 +130,48 @@ export const CockpitHUDView: React.FC = () => {
   const [isRouting, setIsRouting] = useState<boolean>(false);
   const [routeStatus, setRouteStatus] = useState<string | null>(null);
 
-  // Armazena identificadores de timers para limpeza ao desmontar o componente
-  const timersRef = useRef<NodeJS.Timeout[]>([]);
-  const registerTimer = (id: NodeJS.Timeout) => {
-    timersRef.current.push(id);
-    return id;
+  // Armazena identificadores de timers dedicados para evitar sobreposição e garantir limpeza ao desmontar
+  const isMountedRef = useRef<boolean>(true);
+  const routeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const puloTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleTimer = (
+    ref: React.MutableRefObject<ReturnType<typeof setTimeout> | null>,
+    callback: () => void,
+    delayMs: number
+  ) => {
+    if (ref.current) {
+      clearTimeout(ref.current);
+      ref.current = null;
+    }
+    ref.current = setTimeout(() => {
+      ref.current = null;
+      callback();
+    }, delayMs);
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
-      timersRef.current.forEach(t => clearTimeout(t));
-      timersRef.current = [];
+      isMountedRef.current = false;
+      if (routeTimerRef.current) clearTimeout(routeTimerRef.current);
+      if (puloTimerRef.current) clearTimeout(puloTimerRef.current);
+      if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
+      routeTimerRef.current = null;
+      puloTimerRef.current = null;
+      scanTimerRef.current = null;
     };
   }, []);
 
   // 1. Rastreamento Real de GPS e Velocidade via Geolocation API
   useEffect(() => {
+    let active = true;
     let watchId: number | null = null;
     if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
       watchId = navigator.geolocation.watchPosition(
         (position) => {
+          if (!active) return;
           setGpsStatus('LOCKED');
           const coords = position.coords;
           setGpsCoords({ lat: coords.latitude, lng: coords.longitude });
@@ -154,16 +189,18 @@ export const CockpitHUDView: React.FC = () => {
           }
         },
         (err) => {
+          if (!active) return;
           console.warn('[CockpitHUD] Geolocation indisponível ou permissão pendente:', err.message);
           setGpsStatus('UNAVAILABLE');
         },
         { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
       );
-    } else {
+    } else if (active) {
       setGpsStatus('UNAVAILABLE');
     }
 
     return () => {
+      active = false;
       if (watchId !== null && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
         navigator.geolocation.clearWatch(watchId);
       }
@@ -178,12 +215,12 @@ export const CockpitHUDView: React.FC = () => {
         const data = await getVehicleTelemetry();
         if (isMounted && data) {
           if (typeof data.source === 'string') setVehicleSource(data.source);
-          if (data.batteryVolts) setBatteryVolts(data.batteryVolts);
-          if (data.coolantTempCelsius) setCoolantTemp(data.coolantTempCelsius);
-          if (data.fuelOrSocPercent) setFuelSocPercent(data.fuelOrSocPercent);
+          if (typeof data.batteryVolts === 'number') setBatteryVolts(data.batteryVolts);
+          if (typeof data.coolantTempCelsius === 'number') setCoolantTemp(data.coolantTempCelsius);
+          if (typeof data.fuelOrSocPercent === 'number') setFuelSocPercent(data.fuelOrSocPercent);
           if (data.dtcCodes && Array.isArray(data.dtcCodes)) setDtcCodes(data.dtcCodes);
         }
-      } catch (err) {
+      } catch {
         // Fallback silencioso para manter cockpit estável
       }
     };
@@ -213,20 +250,27 @@ export const CockpitHUDView: React.FC = () => {
     try {
       if (isTauriEnvironment()) {
         const dtcs = await invokeTauri<VehicleDiagnosticTroubleCode[]>('read_obd2_diagnostics');
+        if (!isMountedRef.current) return;
         setDtcCodes(Array.isArray(dtcs) ? dtcs : []);
         setScanMessage(`Varredura concluída: ${Array.isArray(dtcs) ? dtcs.length : 0} código(s) de falha (DTC) ativos.`);
       } else {
+        if (!isMountedRef.current) return;
         setScanMessage('Varredura OBD-II requer o aplicativo desktop nativo (Tauri) com adaptador ELM327/CAN conectado.');
       }
     } catch (err: any) {
+      if (!isMountedRef.current) return;
       // O backend Rust reporta NOT_IMPLEMENTED honestamente quando não há adaptador
       const reason = String(err?.message || err || '');
       setScanMessage(reason.includes('NOT_IMPLEMENTED')
         ? 'Adaptador OBD-II não conectado. Conecte um leitor ELM327 (Bluetooth/USB) à porta OBD do veículo para diagnóstico real.'
         : `Falha na varredura: ${reason.slice(0, 160)}`);
     } finally {
-      setIsScanningObd(false);
-      registerTimer(setTimeout(() => setScanMessage(null), 8000));
+      if (isMountedRef.current) {
+        setIsScanningObd(false);
+        scheduleTimer(scanTimerRef, () => {
+          if (isMountedRef.current) setScanMessage(null);
+        }, 8000);
+      }
     }
   };
 
@@ -235,7 +279,9 @@ export const CockpitHUDView: React.FC = () => {
     setPuloHomeSignalSent(true);
     // Envia comando para a IA executar a automação
     sendMessage('Protocolo PULO Veicular: Operador em aproximação ao perímetro residencial. Executar automação de abertura de portão R2.');
-    registerTimer(setTimeout(() => setPuloHomeSignalSent(false), 6000));
+    scheduleTimer(puloTimerRef, () => {
+      if (isMountedRef.current) setPuloHomeSignalSent(false);
+    }, 6000);
   };
 
   // Disparo de Rota Inteligente Híbrida (Voz Live/TTS + Abertura GPS nativa, SEM redirecionamento de aba)
@@ -244,18 +290,33 @@ export const CockpitHUDView: React.FC = () => {
   // (c) abertura REAL via launchGpsNavigation (Tauri IPC rundll32 → navegador padrão).
   const destinationInputRef = useRef<HTMLInputElement>(null);
   const handleRequestRoute = async (customDest?: string) => {
-    const targetDest = (customDest || destinationInput).trim();
+    const resolution = resolveCockpitDestination(customDest ?? destinationInput, customPlaces);
 
     // 1. Campo vazio: feedback falado + foco no campo (não abre maps com lixo)
-    if (!targetDest) {
+    if (resolution.status === 'empty') {
       setRouteStatus('Informe o destino para calcular a rota.');
       try {
         speechService.speak('Para onde você deseja ir?', () => {}, () => {});
       } catch {}
       destinationInputRef.current?.focus();
-      registerTimer(setTimeout(() => setRouteStatus(null), 5000));
+      scheduleTimer(routeTimerRef, () => {
+        if (isMountedRef.current) setRouteStatus(null);
+      }, 5000);
       return;
     }
+
+    // 1B. Alias conhecido ('Casa', 'Trabalho', etc.) sem endereço salvo: abre edição em vez de buscar texto genérico
+    if (resolution.status === 'unconfigured') {
+      setRouteStatus(`Configure o endereço de '${resolution.alias}' antes de iniciar a navegação.`);
+      setEditingAlias(resolution.key);
+      setAliasDraft('');
+      scheduleTimer(routeTimerRef, () => {
+        if (isMountedRef.current) setRouteStatus(null);
+      }, 6000);
+      return;
+    }
+
+    const targetDest = resolution.destination;
 
     setIsRouting(true);
     const appName = gpsProvider === 'waze' ? 'Waze' : 'Google Maps';
@@ -294,11 +355,14 @@ export const CockpitHUDView: React.FC = () => {
       simulated: false
     });
 
+    if (!isMountedRef.current) return;
     setRouteStatus(opened
       ? `Navegação ativa no ${appName}: "${targetDest}".`
       : `Falha: ${openError}`);
     setIsRouting(false);
-    registerTimer(setTimeout(() => setRouteStatus(null), opened ? 10000 : 6000));
+    scheduleTimer(routeTimerRef, () => {
+      if (isMountedRef.current) setRouteStatus(null);
+    }, opened ? 10000 : 6000);
   };
 
   // Interlock de Segurança: Velocidade acima de 0 km/h ou modo SAFE_DRIVE bloqueia telas densas
@@ -328,10 +392,11 @@ export const CockpitHUDView: React.FC = () => {
         </div>
 
         {/* Seletor de Modo de Condução */}
-        <div className="flex items-center gap-1 bg-[#111111] p-1 border border-[#222222] rounded-xl">
+        <div className="flex flex-wrap items-center gap-1 bg-[#111111] p-1 border border-[#222222] rounded-xl">
           {(['COMFORT', 'SPORT', 'ECO', 'SAFE_DRIVE'] as const).map((mode) => (
             <button
               key={mode}
+              type="button"
               onClick={() => setDriveMode(mode)}
               className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
                 driveMode === mode
@@ -456,6 +521,7 @@ export const CockpitHUDView: React.FC = () => {
               {[0, 45, 80, 110].map((s) => (
                 <button
                   key={s}
+                  type="button"
                   onClick={() => {
                     setSpeedKmh(s);
                     setRpm(s === 0 ? 850 : Math.round(s * 42));
@@ -473,7 +539,9 @@ export const CockpitHUDView: React.FC = () => {
           {/* Botão de Voz Principal do Cockpit */}
           <div className="mt-6 flex flex-col items-center">
             <button
+              type="button"
               onClick={() => {
+                void speechService.unlockAudio();
                 toggleVoice();
                 // Permanece no Cockpit: a voz é global (GlobalVoiceBar fixo) —
                 // não há mais redirecionamento para 'conversation'
@@ -484,6 +552,7 @@ export const CockpitHUDView: React.FC = () => {
                   : 'bg-[#181818] hover:bg-[#222222] text-white border-2 border-[#FF2B2B]/40 hover:border-[#FF2B2B]'
               }`}
               title="Voz Contínua LIORA"
+              aria-label="Ativar ou pausar voz contínua da LIORA"
             >
               <Mic className="w-7 h-7" />
             </button>
@@ -530,6 +599,7 @@ export const CockpitHUDView: React.FC = () => {
 
             {/* Ação 1: Portão Residencial */}
             <button
+              type="button"
               onClick={handleTriggerPuloHomeGate}
               disabled={puloHomeSignalSent}
               className={`w-full py-2.5 px-3 rounded-xl text-xs font-mono font-bold flex items-center justify-between transition-all ${
@@ -556,6 +626,8 @@ export const CockpitHUDView: React.FC = () => {
                 {/* Seletor de App: Google Maps vs Waze */}
                 <div className="flex items-center gap-1 bg-[#1A1A1A] p-0.5 rounded-lg border border-[#2A2A2A]">
                   <button
+                    type="button"
+                    aria-pressed={gpsProvider === 'google_maps'}
                     onClick={() => setGpsProvider('google_maps')}
                     className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
                       gpsProvider === 'google_maps'
@@ -566,6 +638,8 @@ export const CockpitHUDView: React.FC = () => {
                     Maps
                   </button>
                   <button
+                    type="button"
+                    aria-pressed={gpsProvider === 'waze'}
                     onClick={() => setGpsProvider('waze')}
                     className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all ${
                       gpsProvider === 'waze'
@@ -586,6 +660,7 @@ export const CockpitHUDView: React.FC = () => {
                   value={destinationInput}
                   onChange={(e) => setDestinationInput(e.target.value)}
                   placeholder="Informe o destino..."
+                  aria-label="Destino de navegação GPS"
                   className="flex-1 bg-[#161616] border border-[#2A2A2A] rounded-lg px-2.5 py-1.5 text-xs font-mono text-white placeholder-[#555555] focus:outline-none focus:border-[#FF2B2B]"
                 />
               </div>
@@ -604,6 +679,7 @@ export const CockpitHUDView: React.FC = () => {
                         value={aliasDraft}
                         onChange={(e) => setAliasDraft(e.target.value)}
                         placeholder={`Endereço de ${alias}...`}
+                        aria-label={`Endereço de ${alias}`}
                         className="flex-1 bg-[#161616] border border-[#FF2B2B] rounded text-[10px] font-mono text-white px-2 py-1 focus:outline-none"
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') void saveAlias(memoryKey, aliasDraft);
@@ -611,15 +687,19 @@ export const CockpitHUDView: React.FC = () => {
                         }}
                       />
                       <button
+                        type="button"
                         onClick={() => void saveAlias(memoryKey, aliasDraft)}
                         className="px-1.5 py-1 rounded bg-[#FF2B2B] text-white text-[10px] font-bold"
                         title="Salvar na memória"
+                        aria-label={`Salvar endereço de ${alias}`}
                       >
                         ✓
                       </button>
                       <button
+                        type="button"
                         onClick={() => setEditingAlias(null)}
                         className="px-1.5 py-1 rounded text-[10px] text-[#888888]"
+                        aria-label={`Cancelar edição de ${alias}`}
                       >
                         ✕
                       </button>
@@ -627,6 +707,7 @@ export const CockpitHUDView: React.FC = () => {
                   ) : (
                     <div key={memoryKey} className="flex items-center gap-1">
                       <button
+                        type="button"
                         onClick={() => {
                           if (saved) {
                             setDestinationInput(address);
@@ -646,12 +727,14 @@ export const CockpitHUDView: React.FC = () => {
                         {saved ? '●' : '○'} {alias}
                       </button>
                       <button
+                        type="button"
                         onClick={() => {
                           setEditingAlias(memoryKey);
                           setAliasDraft(address || '');
                         }}
                         className="p-0.5 rounded text-[#555555] hover:text-[#FF2B2B] transition-colors"
                         title={`Editar endereço de ${alias}`}
+                        aria-label={`Editar endereço de ${alias}`}
                       >
                         <Plus className="w-3 h-3" />
                       </button>
@@ -665,6 +748,7 @@ export const CockpitHUDView: React.FC = () => {
                     <input
                       type="text"
                       placeholder="Nome (ex: Amigo)..."
+                      aria-label="Nome do novo local"
                       value={newPlaceAlias}
                       onChange={(e) => setNewPlaceAlias(e.target.value)}
                       className="w-24 bg-[#0F0F0F] border border-[#333] rounded text-[10px] font-mono text-white px-1.5 py-0.5 focus:outline-none"
@@ -672,33 +756,51 @@ export const CockpitHUDView: React.FC = () => {
                     <input
                       type="text"
                       placeholder="Endereço..."
+                      aria-label="Endereço do novo local"
                       value={newPlaceAddress}
                       onChange={(e) => setNewPlaceAddress(e.target.value)}
                       className="flex-1 bg-[#0F0F0F] border border-[#333] rounded text-[10px] font-mono text-white px-1.5 py-0.5 focus:outline-none"
                     />
                     <button
+                      type="button"
                       onClick={() => {
-                        if (newPlaceAlias.trim() && newPlaceAddress.trim()) {
-                          const norm = `local_${newPlaceAlias.trim().toLowerCase().replace(/\s+/g, '_')}`;
-                          void saveAlias(norm, newPlaceAddress.trim());
-                          setIsAddingNewPlace(false);
-                          setNewPlaceAlias('');
-                          setNewPlaceAddress('');
+                        if (!newPlaceAlias.trim() || !newPlaceAddress.trim()) {
+                          setRouteStatus('Informe o nome e o endereço do novo local.');
+                          scheduleTimer(routeTimerRef, () => {
+                            if (isMountedRef.current) setRouteStatus(null);
+                          }, 5000);
+                          return;
                         }
+                        const slug = newPlaceAlias
+                          .trim()
+                          .toLowerCase()
+                          .normalize('NFD')
+                          .replace(/[\u0300-\u036f]/g, '')
+                          .replace(/[^a-z0-9]+/g, '_')
+                          .replace(/^_+|_+$/g, '') || 'favorito';
+                        const norm = `local_${slug}`;
+                        void saveAlias(norm, newPlaceAddress.trim());
+                        setIsAddingNewPlace(false);
+                        setNewPlaceAlias('');
+                        setNewPlaceAddress('');
                       }}
                       className="px-1.5 py-0.5 bg-[#FF2B2B] text-white text-[10px] font-bold rounded"
+                      aria-label="Confirmar novo local"
                     >
                       ✓
                     </button>
                     <button
+                      type="button"
                       onClick={() => setIsAddingNewPlace(false)}
                       className="text-[#888] text-[10px] px-1"
+                      aria-label="Cancelar novo local"
                     >
                       ✕
                     </button>
                   </div>
                 ) : (
                   <button
+                    type="button"
                     onClick={() => setIsAddingNewPlace(true)}
                     className="px-2 py-0.5 border border-dashed border-[#444] hover:border-[#FF2B2B] rounded text-[10px] font-mono text-[#888888] hover:text-white transition-colors flex items-center gap-1"
                     title="Adicionar novo local favorito ilimitado"
@@ -712,6 +814,7 @@ export const CockpitHUDView: React.FC = () => {
 
               {/* Botão de Disparo */}
               <button
+                type="button"
                 onClick={() => handleRequestRoute()}
                 disabled={isRouting}
                 className="w-full py-2 px-3 bg-[#1A1A1A] hover:bg-[#222222] text-white border border-[#333333] hover:border-[#FF2B2B] rounded-lg text-xs font-mono font-bold flex items-center justify-between transition-all"
@@ -748,6 +851,7 @@ export const CockpitHUDView: React.FC = () => {
 
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={handleScanObd}
               disabled={isScanningObd}
               className="px-3 py-1.5 bg-[#181818] hover:bg-[#222222] border border-[#2A2A2A] hover:border-[#FF2B2B] rounded-lg text-xs font-mono font-semibold transition-all flex items-center gap-2 text-white"

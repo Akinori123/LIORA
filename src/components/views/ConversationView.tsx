@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { ConversationSubTab } from '../../types';
 import { MarkdownContent } from '../chat/MarkdownContent';
@@ -32,7 +33,6 @@ import {
   Settings2,
   Play
 } from 'lucide-react';
-import { voiceLiveClient, VoiceLiveStatus } from '../../services/voiceLiveClient';
 import { captureScreen } from '../../tools/screenCapture';
 import { speechService } from '../../services/speechService';
 
@@ -48,52 +48,38 @@ export const ConversationView: React.FC = () => {
     deleteSession,
     sendMessage, 
     clearMessages, 
-    isVoiceActive, 
-    toggleVoice,
     isGenerating,
     abortGeneration,
-    retryMessage
-  } = useLioraStore();
+    retryMessage,
+    createSession
+  } = useLioraStore(
+    useShallow((s) => ({
+      conversationSubTab: s.conversationSubTab,
+      setConversationSubTab: s.setConversationSubTab,
+      messages: s.messages,
+      sessions: s.sessions,
+      openSession: s.openSession,
+      deleteSession: s.deleteSession,
+      sendMessage: s.sendMessage,
+      clearMessages: s.clearMessages,
+      isGenerating: s.isGenerating,
+      abortGeneration: s.abortGeneration,
+      retryMessage: s.retryMessage,
+      createSession: s.createSession
+    }))
+  );
 
   const [inputText, setInputText] = useState('');
   const [attachedImage, setAttachedImage] = useState<{ data: string; mimeType: string } | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+  const isMountedRef = useRef(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Live voice state
-  const [voiceStatus, setVoiceStatus] = useState<VoiceLiveStatus>('IDLE');
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [liveTranscription, setLiveTranscription] = useState<string>('');
-
   useEffect(() => {
-    voiceLiveClient.setCallbacks({
-      onStatusChange: (status) => {
-        setVoiceStatus(status);
-        if (status === 'ERROR') {
-          useLioraStore.setState({ orbState: 'ERROR' });
-        } else if (status === 'SPEAKING') {
-          useLioraStore.setState({ orbState: 'SPEAKING' });
-        } else if (status === 'LISTENING') {
-          useLioraStore.setState({ orbState: 'LISTENING' });
-        } else if (status === 'IDLE') {
-          useLioraStore.setState({ orbState: 'IDLE' });
-        }
-      },
-      onAudioLevel: (level) => {
-        setAudioLevel(level);
-      },
-      onTranscription: (text) => {
-        setLiveTranscription(text);
-      },
-      onError: (errMsg) => {
-        setVoiceError(errMsg);
-      }
-    });
-
+    isMountedRef.current = true;
     return () => {
-      voiceLiveClient.setCallbacks({});
+      isMountedRef.current = false;
       if (recordTimerRef.current) {
         clearInterval(recordTimerRef.current);
         recordTimerRef.current = null;
@@ -108,28 +94,11 @@ export const ConversationView: React.FC = () => {
         } catch {}
         testAudioRef.current = null;
       }
-      speechService.stopListening();
+      if (!useLioraStore.getState().isVoiceActive) {
+        speechService.stopListening();
+      }
     };
   }, []);
-
-  const handleToggleVoiceSession = async () => {
-    setVoiceError(null);
-    if (isVoiceActive) {
-      voiceLiveClient.stop();
-      speechService.stopListening();
-      toggleVoice();
-      setVoiceStatus('IDLE');
-    } else {
-      toggleVoice();
-      speechService.unlockAudio();
-      const success = await voiceLiveClient.start();
-      if (!success) {
-        console.warn('[ConversationView] Gemini Live não disponível. Alternando automaticamente para Voz Contínua por microfone...');
-        setVoiceError('Gemini Live indisponível. Alternando para o modo de Voz Contínua por microfone com resposta falada.');
-        handleStartAudioRecording();
-      }
-    }
-  };
 
   // Auto-scroll to bottom on message updates or streaming
   useEffect(() => {
@@ -158,11 +127,15 @@ export const ConversationView: React.FC = () => {
     setIsCapturing(true);
     try {
       const captured = await captureScreen();
+      if (!isMountedRef.current) return;
       setAttachedImage({ data: captured.base64Data, mimeType: captured.mimeType });
-    } catch (e) {
+    } catch (e: any) {
       console.error('[ConversationView] Screen capture error:', e);
+      if (isMountedRef.current) {
+        setRecordingNotice(e?.message || 'Não foi possível capturar a tela.');
+      }
     } finally {
-      setIsCapturing(false);
+      if (isMountedRef.current) setIsCapturing(false);
     }
   };
 
@@ -181,7 +154,7 @@ export const ConversationView: React.FC = () => {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingAudioLevel, setRecordingAudioLevel] = useState(0);
   const [recordingNotice, setRecordingNotice] = useState<string | null>(null);
-  const recordTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [showAudioDiagModal, setShowAudioDiagModal] = useState(false);
   const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([]);
@@ -191,12 +164,21 @@ export const ConversationView: React.FC = () => {
   const testMicTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const testAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  const isFinishingAudioRef = useRef(false);
+
   const loadAudioDevices = async () => {
-    const devices = await speechService.getAudioInputDevices();
-    setAvailableDevices(devices);
-    if (devices.length > 0 && !selectedDevice) {
-      setSelectedDevice(devices[0].deviceId);
-      speechService.setSelectedAudioDevice(devices[0].deviceId);
+    try {
+      const devices = await speechService.getAudioInputDevices();
+      if (!isMountedRef.current) return;
+      setAvailableDevices(devices);
+      if (devices.length > 0 && !selectedDevice) {
+        setSelectedDevice(devices[0].deviceId);
+        speechService.setSelectedAudioDevice(devices[0].deviceId);
+      }
+    } catch (e: any) {
+      if (isMountedRef.current) {
+        setTestStatus(e?.message || 'Não foi possível listar dispositivos de áudio.');
+      }
     }
   };
 
@@ -217,14 +199,23 @@ export const ConversationView: React.FC = () => {
     setTestStatus('Sintetizando e testando voz da LIORA...');
     speechService.speak(
       'LIORA online. O sistema de síntese de voz e áudio está funcionando normalmente no seu navegador.',
-      () => setTestStatus('Reproduzindo áudio da LIORA...'),
-      () => setTestStatus('Teste de áudio da LIORA concluído com sucesso!')
+      () => {
+        if (isMountedRef.current) setTestStatus('Reproduzindo áudio da LIORA...');
+      },
+      () => {
+        if (isMountedRef.current) setTestStatus('Teste de áudio da LIORA concluído com sucesso!');
+      }
     );
   };
 
   const handleTestMicLoopback = async () => {
+    if (useLioraStore.getState().isVoiceActive) {
+      setTestStatus('Pause o modo de voz contínuo antes de testar o loopback do microfone.');
+      return;
+    }
     speechService.unlockAudio();
     const perm = await speechService.requestMicrophonePermission();
+    if (!isMountedRef.current) return;
     if (!perm.success) {
       setTestStatus(`Erro no microfone: ${perm.error}`);
       return;
@@ -241,7 +232,10 @@ export const ConversationView: React.FC = () => {
     testMicTimerRef.current = setTimeout(async () => {
       testMicTimerRef.current = null;
       const audioBlob = await speechService.getRecordedAudioBlob();
-      speechService.stopListening();
+      if (!useLioraStore.getState().isVoiceActive) {
+        speechService.stopListening();
+      }
+      if (!isMountedRef.current) return;
       setIsTestRecording(false);
 
       if (!audioBlob) {
@@ -254,15 +248,21 @@ export const ConversationView: React.FC = () => {
       testAudioRef.current = audio;
       audio.onended = () => {
         if (testAudioRef.current === audio) testAudioRef.current = null;
-        setTestStatus('Teste concluído! Se você ouviu sua voz, seu microfone está 100% funcionando.');
+        if (isMountedRef.current) {
+          setTestStatus('Teste concluído! Se você ouviu sua voz, seu microfone está 100% funcionando.');
+        }
       };
       audio.onerror = () => {
         if (testAudioRef.current === audio) testAudioRef.current = null;
-        setTestStatus('Erro ao reproduzir teste de microfone.');
+        if (isMountedRef.current) {
+          setTestStatus('Erro ao reproduzir teste de microfone.');
+        }
       };
       await audio.play().catch((e) => {
         if (testAudioRef.current === audio) testAudioRef.current = null;
-        setTestStatus(`Falha na reprodução: ${e.message}`);
+        if (isMountedRef.current) {
+          setTestStatus(`Falha na reprodução: ${e.message}`);
+        }
       });
     }, 3200);
   };
@@ -274,17 +274,29 @@ export const ConversationView: React.FC = () => {
       return;
     }
     const unsub = speechService.onAudioLevel((lvl) => {
-      setRecordingAudioLevel(lvl);
+      if (isMountedRef.current) setRecordingAudioLevel(lvl);
     });
     return () => unsub();
   }, [isRecordingAudio]);
 
+  // Cancela gravação de áudio ativa se o usuário trocar para outra sub-aba (ex: Live/Histórico)
+  useEffect(() => {
+    if (conversationSubTab !== 'text' && isRecordingAudio) {
+      handleCancelAudioRecording();
+    }
+  }, [conversationSubTab, isRecordingAudio]);
+
   const handleStartAudioRecording = async () => {
     if (isGenerating || isRecordingAudio) return;
+    if (useLioraStore.getState().isVoiceActive) {
+      setRecordingNotice('O modo de voz contínua global já está ativo. Fale diretamente ou pause a voz global para gravar uma mensagem avulsa.');
+      return;
+    }
     setRecordingNotice(null);
     speechService.unlockAudio();
 
     const perm = await speechService.requestMicrophonePermission();
+    if (!isMountedRef.current) return;
     if (!perm.success) {
       setRecordingNotice(perm.error || 'Permissão de microfone negada. Autorize o microfone no navegador.');
       return;
@@ -294,12 +306,12 @@ export const ConversationView: React.FC = () => {
     setRecordDuration(0);
     if (recordTimerRef.current) clearInterval(recordTimerRef.current);
     recordTimerRef.current = setInterval(() => {
-      setRecordDuration((prev) => prev + 1);
+      if (isMountedRef.current) setRecordDuration((prev) => prev + 1);
     }, 1000);
 
     speechService.startListening(
       (text) => {
-        if (text && text.trim()) {
+        if (isMountedRef.current && text && text.trim()) {
           setInputText(text.trim());
         }
       },
@@ -308,13 +320,16 @@ export const ConversationView: React.FC = () => {
       },
       undefined,
       () => {
-        console.log('[ConversationView VAD] Envio automático disparado por pausa na fala.');
-        handleFinishAndSendAudioRecording();
+        if (isMountedRef.current) {
+          console.log('[ConversationView VAD] Envio automático disparado por pausa na fala.');
+          void handleFinishAndSendAudioRecording();
+        }
       }
     );
   };
 
   const handleCancelAudioRecording = () => {
+    isFinishingAudioRef.current = false;
     if (recordTimerRef.current) {
       clearInterval(recordTimerRef.current);
       recordTimerRef.current = null;
@@ -326,6 +341,9 @@ export const ConversationView: React.FC = () => {
   };
 
   const handleFinishAndSendAudioRecording = async () => {
+    if (isFinishingAudioRef.current) return;
+    isFinishingAudioRef.current = true;
+
     if (recordTimerRef.current) {
       clearInterval(recordTimerRef.current);
       recordTimerRef.current = null;
@@ -334,29 +352,33 @@ export const ConversationView: React.FC = () => {
     setIsRecordingAudio(false);
     setRecordDuration(0);
 
-    const audioBlob = await speechService.getRecordedAudioBlob();
-    speechService.stopListening();
-
-    const directText = inputText.trim();
-
-    // Se o usuário já tinha texto digitado ou gerado pelo SpeechRecognition
-    if (directText) {
-      setInputText('');
-      await sendMessage(directText, undefined, audioBlob || undefined);
-      return;
-    }
-
-    // Se não há texto, precisamos do áudio gravado para transcrever via Gemini
-    if (!audioBlob) {
-      setRecordingNotice('Nenhum áudio foi capturado pelo microfone. Verifique se o microfone está ativo no navegador e se o fone não está mudo.');
-      return;
-    }
-
-    setIsTranscribing(true);
-    setRecordingNotice(null);
-
     try {
+      const audioBlob = await speechService.getRecordedAudioBlob();
+      if (!useLioraStore.getState().isVoiceActive) {
+        speechService.stopListening();
+      }
+      if (!isMountedRef.current) return;
+
+      const directText = inputText.trim();
+
+      // Se o usuário já tinha texto digitado ou gerado pelo SpeechRecognition
+      if (directText) {
+        setInputText('');
+        await sendMessage(directText, undefined, audioBlob || undefined);
+        return;
+      }
+
+      // Se não há texto, precisamos do áudio gravado para transcrever via Gemini
+      if (!audioBlob) {
+        setRecordingNotice('Nenhum áudio foi capturado pelo microfone. Verifique se o microfone está ativo no navegador e se o fone não está mudo.');
+        return;
+      }
+
+      setIsTranscribing(true);
+      setRecordingNotice(null);
+
       const transRes = await speechService.transcribeAudio(audioBlob);
+      if (!isMountedRef.current) return;
       if (transRes.success && transRes.hasSpeech && transRes.text) {
         // Envia o texto falado real do usuário!
         await sendMessage(transRes.text, undefined, audioBlob);
@@ -365,9 +387,12 @@ export const ConversationView: React.FC = () => {
       }
     } catch (e: any) {
       console.error('[ConversationView] Erro ao transcrever:', e);
-      setRecordingNotice('Falha ao transcrever o áudio com o Gemini.');
+      if (isMountedRef.current) {
+        setRecordingNotice('Falha ao transcrever o áudio com o Gemini.');
+      }
     } finally {
-      setIsTranscribing(false);
+      isFinishingAudioRef.current = false;
+      if (isMountedRef.current) setIsTranscribing(false);
     }
   };
 
@@ -412,9 +437,7 @@ export const ConversationView: React.FC = () => {
         {conversationSubTab === 'text' && (
           <div className="flex items-center gap-2">
             <button
-              onClick={() => {
-                  useLioraStore.getState().createSession();
-              }}
+              onClick={() => createSession()}
               type="button"
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[#888888] hover:text-white bg-[#141414] hover:bg-[#1A1A1A] border border-[#222222] rounded-lg transition-colors"
             >
@@ -561,7 +584,10 @@ export const ConversationView: React.FC = () => {
                               {!isUser && msg.text && (
                                 <button
                                   type="button"
-                                  onClick={() => speechService.speak(msg.text)}
+                                  onClick={() => {
+                                    speechService.unlockAudio();
+                                    speechService.speak(msg.text);
+                                  }}
                                   className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1C1C1C] hover:bg-[#252525] text-[#AAAAAA] hover:text-white transition-colors border border-[#333333]"
                                   title="Ouvir resposta falada em voz alta"
                                 >
@@ -707,7 +733,7 @@ export const ConversationView: React.FC = () => {
                     /* Transcribing Spinner */
                     <div className="flex-1 flex items-center justify-center gap-2.5 px-4 py-3 bg-[#171717] border border-[#333333] rounded-xl text-xs text-[#CCCCCC]">
                       <Loader2 className="w-4 h-4 animate-spin text-[var(--accent-primary)]" />
-                      <span>Transcrevendo sua fala com Gemini 3.5...</span>
+                      <span>Transcrevendo sua fala via Gemini...</span>
                     </div>
                   ) : (
                     /* Normal Input Field */
@@ -802,22 +828,41 @@ export const ConversationView: React.FC = () => {
             <h3 className="text-lg font-bold text-white">Histórico de Sessões</h3>
             
             <div className="space-y-3 mt-6">
-              {sessions.map((session) => (
-                <div key={session.id} 
-                     onClick={() => {
-                         openSession(session.id);
-                         setConversationSubTab('text');
-                     }}
-                     className="bg-[#141414] hover:bg-[#1A1A1A] border border-[#222222] rounded-xl p-4 flex items-center justify-between cursor-pointer transition-colors">
-                  <div>
-                    <h4 className="font-semibold text-white text-sm">{session.title}</h4>
-                    <span className="text-xs text-[#888888]">{new Date(session.updatedAt).toLocaleDateString()}</span>
+              {sessions.map((session) => {
+                const parsedDate = new Date(session.updatedAt);
+                const formattedDate = Number.isNaN(parsedDate.getTime())
+                  ? 'Data recente'
+                  : parsedDate.toLocaleDateString('pt-BR');
+                return (
+                  <div
+                    key={session.id}
+                    className="bg-[#141414] hover:bg-[#1A1A1A] border border-[#222222] rounded-xl p-2 pl-4 pr-3 flex items-center justify-between gap-3 transition-colors"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openSession(session.id);
+                        setConversationSubTab('text');
+                      }}
+                      className="flex-1 text-left py-2 min-w-0 focus:outline-none"
+                    >
+                      <h4 className="font-semibold text-white text-sm truncate">{session.title}</h4>
+                      <span className="text-xs text-[#888888]">
+                        {formattedDate} • {session.messages.length} mensagens
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteSession(session.id)}
+                      aria-label={`Excluir conversa ${session.title}`}
+                      title={`Excluir conversa ${session.title}`}
+                      className="p-2 text-[#666666] hover:text-red-400 rounded-lg hover:bg-[#222222] transition-colors shrink-0"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); deleteSession(session.id); }} className="text-[#666666] hover:text-red-400">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
               {sessions.length === 0 && (
                   <p className="text-sm text-[#666666]">Nenhuma conversa salva ainda.</p>
               )}
@@ -852,6 +897,7 @@ export const ConversationView: React.FC = () => {
               </label>
               {availableDevices.length > 0 ? (
                 <select
+                  aria-label="Selecionar dispositivo de microfone"
                   value={selectedDevice}
                   onChange={(e) => handleDeviceChange(e.target.value)}
                   className="w-full bg-[#1C1C1C] border border-[#333333] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-red-500 transition-colors"

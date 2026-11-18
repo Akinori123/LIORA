@@ -9,6 +9,7 @@ import { permissionEngine, PermissionEngine } from '../security/permissionEngine
 import { ToolRiskLevel } from '../tools/types';
 import { isTauriEnvironment, invokeTauri } from '../security/localBridge';
 import { auditLogger } from '../security/auditLogger';
+import { computeParametersHash } from '../security/canonicalizer';
 import { eventBus } from '../utils/eventBus';
 import { storageAdapter } from './storageAdapter';
 
@@ -151,6 +152,18 @@ export class DevicesManager {
     return Array.from(this.devices.values());
   }
 
+  public reloadFromStorage(pairedDevicesOverride?: DeviceEntity[]): void {
+    this.devices.clear();
+    if (typeof localStorage !== 'undefined' && Array.isArray(pairedDevicesOverride)) {
+      try {
+        const filtered = pairedDevicesOverride.filter(d => d && d.id && d.id !== 'dev-1');
+        localStorage.setItem(USER_DEVICES_STORAGE_KEY, JSON.stringify(filtered));
+      } catch {}
+    }
+    this.initDefaultDevices();
+    this.loadStoredCommandLogs();
+  }
+
   public getDevice(id: string): DeviceEntity | undefined {
     return this.devices.get(id);
   }
@@ -162,6 +175,9 @@ export class DevicesManager {
     dev.connected = connected;
     dev.status = connected ? 'ONLINE' : 'OFFLINE';
     dev.lastSeen = 'Agora';
+    if (id !== 'dev-1') {
+      this.persistUserDevices();
+    }
 
     eventBus.publish('DEVICE_STATUS_CHANGED', { deviceId: id, connected, name: dev.name, timestamp: new Date().toISOString() });
 
@@ -212,7 +228,7 @@ export class DevicesManager {
     // Para nós remotos (PULO protocol ping)
     const isOnline = dev.connected && dev.status !== 'OFFLINE';
     dev.connected = isOnline;
-    dev.status = isOnline ? (dev.type === 'smarthome' && !dev.connected ? 'WARNING' : 'ONLINE') : 'OFFLINE';
+    dev.status = isOnline ? (dev.status === 'WARNING' ? 'WARNING' : 'ONLINE') : 'OFFLINE';
     dev.lastSeen = isOnline ? 'Agora' : dev.lastSeen;
 
     return { connected: dev.connected, status: dev.status };
@@ -352,36 +368,51 @@ export class DevicesManager {
     deviceId: string,
     commandType: DeviceCommand['commandType'],
     riskLevel: ToolRiskLevel = 'R0',
-    payload: Record<string, any> = {}
+    payload: Record<string, any> = {},
+    options?: { consentToken?: string; uiConfirmed?: boolean; sessionId?: string }
   ): Promise<DeviceCommand> {
     const timestamp = new Date().toISOString();
     const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const sessionId = options?.sessionId || 'devices-session';
 
     const dev = this.devices.get(deviceId);
     const deviceName = dev?.name || 'Dispositivo Desconhecido';
+    const commandParams = { deviceId, commandType, ...payload };
+
+    let consentToken = options?.consentToken;
+    if (!consentToken && options?.uiConfirmed && riskLevel !== 'R0') {
+      try {
+        const paramsHash = computeParametersHash(commandParams);
+        const issued = await this.permissionEngine.issueConsentToken('device_command', paramsHash, sessionId);
+        consentToken = issued.token;
+      } catch (err) {
+        console.warn('[DevicesManager] Falha ao emitir token HMAC de confirmação da UI:', err);
+      }
+    }
 
     // 1. Avaliação prévia via PermissionEngine usando o NOME REAL do comando
-    // de dispositivo. BUG CRÍTICO CORRIGIDO: avaliava como 'system_info' (R0 da
-    // whitelist) para "passar na whitelist" — mascarando comandos REBOOT/TOGGLE
-    // (R2 destrutivos) como leitura. Agora avalia a tool virtual
-    // 'device_command' com o riskLevel real informado, e a decisão DENY bloqueia.
+    // de dispositivo. Comandos R1+ exigem token HMAC explícito (uiConfirmed no modal)
+    // ou consentToken válido para não burlar o motor de permissões.
     const evaluation = await this.permissionEngine.evaluate(
       'device_command',
-      { deviceId, commandType, ...payload },
+      commandParams,
       {
-        sessionId: 'devices-session',
+        sessionId,
         serverTimestamp: Date.now(),
         clientIp: '127.0.0.1'
       },
-      { riskLevel }
+      { riskLevel, consentToken }
     );
 
     let status: DeviceCommand['status'] = 'EXECUTED';
     let resultSummary = `Comando ${commandType} enviado com sucesso para ${deviceName}.`;
 
     if (evaluation.decision === 'DENY') {
-      status = 'BLOCKED_BY_POLICY';
-      resultSummary = `Comando bloqueado pelo Permission Engine: ${evaluation.reason}`;
+      const needsConfirm = evaluation.requiredConfirmation || evaluation.code === 'REQUIRES_USER_CONFIRMATION';
+      status = needsConfirm ? 'WAITING_CONSENT' : 'BLOCKED_BY_POLICY';
+      resultSummary = needsConfirm
+        ? `Comando de atuador ${riskLevel} requer confirmação humana explícita.`
+        : `Comando bloqueado pelo Permission Engine: ${evaluation.reason}`;
 
       try {
         auditLogger.logEvent({
@@ -391,7 +422,7 @@ export class DevicesManager {
           toolName: 'devices_manager',
           riskLevel,
           decision: 'DENY',
-          denialCode: 'TOOL_EXPLICITLY_DENIED',
+          denialCode: evaluation.code || 'TOOL_EXPLICITLY_DENIED',
           sessionId: 'devices-session',
           durationMs: 0,
           simulated: true
@@ -399,9 +430,6 @@ export class DevicesManager {
       } catch (err) {
         console.warn('[DevicesManager] Erro ao registrar comando bloqueado no auditLogger:', err);
       }
-    } else if (riskLevel === 'R1' || riskLevel === 'R2' || riskLevel === 'R3') {
-      status = 'WAITING_CONSENT';
-      resultSummary = `Comando de atuador R1 requer confirmação humana explícita.`;
     }
 
     const commandItem: DeviceCommand = {

@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { 
   Key, 
@@ -11,17 +12,15 @@ import {
   CheckCircle2, 
   AlertTriangle, 
   XCircle, 
-  Activity, 
   Webhook, 
-  Plus, 
   RefreshCw, 
-  Lock, 
   Globe, 
-  Sliders, 
   Cpu, 
   CreditCard, 
   Database, 
   Cloud,
+  MessageSquare,
+  Calendar,
   X,
   Send,
   Eye,
@@ -43,10 +42,23 @@ export const IntegrationsView: React.FC = () => {
     testServiceConnection, 
     toggleServiceScope, 
     simulateIncomingWebhook 
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow(state => ({
+      services: state.services,
+      webhookLogs: state.webhookLogs,
+      keychainFallbackActive: state.keychainFallbackActive,
+      syncServicesFromEnv: state.syncServicesFromEnv,
+      connectService: state.connectService,
+      disconnectService: state.disconnectService,
+      testServiceConnection: state.testServiceConnection,
+      toggleServiceScope: state.toggleServiceScope,
+      simulateIncomingWebhook: state.simulateIncomingWebhook
+    }))
+  );
 
   const [selectedCategory, setSelectedCategory] = useState<IntegrationCategory | 'all'>('all');
   const [testingServiceId, setTestingServiceId] = useState<string | null>(null);
+  const [pingFeedback, setPingFeedback] = useState<{ serviceId: string; text: string; ok: boolean } | null>(null);
   
   // Modal de Conexão
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
@@ -66,13 +78,18 @@ export const IntegrationsView: React.FC = () => {
   // CORREÇÃO (Etapa A): modal guiado para serviços de E-mail (IMAP/SMTP)
   const [isEmailSetupOpen, setIsEmailSetupOpen] = useState(false);
 
+  const isMountedRef = React.useRef(true);
   const pingTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingFeedbackTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const webhookTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   React.useEffect(() => {
+    isMountedRef.current = true;
     void syncServicesFromEnv();
     return () => {
+      isMountedRef.current = false;
       if (pingTimerRef.current) clearTimeout(pingTimerRef.current);
+      if (pingFeedbackTimerRef.current) clearTimeout(pingFeedbackTimerRef.current);
       if (webhookTimerRef.current) clearTimeout(webhookTimerRef.current);
     };
   }, [syncServicesFromEnv]);
@@ -110,26 +127,57 @@ export const IntegrationsView: React.FC = () => {
       const success = await connectService(activeService.id, inputKey.trim(), {
         endpointUrl: customEndpoint.trim() || undefined
       });
-
+      if (!isMountedRef.current) return;
       if (success) {
         setIsConnectModalOpen(false);
       } else {
         setConnectError('Falha ao autenticar com o provedor.');
       }
     } catch (err: any) {
-      setConnectError(err?.message || 'Erro inesperado.');
+      if (isMountedRef.current) {
+        setConnectError(err?.message || 'Erro inesperado.');
+      }
     }
   };
 
   const handleTestPing = async (serviceId: string) => {
     setTestingServiceId(serviceId);
+    setPingFeedback(null);
     try {
-      await testServiceConnection(serviceId);
+      const latencyMs = await testServiceConnection(serviceId);
+      if (!isMountedRef.current) return;
+      const updatedSvc = useLioraStore.getState().services.find((s) => s.id === serviceId);
+      const ok =
+        Number.isFinite(latencyMs) &&
+        latencyMs >= 0 &&
+        updatedSvc?.status !== 'ERROR' &&
+        updatedSvc?.status !== 'DISCONNECTED';
+      setPingFeedback({
+        serviceId,
+        ok,
+        text: ok
+          ? `Conexão verificada e operacional (${latencyMs} ms).`
+          : 'Falha ao validar conectividade com o serviço.'
+      });
+    } catch (err: any) {
+      if (isMountedRef.current) {
+        setPingFeedback({
+          serviceId,
+          ok: false,
+          text: err?.message || 'Erro de rede ao testar conexão.'
+        });
+      }
     } finally {
-      if (pingTimerRef.current) clearTimeout(pingTimerRef.current);
-      pingTimerRef.current = setTimeout(() => {
-        setTestingServiceId(null);
-      }, 400);
+      if (isMountedRef.current) {
+        if (pingTimerRef.current) clearTimeout(pingTimerRef.current);
+        pingTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setTestingServiceId(null);
+        }, 400);
+        if (pingFeedbackTimerRef.current) clearTimeout(pingFeedbackTimerRef.current);
+        pingFeedbackTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setPingFeedback(null);
+        }, 5000);
+      }
     }
   };
 
@@ -149,13 +197,21 @@ export const IntegrationsView: React.FC = () => {
 
     try {
       const res = await simulateIncomingWebhook(simProvider, simEventType, parsedPayload);
-      setWebhookFeedback(`Webhook ${res.id} recebido com sucesso e despachado ao EventBus!`);
+      if (isMountedRef.current) {
+        setWebhookFeedback(`Webhook ${res.id} recebido com sucesso e despachado ao EventBus!`);
+      }
     } catch {
-      setWebhookFeedback('Erro ao despachar webhook.');
+      if (isMountedRef.current) {
+        setWebhookFeedback('Erro ao despachar webhook.');
+      }
     } finally {
-      setIsSimulating(false);
-      if (webhookTimerRef.current) clearTimeout(webhookTimerRef.current);
-      webhookTimerRef.current = setTimeout(() => setWebhookFeedback(null), 5000);
+      if (isMountedRef.current) {
+        setIsSimulating(false);
+        if (webhookTimerRef.current) clearTimeout(webhookTimerRef.current);
+        webhookTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setWebhookFeedback(null);
+        }, 5000);
+      }
     }
   };
 
@@ -163,9 +219,11 @@ export const IntegrationsView: React.FC = () => {
     switch (category) {
       case 'ai': return <Cpu className="w-4 h-4 text-[var(--accent-primary)]" />;
       case 'cloud': return <Cloud className="w-4 h-4 text-blue-400" />;
+      case 'social': return <MessageSquare className="w-4 h-4 text-sky-400" />;
+      case 'productivity': return <Calendar className="w-4 h-4 text-emerald-400" />;
       case 'finance': return <CreditCard className="w-4 h-4 text-emerald-400" />;
       case 'database': return <Database className="w-4 h-4 text-amber-400" />;
-      default: return <Globe className="w-4 h-4 text-purple-400" />;
+      default: return <Globe className="w-4 h-4 text-[var(--accent-primary)]" />;
     }
   };
 
@@ -184,9 +242,9 @@ export const IntegrationsView: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-2xl font-display font-bold text-white">Central de Conexões & Cofre de Chaves</h2>
             <span className="px-2.5 py-0.5 rounded text-[10px] font-mono uppercase bg-[#141414] border border-[#222222] text-[#A8A8A8]">
               Blindagem de Produção • Vault Ativo
@@ -196,17 +254,18 @@ export const IntegrationsView: React.FC = () => {
             Gestão protegida de chaves de API, isolamento de escopos, anti-flapping MCP, anti-replay e monitoramento de latência.
           </p>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#141414] border border-[#222222] rounded-lg text-xs font-mono text-[#10b981]">
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#141414] border border-[#222222] rounded-lg text-xs font-mono text-[#10b981] shrink-0 self-start sm:self-auto">
           <ShieldCheck className="w-4 h-4" />
           <span>Zero-Leakage Vault Ativo</span>
         </div>
       </div>
 
       {/* Category Tabs Filter */}
-      <div className="flex items-center gap-2 border-b border-[#222222] pb-3">
-        {(['all', 'ai', 'cloud', 'database', 'finance'] as const).map((cat) => (
+      <div className="flex flex-wrap items-center gap-2 border-b border-[#222222] pb-3">
+        {(['all', 'ai', 'cloud', 'productivity', 'social', 'database', 'finance'] as const).map((cat) => (
           <button
             key={cat}
+            type="button"
             onClick={() => setSelectedCategory(cat)}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               selectedCategory === cat 
@@ -217,6 +276,8 @@ export const IntegrationsView: React.FC = () => {
             {cat === 'all' ? 'Todos os Serviços' :
              cat === 'ai' ? 'Modelos & IA' :
              cat === 'cloud' ? 'Cloud & CI/CD' :
+             cat === 'productivity' ? 'Produtividade' :
+             cat === 'social' ? 'Social & Mensagens' :
              cat === 'database' ? 'Banco de Dados' : 'Finanças & Pagamentos'}
           </button>
         ))}
@@ -224,6 +285,11 @@ export const IntegrationsView: React.FC = () => {
 
       {/* Services Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        {filteredServices.length === 0 && (
+          <div className="col-span-full bg-[#111111] border border-[#222222] rounded-xl p-8 text-center text-xs text-[#888888]">
+            Nenhuma integração encontrada nesta categoria.
+          </div>
+        )}
         {filteredServices.map((service) => {
           const isTesting = testingServiceId === service.id;
           const isConnected = service.status === 'CONNECTED';
@@ -329,51 +395,66 @@ export const IntegrationsView: React.FC = () => {
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center justify-between pt-3 border-t border-[#1E1E1E]">
-                <div className="flex items-center gap-2">
-                  {isConnected && (
-                    <button
-                      onClick={() => handleTestPing(service.id)}
-                      disabled={isTesting}
-                      className="px-3 py-1.5 bg-[var(--accent-bg)] border border-[var(--accent-border)] text-[var(--accent-primary)] rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors disabled:opacity-50 hover:opacity-90"
-                      title="Testar conexão e latência"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} />
-                      <span>{isTesting ? 'Testando...' : 'Testar Ping'}</span>
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {isConnected ? (
-                    <>
+              <div className="space-y-2 pt-3 border-t border-[#1E1E1E]">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    {isConnected && (
                       <button
+                        type="button"
+                        onClick={() => handleTestPing(service.id)}
+                        disabled={isTesting}
+                        className="px-3 py-1.5 bg-[var(--accent-bg)] border border-[var(--accent-border)] text-[var(--accent-primary)] rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors disabled:opacity-50 hover:opacity-90"
+                        title="Testar conexão e latência"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isTesting ? 'animate-spin' : ''}`} />
+                        <span>{isTesting ? 'Testando...' : 'Testar Ping'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {isConnected ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenConnect(service)}
+                          className="px-3 py-1.5 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-[var(--accent-glow)] hover:opacity-90"
+                          style={{ backgroundColor: 'var(--accent-primary)' }}
+                          title="Alterar chave ou endpoint"
+                        >
+                          <Key className="w-3.5 h-3.5" />
+                          <span>Configurar</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => disconnectService(service.id)}
+                          className="px-3 py-1.5 bg-[#171717] hover:bg-red-500/10 border border-[#2E2E2E] hover:border-red-500/30 text-xs font-mono text-[#888888] hover:text-red-400 rounded-lg transition-colors"
+                        >
+                          Desconectar
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
                         onClick={() => handleOpenConnect(service)}
-                        className="px-3 py-1.5 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-[var(--accent-glow)] hover:opacity-90"
+                        className="px-4 py-1.5 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-[var(--accent-glow)] hover:opacity-90"
                         style={{ backgroundColor: 'var(--accent-primary)' }}
-                        title="Alterar chave ou endpoint"
                       >
                         <Key className="w-3.5 h-3.5" />
-                        <span>Configurar</span>
+                        <span>Conectar</span>
                       </button>
-                      <button
-                        onClick={() => disconnectService(service.id)}
-                        className="px-3 py-1.5 bg-[#171717] hover:bg-red-500/10 border border-[#2E2E2E] hover:border-red-500/30 text-xs font-mono text-[#888888] hover:text-red-400 rounded-lg transition-colors"
-                      >
-                        Desconectar
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      onClick={() => handleOpenConnect(service)}
-                      className="px-4 py-1.5 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-[var(--accent-glow)] hover:opacity-90"
-                      style={{ backgroundColor: 'var(--accent-primary)' }}
-                    >
-                      <Key className="w-3.5 h-3.5" />
-                      <span>Conectar</span>
-                    </button>
-                  )}
+                    )}
+                  </div>
                 </div>
+                {pingFeedback?.serviceId === service.id && (
+                  <p role="status" className={`text-[11px] font-mono px-2.5 py-1.5 rounded-lg border ${
+                    pingFeedback.ok
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : 'bg-red-500/10 text-red-400 border-red-500/20'
+                  }`}>
+                    {pingFeedback.text}
+                  </p>
+                )}
               </div>
             </div>
           );
@@ -394,7 +475,7 @@ export const IntegrationsView: React.FC = () => {
               </p>
             </div>
           </div>
-          <span className="px-2.5 py-1 bg-purple-500/10 border border-purple-500/20 text-purple-400 font-mono text-xs rounded">
+          <span className="px-2.5 py-1 bg-[var(--accent-bg)] border border-[var(--accent-border)] text-[var(--accent-primary)] font-mono text-xs rounded">
             Endpoint: /api/webhooks/:provider
           </span>
         </div>
@@ -408,8 +489,9 @@ export const IntegrationsView: React.FC = () => {
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-[11px] font-mono text-[#888888] mb-1">Provedor</label>
+                <label htmlFor="int-sim-provider" className="block text-[11px] font-mono text-[#888888] mb-1">Provedor</label>
                 <select
+                  id="int-sim-provider"
                   value={simProvider}
                   onChange={(e) => {
                     const prov = e.target.value as IntegrationProviderId;
@@ -438,8 +520,9 @@ export const IntegrationsView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-mono text-[#888888] mb-1">Tipo de Evento</label>
+                <label htmlFor="int-sim-event" className="block text-[11px] font-mono text-[#888888] mb-1">Tipo de Evento</label>
                 <input
+                  id="int-sim-event"
                   type="text"
                   value={simEventType}
                   onChange={(e) => setSimEventType(e.target.value)}
@@ -450,8 +533,9 @@ export const IntegrationsView: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-[11px] font-mono text-[#888888] mb-1">Payload JSON (Simulado)</label>
+              <label htmlFor="int-sim-payload" className="block text-[11px] font-mono text-[#888888] mb-1">Payload JSON (Simulado)</label>
               <textarea
+                id="int-sim-payload"
                 rows={4}
                 value={simPayloadJson}
                 onChange={(e) => setSimPayloadJson(e.target.value)}
@@ -487,27 +571,31 @@ export const IntegrationsView: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {webhookLogs.map((wh) => (
-                  <div 
-                    key={wh.id}
-                    className="bg-[#141414] border border-[#222222] rounded-lg p-3 text-xs space-y-1.5"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 bg-[#1F1F1F] text-[var(--accent-primary)] font-mono text-[10px] uppercase rounded">
-                          {wh.provider}
+                {webhookLogs.map((wh) => {
+                  const whDate = new Date(wh.timestamp);
+                  const safeTime = Number.isNaN(whDate.getTime()) ? '--:--:--' : whDate.toLocaleTimeString('pt-BR');
+                  return (
+                    <div 
+                      key={wh.id}
+                      className="bg-[#141414] border border-[#222222] rounded-lg p-3 text-xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 bg-[#1F1F1F] text-[var(--accent-primary)] font-mono text-[10px] uppercase rounded">
+                            {wh.provider}
+                          </span>
+                          <span className="font-semibold text-white">{wh.eventType}</span>
+                        </div>
+                        <span className="text-[10px] font-mono text-[#888888]">
+                          {safeTime}
                         </span>
-                        <span className="font-semibold text-white">{wh.eventType}</span>
                       </div>
-                      <span className="text-[10px] font-mono text-[#888888]">
-                        {new Date(wh.timestamp).toLocaleTimeString()}
-                      </span>
+                      <pre className="text-[11px] font-mono text-[#A8A8A8] bg-[#0A0A0A] p-2 rounded overflow-x-auto">
+                        {JSON.stringify(wh.rawPayloadSafe, null, 2)}
+                      </pre>
                     </div>
-                    <pre className="text-[11px] font-mono text-[#A8A8A8] bg-[#0A0A0A] p-2 rounded overflow-x-auto">
-                      {JSON.stringify(wh.rawPayloadSafe, null, 2)}
-                    </pre>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -524,7 +612,12 @@ export const IntegrationsView: React.FC = () => {
                 <h3 className="font-bold text-lg text-white">Conectar {activeService.name}</h3>
               </div>
               <button 
-                onClick={() => setIsConnectModalOpen(false)}
+                type="button"
+                onClick={() => {
+                  setConnectError(null);
+                  setIsConnectModalOpen(false);
+                }}
+                aria-label="Fechar modal de conexão"
                 className="text-[#888888] hover:text-white p-1"
               >
                 <X className="w-5 h-5" />
@@ -533,14 +626,18 @@ export const IntegrationsView: React.FC = () => {
 
             <form onSubmit={handleConnectSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                <label htmlFor="int-connect-key" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                   Chave de API / Token Secreto
                 </label>
                 <div className="relative">
                   <input 
+                    id="int-connect-key"
                     type={showKey ? 'text' : 'password'}
                     value={inputKey}
-                    onChange={(e) => setInputKey(e.target.value)}
+                    onChange={(e) => {
+                      setInputKey(e.target.value);
+                      if (connectError) setConnectError(null);
+                    }}
                     placeholder="Cole aqui o token de autenticação..."
                     className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)] pr-10 font-mono"
                     required
@@ -548,6 +645,7 @@ export const IntegrationsView: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setShowKey(!showKey)}
+                    aria-label={showKey ? 'Ocultar chave secreta' : 'Mostrar chave secreta'}
                     className="absolute right-3 top-2.5 text-[#888888] hover:text-white"
                   >
                     {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -559,10 +657,11 @@ export const IntegrationsView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+                <label htmlFor="int-connect-endpoint" className="block text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
                   URL do Endpoint / API (Opcional)
                 </label>
                 <input 
+                  id="int-connect-endpoint"
                   type="text"
                   value={customEndpoint}
                   onChange={(e) => setCustomEndpoint(e.target.value)}
@@ -572,7 +671,7 @@ export const IntegrationsView: React.FC = () => {
               </div>
 
               {connectError && (
-                <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs font-mono text-red-400">
+                <div role="alert" className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs font-mono text-red-400">
                   {connectError}
                 </div>
               )}
@@ -580,7 +679,10 @@ export const IntegrationsView: React.FC = () => {
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-[#222222]">
                 <button
                   type="button"
-                  onClick={() => setIsConnectModalOpen(false)}
+                  onClick={() => {
+                    setConnectError(null);
+                    setIsConnectModalOpen(false);
+                  }}
                   className="px-4 py-2 bg-[#171717] hover:bg-[#222222] text-[#888888] hover:text-white text-xs font-semibold rounded-lg transition-colors"
                 >
                   Cancelar

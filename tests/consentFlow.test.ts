@@ -61,29 +61,85 @@ test('CNS-02: Consumo do token efêmero com aprovação e bloqueio de replay', a
   assert.strictEqual(consumeRes2.success, false, 'Replay de token consumido deve falhar');
   assert.strictEqual(consumeRes2.denialCode, 'CONSENT_TOKEN_ALREADY_USED');
 
-  // 4. Teste de aprovação no store
+  // 4. Teste de aprovação no store com fetch mockado para /api/security/ui-consent e /api/tools/execute
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('/api/security/ui-consent')) {
+      return new Response(
+        JSON.stringify({ success: true, token: 'ui-consent-mock-token', expiresInSeconds: 60 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        success: true,
+        toolName: 'system_info',
+        decision: 'ALLOW',
+        riskLevel: 'R0',
+        data: { os: 'linux' },
+        simulated: true,
+        timestamp: new Date().toISOString()
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as typeof fetch;
+
   const store = useLioraStore.getState();
-  store.setPendingConsent({
-    auditId: 'audit-approve-test',
-    ruleId: 'rule-approve-test',
-    toolName: 'system_info',
-    riskLevel: 'R1',
-    parameters: { detailLevel: 'standard' },
-    parametersHash: computeParametersHash({ detailLevel: 'standard' }),
-    consentToken: 'token-approve',
-    sessionId: 'session-store-approve',
-    expiresAt: Date.now() + 60000,
-    status: 'PENDING'
-  });
+  try {
+    store.setPendingConsent({
+      auditId: 'audit-approve-test',
+      ruleId: 'rule-approve-test',
+      toolName: 'system_info',
+      riskLevel: 'R1',
+      parameters: { detailLevel: 'standard' },
+      parametersHash: computeParametersHash({ detailLevel: 'standard' }),
+      consentToken: 'token-approve',
+      sessionId: 'session-store-approve',
+      expiresAt: Date.now() + 60000,
+      status: 'PENDING'
+    });
 
-  await store.approveConsent();
-  const updated = useLioraStore.getState().pendingConsent;
-  assert.ok(updated);
-  assert.strictEqual(updated.status, 'APPROVED', 'O status do consentimento deve ser transicionado para APPROVED');
+    const approveRes = await store.approveConsent();
+    assert.ok(approveRes && approveRes.success === true, 'approveConsent deve retornar resultado de execução bem-sucedido');
+    assert.strictEqual(approveRes.toolName, 'system_info');
+    const updated = useLioraStore.getState().pendingConsent;
+    assert.ok(updated);
+    assert.strictEqual(updated.status, 'APPROVED', 'O status do consentimento deve ser transicionado para APPROVED');
 
-  // Verificar se gerou log de sucesso
-  const logs = useLioraStore.getState().activityLogs;
-  assert.ok(logs.some(l => l.summary.includes('Consentimento Aprovado: system_info')));
+    // Verificar se gerou log de sucesso
+    const logs = useLioraStore.getState().activityLogs;
+    assert.ok(logs.some(l => l.summary.includes('Consentimento Aprovado: system_info')));
+
+    // 5. Regressão: falha no backend deve reverter status para PENDING sem descartar card
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ success: false, error: 'Erro interno simulado' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+
+    store.setPendingConsent({
+      auditId: 'audit-approve-fail',
+      ruleId: 'rule-approve-fail',
+      toolName: 'workspace_write_file',
+      riskLevel: 'R1',
+      parameters: { path: 'relatorio.txt', content: 'abc' },
+      parametersHash: computeParametersHash({ path: 'relatorio.txt', content: 'abc' }),
+      consentToken: 'token-fail',
+      sessionId: 'session-store-fail',
+      expiresAt: Date.now() + 60000,
+      status: 'PENDING'
+    });
+
+    const failedRes = await store.approveConsent();
+    assert.ok(failedRes && failedRes.success === false, 'Em erro HTTP 500, approveConsent deve retornar resultado de falha');
+    assert.match(String(failedRes.error), /Erro interno simulado/);
+    const rolledBack = useLioraStore.getState().pendingConsent;
+    assert.ok(rolledBack);
+    assert.strictEqual(rolledBack.status, 'PENDING', 'Em erro de rede/HTTP, status deve voltar para PENDING');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('CNS-03: Rejeição manual pelo usuário com alteração de status e registro de atividade', () => {

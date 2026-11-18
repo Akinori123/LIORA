@@ -240,8 +240,8 @@ export const iotSendCommandTool: ToolDefinition<{
         denialCode: 'ACTUATOR_UNREACHABLE',
         durationMs: 12,
         sessionId: 'iot-session',
-        simulated: false
-      } as any);
+        simulated: true
+      });
       return {
         success: false,
         deviceId,
@@ -260,6 +260,8 @@ export const iotSendCommandTool: ToolDefinition<{
     device.state = newState;
     device.lastAction = `${command} (${new Date().toLocaleTimeString('pt-BR')})`;
 
+    const isSim = !executedReal;
+
     // Trilha forense de auditoria
     auditLogger.logEvent({
       auditId: `iot-${Date.now()}`,
@@ -272,8 +274,6 @@ export const iotSendCommandTool: ToolDefinition<{
       sessionId: 'iot-session',
       simulated: true
     });
-
-    const isSim = !executedReal;
     const msg = isSim
       ? `Comando '${command}' enviado ao atuador de '${device.name}' (Modo Simulado - Nenhum hardware físico conectado). Novo estado: ${newState}.`
       : `Comando '${command}' enviado com sucesso ao atuador físico de '${device.name}'. Novo estado: ${newState}.`;

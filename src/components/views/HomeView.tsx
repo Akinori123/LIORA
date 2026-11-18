@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
 import { LioraOrb } from '../LioraOrb';
 import { OrbErrorBoundary } from '../OrbErrorBoundary';
@@ -23,28 +24,18 @@ import {
   Activity,
   CheckCircle2,
   ArrowRight,
-  ArrowUpRight,
   X,
-  Volume2,
   Lock,
-  RefreshCw,
   Terminal,
-  Maximize2,
-  AlertTriangle,
-  Bot,
-  Copy,
-  Check
+  Maximize2
 } from 'lucide-react';
-import { MarkdownContent } from '../chat/MarkdownContent';
 
 export const HomeView: React.FC = () => {
   const { 
     orbState, 
     setOrbState,
     sendMessage, 
-    messages,
     isGenerating,
-    activeModel,
     activeTask, 
     devices, 
     setActiveTab, 
@@ -58,15 +49,31 @@ export const HomeView: React.FC = () => {
     addActivityLog,
     services,
     syncServicesFromEnv
-  } = useLioraStore();
+  } = useLioraStore(
+    useShallow((s) => ({
+      orbState: s.orbState,
+      setOrbState: s.setOrbState,
+      sendMessage: s.sendMessage,
+      isGenerating: s.isGenerating,
+      activeTask: s.activeTask,
+      devices: s.devices,
+      setActiveTab: s.setActiveTab,
+      toggleVoice: s.toggleVoice,
+      isVoiceActive: s.isVoiceActive,
+      isTelemetryOpen: s.isTelemetryOpen,
+      toggleTelemetry: s.toggleTelemetry,
+      closeTelemetry: s.closeTelemetry,
+      clearMessages: s.clearMessages,
+      executeTool: s.executeTool,
+      addActivityLog: s.addActivityLog,
+      services: s.services,
+      syncServicesFromEnv: s.syncServicesFromEnv
+    }))
+  );
 
   const [promptInput, setPromptInput] = useState('');
   const [audioGain, setAudioGain] = useState(0);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [isHomeResponseDismissed, setIsHomeResponseDismissed] = useState(false);
-  const [copiedText, setCopiedText] = useState(false);
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
-  const [hasInteractedOnHome, setHasInteractedOnHome] = useState(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [openRouterKeyInput, setOpenRouterKeyInput] = useState('');
@@ -86,7 +93,6 @@ export const HomeView: React.FC = () => {
   // Telemetry status
   const [cpuUsage, setCpuUsage] = useState<number>(18.4);
   const [ramUsage, setRamUsage] = useState<number>(35.0);
-  const [isLiveWsConnected, setIsLiveWsConnected] = useState<boolean>(true);
   const [activeIntegrationsCount, setActiveIntegrationsCount] = useState<number>(0);
   const [intentNotification, setIntentNotification] = useState<string | null>(null);
   // Auditoria de mapeamento: estado do teste REAL do canal WebSocket /ws/voice
@@ -162,6 +168,7 @@ export const HomeView: React.FC = () => {
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
+        if (!isMountedRef.current) return;
         const geminiConfigured = Boolean(data.gemini?.isConfigured);
         const openRouterConfigured = Boolean(data.openrouter?.isConfigured);
         const nextStatus = {
@@ -173,7 +180,8 @@ export const HomeView: React.FC = () => {
         apiKeyStatusRef.current = nextStatus;
         setApiKeyStatus(nextStatus);
         integrationsVault.hydrateFromBackendEnv(data);
-        await syncServicesFromEnv();
+        await syncServicesFromEnv({ skipRemoteFetch: true });
+        if (!isMountedRef.current) return;
         updateActiveIntegrationsCount(geminiConfigured, openRouterConfigured, integrationsVault.getServices());
       }
     } catch {
@@ -185,6 +193,7 @@ export const HomeView: React.FC = () => {
   const loadTelemetry = async () => {
     try {
       const t = await devicesManager.refreshTelemetry('dev-1');
+      if (!isMountedRef.current) return;
       if (t) {
         setCpuUsage(t.cpuUsagePercent);
         setRamUsage(t.memoryUsagePercent);
@@ -199,18 +208,20 @@ export const HomeView: React.FC = () => {
     }
   };
 
-  const wsTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const notificationTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const scanTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const copiedTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const apiKeySaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isMountedRef = useRef<boolean>(true);
+  const wsProbeRef = useRef<WebSocket | null>(null);
+  const wsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const apiKeySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Helper para exibir notificações com timer rastreado e seguro
   const showIntentNotice = (msg: string, ms: number = 3500) => {
+    if (!isMountedRef.current) return;
     setIntentNotification(msg);
     if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     notificationTimerRef.current = setTimeout(() => {
-      setIntentNotification(null);
+      if (isMountedRef.current) setIntentNotification(null);
     }, ms);
   };
 
@@ -220,60 +231,72 @@ export const HomeView: React.FC = () => {
     if (wsTestResult === 'testing') return;
     if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
     if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+    if (wsProbeRef.current) {
+      try { wsProbeRef.current.close(); } catch {}
+      wsProbeRef.current = null;
+    }
 
     setWsTestResult('testing');
     setIntentNotification('Testando canal de voz em tempo real (WebSocket /ws/voice)...');
 
     let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
+    const finish = (ok: boolean, resolvedUrl: string) => {
+      if (settled || !isMountedRef.current) return;
       settled = true;
       setWsTestResult(ok ? 'ok' : 'fail');
       setIntentNotification(ok
-        ? `Canal Live WS conectado e verificado (${wsEndpoint}).`
-        : `Canal Live WS indisponível (${wsEndpoint}). Verifique se o servidor LIORA está rodando.`);
+        ? `Canal Live WS conectado e verificado (${resolvedUrl}).`
+        : `Canal Live WS indisponível (${resolvedUrl}). Verifique se o servidor LIORA está rodando.`);
       if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
       notificationTimerRef.current = setTimeout(() => {
+        if (!isMountedRef.current) return;
         setIntentNotification(null);
         setWsTestResult('idle');
       }, 4000);
     };
 
-    let probe: WebSocket | null = null;
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host || 'localhost:3000';
       const wsUrl = `${protocol}//${host}/ws/voice`;
       setWsEndpoint(wsUrl);
-      probe = new WebSocket(wsUrl);
+      const probe = new WebSocket(wsUrl);
       probe.binaryType = 'arraybuffer';
+      wsProbeRef.current = probe;
 
-      wsTimerRef.current = setTimeout(() => finish(false), 5000);
+      wsTimerRef.current = setTimeout(() => finish(false, wsUrl), 5000);
 
       probe.onopen = () => {
         if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
-        finish(true);
-        try { probe?.close(); } catch {}
+        finish(true, wsUrl);
+        if (wsProbeRef.current === probe) wsProbeRef.current = null;
+        try { probe.close(); } catch {}
       };
       probe.onerror = () => {
         if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
-        finish(false);
+        finish(false, wsUrl);
+        if (wsProbeRef.current === probe) wsProbeRef.current = null;
       };
     } catch {
-      finish(false);
+      finish(false, wsEndpoint);
     }
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     loadApiKeyStatus();
     loadTelemetry();
     const interval = setInterval(loadTelemetry, 5000);
     return () => {
+      isMountedRef.current = false;
       clearInterval(interval);
+      if (wsProbeRef.current) {
+        try { wsProbeRef.current.close(); } catch {}
+        wsProbeRef.current = null;
+      }
       if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
       if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
       if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
-      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
       if (apiKeySaveTimerRef.current) clearTimeout(apiKeySaveTimerRef.current);
     };
   }, []);
@@ -281,7 +304,7 @@ export const HomeView: React.FC = () => {
   // Escuta nível de áudio do microfone para animar a Orb 3D em tempo real
   useEffect(() => {
     const unsub = speechService.onAudioLevel((lvl) => {
-      setAudioGain(lvl / 100);
+      if (isMountedRef.current) setAudioGain(lvl / 100);
     });
     return () => unsub();
   }, []);
@@ -296,16 +319,39 @@ export const HomeView: React.FC = () => {
         return;
       }
 
-      // Space for Push-to-Talk when active element is not an input or textarea
-      if (e.code === 'Space' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+      // Space for Push-to-Talk somente quando foco não está em controles interativos/modais
+      const activeEl = document.activeElement as HTMLElement | null;
+      const tag = activeEl?.tagName;
+      const isInteractiveTarget =
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        tag === 'BUTTON' ||
+        tag === 'A' ||
+        Boolean(activeEl?.isContentEditable) ||
+        Boolean(activeEl?.closest?.('[role="button"]'));
+
+      const hasOpenDialog = Boolean(
+        document.querySelector('[role="dialog"][aria-modal="true"], [data-liora-modal="true"]') ||
+        activeEl?.closest?.('[role="dialog"], [aria-modal="true"]')
+      );
+
+      if (
+        e.code === 'Space' &&
+        !isInteractiveTarget &&
+        !isApiKeyModalOpen &&
+        !hasOpenDialog &&
+        !useLioraStore.getState().pendingConsent
+      ) {
         e.preventDefault();
+        speechService.unlockAudio();
         toggleVoice();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleVoice]);
+  }, [toggleVoice, isApiKeyModalOpen]);
 
   // Handle Barge-in: if currently SPEAKING and user begins typing, interrupt audio
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -340,8 +386,10 @@ export const HomeView: React.FC = () => {
       setIntentNotification('Iniciando varredura analítica de hardware e workspace...');
       setOrbState('EXECUTING');
       await loadTelemetry();
+      if (!isMountedRef.current) return;
       if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
       scanTimerRef.current = setTimeout(() => {
+        if (!isMountedRef.current) return;
         setOrbState('IDLE');
         showIntentNotice('Varredura concluída com sucesso.', 3500);
       }, 1200);
@@ -368,6 +416,7 @@ export const HomeView: React.FC = () => {
       setIntentNotification(`Executando comando real: "${cmd}"`);
       try {
         const result = await executeTool('system_exec_sandbox', { command: cmd });
+        if (!isMountedRef.current) return;
         setOrbState(result.success ? 'IDLE' : 'ERROR');
         showIntentNotice(
           result.success
@@ -376,6 +425,7 @@ export const HomeView: React.FC = () => {
           6000
         );
       } catch (err: any) {
+        if (!isMountedRef.current) return;
         setOrbState('ERROR');
         showIntentNotice(`Erro: ${err?.message || 'falha de execução'}`, 6000);
       }
@@ -384,46 +434,13 @@ export const HomeView: React.FC = () => {
 
     // 4. Default intent: Conversational Chat
     // Permanece na tela inicial (Home) para não quebrar a imersão visual do Orbe 3D!
+    if (isGenerating) {
+      showIntentNotice('Aguarde a resposta atual ou interrompa na aba Conversa.');
+      return;
+    }
     const text = clean;
     setPromptInput('');
-    setHasInteractedOnHome(true);
-    setIsHomeResponseDismissed(false);
     await sendMessage(text);
-  };
-
-  // Helper para reproduzir áudio da resposta no card da Home
-  const handlePlayResponseAudio = () => {
-    const lastMsg = messages[messages.length - 1];
-    if (!lastMsg?.text) return;
-
-    if (isPlayingAudio) {
-      speechService.stopSpeaking();
-      setIsPlayingAudio(false);
-      setOrbState('IDLE');
-    } else {
-      setIsPlayingAudio(true);
-      setOrbState('SPEAKING');
-      speechService.speak(
-        lastMsg.text,
-        () => {
-          setIsPlayingAudio(true);
-          setOrbState('SPEAKING');
-        },
-        () => {
-          setIsPlayingAudio(false);
-          setOrbState('IDLE');
-        }
-      );
-    }
-  };
-
-  const handleCopyResponse = () => {
-    const lastMsg = messages[messages.length - 1];
-    if (!lastMsg?.text) return;
-    navigator.clipboard.writeText(lastMsg.text);
-    setCopiedText(true);
-    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-    copiedTimerRef.current = setTimeout(() => setCopiedText(false), 2000);
   };
 
   // Save API key to .env via backend endpoint
@@ -441,28 +458,34 @@ export const HomeView: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyName, keyValue: cleanKey })
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!isMountedRef.current) return;
       if (res.ok && data.success) {
         if (keyName === 'GEMINI_API_KEY') {
           await integrationsVault.connectService('svc-gemini', cleanKey);
           localStorage.setItem('GEMINI_API_KEY', cleanKey);
-          setGeminiKeyInput('');
+          if (isMountedRef.current) setGeminiKeyInput('');
         }
         if (keyName === 'OPENROUTER_API_KEY') {
           await integrationsVault.connectService('svc-openrouter', cleanKey);
           localStorage.setItem('OPENROUTER_API_KEY', cleanKey);
-          setOpenRouterKeyInput('');
+          if (isMountedRef.current) setOpenRouterKeyInput('');
         }
+        if (!isMountedRef.current) return;
         setApiKeySaveStatus(`Sucesso: ${keyName} gravada e ativa no Cofre com sucesso.`);
         await loadApiKeyStatus();
-        await syncServicesFromEnv();
+        if (!isMountedRef.current) return;
         if (apiKeySaveTimerRef.current) clearTimeout(apiKeySaveTimerRef.current);
-        apiKeySaveTimerRef.current = setTimeout(() => setApiKeySaveStatus(null), 4000);
+        apiKeySaveTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) setApiKeySaveStatus(null);
+        }, 4000);
       } else {
         setApiKeySaveStatus(`Erro: ${data.error || 'Falha ao salvar chave.'}`);
       }
     } catch {
-      setApiKeySaveStatus('Erro de conexão ao salvar chave no backend.');
+      if (isMountedRef.current) {
+        setApiKeySaveStatus('Erro de conexão ao salvar chave no backend.');
+      }
     }
   };
 
@@ -493,23 +516,26 @@ export const HomeView: React.FC = () => {
       </div>
 
       {/* Top Header Bar: Shield Mode, Telemetry Toggle & API Vault Shortcut */}
-      <div className="absolute top-4 left-4 right-4 z-30 flex items-center justify-between pointer-events-none">
+      <div className="absolute top-4 left-4 right-4 z-30 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
         {/* Shield Mode Indicator */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#111111]/85 border border-[#222222] backdrop-blur-md pointer-events-auto shadow-xl">
-          <Shield className="w-3.5 h-3.5 text-emerald-400" />
-          <span className="text-[11px] font-mono font-medium text-[#A8A8A8]">
-            Shield Mode: <span className="text-white">Local Soberano</span>
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#111111]/85 border border-[#222222] backdrop-blur-md pointer-events-auto shadow-xl min-w-0 max-w-full">
+          <Shield className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span className="text-[11px] font-mono font-medium text-[#A8A8A8] truncate">
+            <span className="hidden sm:inline">Shield Mode: </span>
+            <span className="text-white">Local Soberano</span>
           </span>
-          <Lock className="w-3 h-3 text-[#A8A8A8]" />
+          <Lock className="w-3 h-3 text-[#A8A8A8] shrink-0" />
         </div>
 
         {/* Right Action Buttons */}
-        <div className="flex items-center gap-2 pointer-events-auto">
+        <div className="flex items-center gap-2 pointer-events-auto shrink-0">
           {/* API Key Vault Button */}
           <button
+            type="button"
             onClick={() => setIsApiKeyModalOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#111111]/85 hover:bg-[#1A1A1A] border border-[#222222] text-xs text-[#A8A8A8] hover:text-white transition-all shadow-xl backdrop-blur-md"
             title="Cofre rápido de chaves de API (.env)"
+            aria-label="Abrir cofre rápido de chaves de API"
           >
             <Key className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
             <span className="hidden sm:inline">Cofre de API</span>
@@ -520,9 +546,11 @@ export const HomeView: React.FC = () => {
 
           {/* Context & Telemetry Drawer Toggle */}
           <button
+            type="button"
             onClick={toggleTelemetry}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#111111]/85 hover:bg-[#1A1A1A] border border-[#222222] text-xs text-[#A8A8A8] hover:text-white transition-all shadow-xl backdrop-blur-md"
             title="Alternar painel de Contexto & Telemetria"
+            aria-label="Alternar painel de Contexto e Telemetria"
           >
             <SlidersHorizontal className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
             <span className="hidden sm:inline">Telemetria</span>
@@ -608,6 +636,7 @@ export const HomeView: React.FC = () => {
                 {/* Send Button */}
                 <button
                   type="submit"
+                  aria-label="Enviar comando"
                   className="p-2.5 text-white rounded-xl transition-all shrink-0 hover:opacity-90 active:scale-95"
                   style={{ backgroundColor: 'var(--accent-primary)', boxShadow: '0 4px 14px var(--accent-glow)' }}
                   title="Enviar comando"
@@ -618,22 +647,23 @@ export const HomeView: React.FC = () => {
             </form>
 
             {/* Live Status Cards (Telemetria, WebSocket, Integrations) */}
-            <div className="grid grid-cols-3 gap-2.5 w-full max-w-lg mb-1">
+            <div className="grid grid-cols-3 gap-1.5 sm:gap-2.5 w-full max-w-lg mb-1">
               {/* Telemetry Card */}
               <button
+                type="button"
                 onClick={() => setActiveTab('devices')}
-                className="flex items-center gap-2 p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg"
+                className="flex items-center gap-1.5 sm:gap-2 p-2 sm:p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg min-w-0"
                 title="Ver detalhes de hardware"
               >
                 <div 
-                  className="p-1.5 rounded-lg bg-[#1A1A1A] transition-colors"
+                  className="hidden sm:flex p-1.5 rounded-lg bg-[#1A1A1A] transition-colors shrink-0"
                   style={{ color: 'var(--accent-primary)' }}
                 >
                   <Cpu className="w-3.5 h-3.5" />
                 </div>
-                <div className="min-w-0">
-                  <div className="text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono">CPU / RAM</div>
-                  <div className="text-xs font-semibold text-white truncate font-mono">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[9px] sm:text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono truncate">CPU / RAM</div>
+                  <div className="text-[11px] sm:text-xs font-semibold text-white truncate font-mono">
                     {cpuUsage}% / {ramUsage}%
                   </div>
                 </div>
@@ -643,40 +673,41 @@ export const HomeView: React.FC = () => {
               <button
                 type="button"
                 onClick={handleTestLiveWs}
-                className="flex items-center gap-2 p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg cursor-pointer"
+                className="flex items-center gap-1.5 sm:gap-2 p-2 sm:p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg cursor-pointer min-w-0"
                 title="Clique para testar conectividade WebSocket real (/ws/voice)"
               >
-                <div className={`p-1.5 rounded-lg bg-[#1A1A1A] transition-transform group-hover:scale-105 ${
+                <div className={`hidden sm:flex p-1.5 rounded-lg bg-[#1A1A1A] transition-transform group-hover:scale-105 shrink-0 ${
                   wsTestResult === 'ok' ? 'text-emerald-400' : wsTestResult === 'fail' ? 'text-[#FF2B2B]' : 'text-[#888888]'
                 }`}>
                   <Radio className="w-3.5 h-3.5" />
                 </div>
-                <div className="min-w-0">
-                  <div className="text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono">Live WS</div>
-                  <div className="text-xs font-semibold text-white flex items-center gap-1.5 font-mono">
-                    <span className={`w-1.5 h-1.5 rounded-full ${
+                <div className="min-w-0 flex-1">
+                  <div className="text-[9px] sm:text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono truncate">Live WS</div>
+                  <div className="text-[11px] sm:text-xs font-semibold text-white flex items-center gap-1 sm:gap-1.5 font-mono min-w-0">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                       wsTestResult === 'ok' ? 'bg-emerald-400 animate-pulse' : wsTestResult === 'fail' ? 'bg-[#FF2B2B]' : 'bg-[#888888]'
                     }`} />
-                    <span>{wsTestResult === 'ok' ? 'Conectado' : wsTestResult === 'fail' ? 'Indisponível' : 'Verificar'}</span>
+                    <span className="truncate">{wsTestResult === 'ok' ? 'Conectado' : wsTestResult === 'fail' ? 'Indisponível' : 'Verificar'}</span>
                   </div>
                 </div>
               </button>
 
               {/* Integrations Vault Card */}
               <button
+                type="button"
                 onClick={() => setActiveTab('integrations')}
-                className="flex items-center gap-2 p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg"
+                className="flex items-center gap-1.5 sm:gap-2 p-2 sm:p-2.5 rounded-xl bg-[#111111]/80 hover:bg-[#161616] border border-[#222222] backdrop-blur-lg transition-all text-left group shadow-lg min-w-0"
                 title="Acessar cofre de integrações"
               >
                 <div 
-                  className="p-1.5 rounded-lg bg-[#1A1A1A] transition-colors"
+                  className="hidden sm:flex p-1.5 rounded-lg bg-[#1A1A1A] transition-colors shrink-0"
                   style={{ color: 'var(--accent-primary)' }}
                 >
                   <Layers className="w-3.5 h-3.5" />
                 </div>
-                <div className="min-w-0">
-                  <div className="text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono">Cofre</div>
-                  <div className="text-xs font-semibold text-white truncate font-mono">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[9px] sm:text-[10px] text-[#A8A8A8] uppercase tracking-wider font-mono truncate">Cofre</div>
+                  <div className="text-[11px] sm:text-xs font-semibold text-white truncate font-mono">
                     {activeIntegrationsCount} Ativas
                   </div>
                 </div>
@@ -698,7 +729,9 @@ export const HomeView: React.FC = () => {
             <span className="w-2 h-2 rounded-full animate-ping" style={{ backgroundColor: 'var(--accent-primary)' }} />
             <span className="text-xs font-mono font-medium text-white">{getStateCopy()}</span>
             <button
+              type="button"
               onClick={() => setIsMinimized(false)}
+              aria-label="Expandir interface"
               className="p-1 rounded-full hover:bg-white/10 text-[#A8A8A8] hover:text-white transition-colors"
               title="Expandir interface"
             >
@@ -710,13 +743,20 @@ export const HomeView: React.FC = () => {
 
       {/* API Key Modal Shortcut (.env Persistence) */}
       {isApiKeyModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cofre Rápido de Chaves"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in"
+        >
           <div className="bg-[#111111] border border-[#262626] rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
             <button
+              type="button"
               onClick={() => {
                 setIsApiKeyModalOpen(false);
                 setApiKeySaveStatus(null);
               }}
+              aria-label="Fechar modal de chaves de API"
               className="absolute top-4 right-4 p-1 rounded-lg text-[#888888] hover:text-white hover:bg-[#1A1A1A] transition-colors"
             >
               <X className="w-4 h-4" />
@@ -747,12 +787,14 @@ export const HomeView: React.FC = () => {
                 <div className="flex gap-2">
                   <input
                     type="password"
+                    aria-label="Chave GEMINI_API_KEY"
                     value={geminiKeyInput}
                     onChange={(e) => setGeminiKeyInput(e.target.value)}
                     placeholder="Cole sua nova chave Gemini..."
                     className="flex-1 bg-[#161616] border border-[#2B2B2B] rounded-xl px-3 py-2 text-white placeholder-[#555] focus:outline-none focus:border-[var(--accent-primary)]"
                   />
                   <button
+                    type="button"
                     onClick={() => handleSaveApiKey('GEMINI_API_KEY', geminiKeyInput)}
                     className="px-3 py-2 text-white rounded-xl font-sans font-semibold transition-colors hover:opacity-90"
                     style={{ backgroundColor: 'var(--accent-primary)' }}
@@ -773,12 +815,14 @@ export const HomeView: React.FC = () => {
                 <div className="flex gap-2">
                   <input
                     type="password"
+                    aria-label="Chave OPENROUTER_API_KEY"
                     value={openRouterKeyInput}
                     onChange={(e) => setOpenRouterKeyInput(e.target.value)}
                     placeholder="Cole sua chave OpenRouter..."
                     className="flex-1 bg-[#161616] border border-[#2B2B2B] rounded-xl px-3 py-2 text-white placeholder-[#555] focus:outline-none focus:border-[var(--accent-primary)]"
                   />
                   <button
+                    type="button"
                     onClick={() => handleSaveApiKey('OPENROUTER_API_KEY', openRouterKeyInput)}
                     className="px-3 py-2 text-white rounded-xl font-sans font-semibold transition-colors hover:opacity-90 shadow-md shadow-[var(--accent-glow)]"
                     style={{ backgroundColor: 'var(--accent-primary)' }}
@@ -814,9 +858,11 @@ export const HomeView: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-mono text-emerald-400">Live Feed</span>
               <button
+                type="button"
                 onClick={closeTelemetry}
                 className="p-1 rounded text-[#888888] hover:text-white hover:bg-[#1A1A1A] transition-colors"
                 title="Fechar painel"
+                aria-label="Fechar painel de telemetria"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -846,7 +892,8 @@ export const HomeView: React.FC = () => {
                 </div>
               )}
             </div>
-            <button 
+            <button
+              type="button"
               onClick={() => setActiveTab('activity')}
               className="mt-4 flex items-center justify-between text-xs font-semibold text-white transition-colors pt-3 border-t border-[#222222]"
               style={{ color: 'var(--accent-primary)' }}
@@ -874,7 +921,8 @@ export const HomeView: React.FC = () => {
                 ))}
               </div>
             </div>
-            <button 
+            <button
+              type="button"
               onClick={() => setActiveTab('devices')}
               className="mt-4 flex items-center justify-between text-xs font-semibold text-white hover:text-[var(--accent-primary)] transition-colors pt-3 border-t border-[#222222]"
             >

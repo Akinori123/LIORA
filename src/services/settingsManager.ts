@@ -178,6 +178,22 @@ export const settingsManager = {
   },
 
   /**
+   * Restaura as configurações globais ao padrão inicial limpando a chave persistida.
+   */
+  resetSettings(): GlobalSettings {
+    const storage = getStorage();
+    if (storage) {
+      try {
+        storage.removeItem(STORAGE_KEY_SETTINGS);
+      } catch {}
+    }
+    const defaults: GlobalSettings = { ...DEFAULT_SETTINGS };
+    this.saveSettings(defaults);
+    this.applyTheme(defaults.theme);
+    return defaults;
+  },
+
+  /**
    * Aplica variáveis CSS e atributos de tema no documento.
    */
   applyTheme(theme: ThemeProfile): void {

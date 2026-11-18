@@ -4,9 +4,10 @@
  */
 
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
-import { Settings as SettingsIcon, Shield, Volume2, Cpu, Download, RefreshCw, Palette, Globe, Bell, Sliders, CheckCircle2, FolderOpen, Play, Key, Lock, Check, Database, Upload } from 'lucide-react';
-import { ThemeProfile, LogVerbosity, TTSModelChoice } from '../../types/settings';
+import { Settings as SettingsIcon, Shield, Volume2, Cpu, Download, RefreshCw, Palette, Globe, Bell, CheckCircle2, FolderOpen, Play, Key, Check, Database, Upload } from 'lucide-react';
+import { LogVerbosity, TTSModelChoice } from '../../types/settings';
 import { eventBus } from '../../utils/eventBus';
 import { THEME_PALETTES } from '../../utils/themeColors';
 import { storageAdapter } from '../../services/storageAdapter';
@@ -17,7 +18,21 @@ import { integrationsVault } from '../../services/integrationsVault';
 import { VaultManagerPanel } from '../security/VaultManagerPanel';
 
 export const SettingsView: React.FC = () => {
-  const { settings, updateSettings, resetSettingsToDefault } = useLioraStore();
+  const {
+    settings,
+    updateSettings,
+    resetSettingsToDefault,
+    syncServicesFromEnv,
+    reloadAllFromStorage
+  } = useLioraStore(
+    useShallow(state => ({
+      settings: state.settings,
+      updateSettings: state.updateSettings,
+      resetSettingsToDefault: state.resetSettingsToDefault,
+      syncServicesFromEnv: state.syncServicesFromEnv,
+      reloadAllFromStorage: state.reloadAllFromStorage
+    }))
+  );
   const [successToast, setSuccessToast] = React.useState<string | null>(null);
   const [isTestingVoice, setIsTestingVoice] = React.useState(false);
   const [geminiKeyInput, setGeminiKeyInput] = React.useState<string>(() => {
@@ -28,7 +43,7 @@ export const SettingsView: React.FC = () => {
 
   // CORREÇÃO (bug de falsa promessa): botão de IMPORTAR backup — havia export
   // mas nunca restore. Lê o JSON exportado e grava registro a registro via
-  // restoreFromBackup (Desktop SQLite ou localStorage).
+  // restoreFromBackup (Desktop SQLite ou localStorage) e sincroniza o Zustand store.
   const handleImportBackup = async () => {
     try {
       const input = document.createElement('input');
@@ -40,19 +55,26 @@ export const SettingsView: React.FC = () => {
         try {
           const json = await file.text();
           const result = await storageAdapter.restoreFromBackup(json);
+          if (!isMountedRef.current) return;
           if (result.success) {
+            await reloadAllFromStorage();
+            if (!isMountedRef.current) return;
             const total = Object.values(result.restored).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
-            notifyChange(`Backup restaurado: ${total} registro(s) importados com sucesso.`);
+            notifyChange(`Backup restaurado e sincronizado: ${total} registro(s) importados com sucesso.`);
           } else {
             notifyChange(`Falha ao restaurar backup: ${result.error || 'erro desconhecido'}`);
           }
         } catch (err: any) {
-          notifyChange(`Arquivo inválido: ${err?.message || 'não é um backup LIORA válido'}`);
+          if (isMountedRef.current) {
+            notifyChange(`Arquivo inválido: ${err?.message || 'não é um backup LIORA válido'}`);
+          }
         }
       };
       input.click();
     } catch (err: any) {
-      notifyChange(`Falha ao abrir seletor de arquivo: ${err?.message || 'erro'}`);
+      if (isMountedRef.current) {
+        notifyChange(`Falha ao abrir seletor de arquivo: ${err?.message || 'erro'}`);
+      }
     }
   };
 
@@ -64,8 +86,14 @@ export const SettingsView: React.FC = () => {
 
   const [isEditingWorkspace, setIsEditingWorkspace] = React.useState(false);
   const [workspaceInput, setWorkspaceInput] = React.useState('');
+  const [timeoutDraft, setTimeoutDraft] = React.useState<string>(() => String(settings.requestTimeoutMs));
+
+  React.useEffect(() => {
+    setTimeoutDraft(String(settings.requestTimeoutMs));
+  }, [settings.requestTimeoutMs]);
 
   const toastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const exportRevokeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMountedRef = React.useRef(true);
   const testAudioRef = React.useRef<HTMLAudioElement | null>(null);
 
@@ -74,6 +102,7 @@ export const SettingsView: React.FC = () => {
     return () => {
       isMountedRef.current = false;
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (exportRevokeTimerRef.current) clearTimeout(exportRevokeTimerRef.current);
       if (testAudioRef.current) {
         try {
           testAudioRef.current.pause();
@@ -117,14 +146,18 @@ export const SettingsView: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyName: 'GEMINI_API_KEY', keyValue: keyToSave })
       }).catch(() => {});
+      await syncServicesFromEnv();
+      if (!isMountedRef.current) return true;
 
       notifyChange('Chave de API do Gemini gravada e ativada no Cofre com sucesso.');
       return true;
     } catch (err: any) {
-      notifyChange(`Erro ao salvar chave: ${err?.message || 'Falha de conexão'}`);
+      if (isMountedRef.current) {
+        notifyChange(`Erro ao salvar chave: ${err?.message || 'Falha de conexão'}`);
+      }
       return false;
     } finally {
-      setIsSavingKey(false);
+      if (isMountedRef.current) setIsSavingKey(false);
     }
   };
 
@@ -146,30 +179,43 @@ export const SettingsView: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyName: 'OPENROUTER_API_KEY', keyValue: keyToSave })
       }).catch(() => {});
+      await syncServicesFromEnv();
+      if (!isMountedRef.current) return true;
 
       notifyChange('Chave de API do OpenRouter gravada e ativada no Cofre para contingência.');
       return true;
     } catch (err: any) {
-      notifyChange(`Erro ao salvar chave do OpenRouter: ${err?.message || 'Falha de conexão'}`);
+      if (isMountedRef.current) {
+        notifyChange(`Erro ao salvar chave do OpenRouter: ${err?.message || 'Falha de conexão'}`);
+      }
       return false;
     } finally {
-      setIsSavingOpenRouterKey(false);
+      if (isMountedRef.current) setIsSavingOpenRouterKey(false);
     }
   };
 
   const handleExportFullBackup = async () => {
     try {
       const jsonStr = await storageAdapter.exportFullBackup();
+      if (!isMountedRef.current) return;
       const blob = new Blob([jsonStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `liora-full-backup-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
+      if (exportRevokeTimerRef.current) clearTimeout(exportRevokeTimerRef.current);
+      exportRevokeTimerRef.current = setTimeout(() => {
+        URL.revokeObjectURL(url);
+        exportRevokeTimerRef.current = null;
+      }, 1000);
       notifyChange('Backup transacional de todas as 6 tabelas exportado com sucesso.');
     } catch (err: any) {
-      notifyChange(`Falha ao exportar backup: ${err?.message || 'Erro desconhecido'}`);
+      if (isMountedRef.current) {
+        notifyChange(`Falha ao exportar backup: ${err?.message || 'Erro desconhecido'}`);
+      }
     }
   };
 
@@ -182,8 +228,11 @@ export const SettingsView: React.FC = () => {
       let keyToUse = geminiKeyInput.trim() || activeGeminiKey;
 
       if (geminiKeyInput.trim() && geminiKeyInput.trim() !== activeGeminiKey) {
-        await handleSaveGeminiKey(geminiKeyInput.trim());
-        keyToUse = geminiKeyInput.trim();
+        const saved = await handleSaveGeminiKey(geminiKeyInput.trim());
+        if (!isMountedRef.current) return;
+        if (saved) {
+          keyToUse = geminiKeyInput.trim();
+        }
       }
 
       notifyChange(`Sintetizando voz neural Gemini (${settings.ttsVoice})...`);
@@ -206,7 +255,8 @@ export const SettingsView: React.FC = () => {
         })
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!isMountedRef.current) return;
 
       if (!res.ok || !data.success || !data.audioBase64) {
         notifyChange(data?.error || 'Chave de API do Gemini ausente ou inválida no Cofre para teste de áudio');
@@ -217,9 +267,12 @@ export const SettingsView: React.FC = () => {
       const audio = new Audio(audioUrl);
       testAudioRef.current = audio;
       await audio.play();
+      if (!isMountedRef.current) return;
       notifyChange(`Amostra da voz ${settings.ttsVoice} (${settings.ttsModel}) reproduzida via API do Gemini.`);
     } catch (err: any) {
-      notifyChange(err?.message || 'Chave de API do Gemini ausente ou inválida no Cofre para teste de áudio');
+      if (isMountedRef.current) {
+        notifyChange(err?.message || 'Chave de API do Gemini ausente ou inválida no Cofre para teste de áudio');
+      }
     } finally {
       if (isMountedRef.current) setIsTestingVoice(false);
     }
@@ -238,10 +291,25 @@ export const SettingsView: React.FC = () => {
     setIsEditingWorkspace(false);
   };
 
+  const commitTimeoutDraft = () => {
+    const parsed = parseInt(timeoutDraft.trim(), 10);
+    if (Number.isNaN(parsed)) {
+      setTimeoutDraft(String(settings.requestTimeoutMs));
+      return;
+    }
+    const clamped = Math.max(1000, Math.min(60000, parsed));
+    setTimeoutDraft(String(clamped));
+    if (clamped !== settings.requestTimeoutMs) {
+      updateSettings({ requestTimeoutMs: clamped });
+      notifyChange(`Timeout de requisições ajustado para ${clamped}ms.`);
+    }
+  };
+
   const handleNotificationToggle = async (checked: boolean) => {
     if (checked && typeof window !== 'undefined' && 'Notification' in window) {
       try {
         const perm = await Notification.requestPermission();
+        if (!isMountedRef.current) return;
         if (perm !== 'granted') {
           updateSettings({ desktopNotifications: false });
           notifyChange('Permissão de notificações negada pelo sistema operacional.');
@@ -249,8 +317,13 @@ export const SettingsView: React.FC = () => {
         }
       } catch (err) {
         console.warn('Erro ao solicitar permissão de notificação:', err);
+        if (!isMountedRef.current) return;
+        updateSettings({ desktopNotifications: false });
+        notifyChange('Não foi possível solicitar permissão de notificações ao navegador.');
+        return;
       }
     }
+    if (!isMountedRef.current) return;
     updateSettings({ desktopNotifications: checked });
     notifyChange(`Notificações desktop ${checked ? 'ativadas' : 'desativadas'}.`);
   };
@@ -273,6 +346,7 @@ export const SettingsView: React.FC = () => {
           <p className="text-sm text-[#A8A8A8]">Preferências de comportamento, perfis de temas visuais, segurança e integração desktop.</p>
         </div>
         <button
+          type="button"
           onClick={() => {
             resetSettingsToDefault();
             notifyChange('Configurações restauradas para os padrões normativos.');
@@ -304,12 +378,14 @@ export const SettingsView: React.FC = () => {
           </div>
           <p className="text-xs text-[#A8A8A8]">Selecione o perfil de cores e variáveis CSS dinâmicas da interface.</p>
           
-          <div className="grid grid-cols-2 gap-3 pt-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
             {Object.values(THEME_PALETTES).map(t => {
               const active = settings.theme === t.id;
               return (
                 <button
                   key={t.id}
+                  type="button"
+                  aria-pressed={active}
                   onClick={() => {
                     updateSettings({ theme: t.id });
                     notifyChange(`Tema alterado para ${t.label}`);
@@ -321,10 +397,10 @@ export const SettingsView: React.FC = () => {
                   }`}
                   style={active ? { borderColor: t.hex, boxShadow: `0 0 16px ${t.hex}35` } : undefined}
                 >
-                  <div className="flex items-center justify-between w-full mb-1">
-                    <span className="font-medium text-xs text-white flex items-center gap-1.5">
+                  <div className="flex items-center justify-between gap-2 w-full mb-1">
+                    <span className="font-medium text-xs text-white flex items-center gap-1.5 min-w-0 truncate">
                       {active && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: t.hex }} />}
-                      {t.label}
+                      <span className="truncate">{t.label}</span>
                     </span>
                     <span className="w-3.5 h-3.5 rounded-full ring-2 ring-black shrink-0" style={{ backgroundColor: t.hex }} />
                   </div>
@@ -351,12 +427,13 @@ export const SettingsView: React.FC = () => {
           </div>
 
           <div className="space-y-4 pt-2 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8] flex items-center gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-language" className="text-[#A8A8A8] flex items-center gap-2">
                 <Globe className="w-4 h-4 text-[#A8A8A8]" />
                 Idioma Principal (IA & UI)
-              </span>
+              </label>
               <select
+                id="settings-language"
                 value={settings.language}
                 onChange={e => {
                   updateSettings({ language: e.target.value as any });
@@ -370,9 +447,10 @@ export const SettingsView: React.FC = () => {
               </select>
             </div>
 
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8]">Qualidade da Orb 3D (VRAM)</span>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-orbQuality" className="text-[#A8A8A8]">Qualidade da Orb 3D (VRAM)</label>
               <select
+                id="settings-orbQuality"
                 value={settings.orbQuality}
                 onChange={e => {
                   updateSettings({ orbQuality: e.target.value as any });
@@ -387,19 +465,20 @@ export const SettingsView: React.FC = () => {
               </select>
             </div>
 
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8]">Timeout de Requisições (ms) [1s-60s]</span>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-timeout" className="text-[#A8A8A8]">Timeout de Requisições (ms) [1s-60s]</label>
               <input
+                id="settings-timeout"
                 type="number"
                 min="1000"
                 max="60000"
                 step="1000"
-                value={settings.requestTimeoutMs}
-                onChange={e => {
-                  const val = parseInt(e.target.value, 10);
-                  if (!isNaN(val)) {
-                    const clamped = Math.max(1000, Math.min(60000, val));
-                    updateSettings({ requestTimeoutMs: clamped });
+                value={timeoutDraft}
+                onChange={e => setTimeoutDraft(e.target.value)}
+                onBlur={commitTimeoutDraft}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    commitTimeoutDraft();
                   }
                 }}
                 className="w-24 bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-right focus:outline-none focus:border-[var(--accent-primary)]"
@@ -416,9 +495,10 @@ export const SettingsView: React.FC = () => {
           </div>
 
           <div className="space-y-4 pt-2 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8]">Nível de Execução de Políticas</span>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-security" className="text-[#A8A8A8]">Nível de Execução de Políticas</label>
               <select
+                id="settings-security"
                 value={settings.securityEnforcementLevel}
                 onChange={e => handleSecurityLevelChange(e.target.value)}
                 className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
@@ -429,9 +509,10 @@ export const SettingsView: React.FC = () => {
               </select>
             </div>
 
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8]">Verbosidade de Logs de Auditoria</span>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-logVerbosity" className="text-[#A8A8A8]">Verbosidade de Logs de Auditoria</label>
               <select
+                id="settings-logVerbosity"
                 value={settings.logVerbosity}
                 onChange={e => {
                   updateSettings({ logVerbosity: e.target.value as LogVerbosity });
@@ -447,11 +528,12 @@ export const SettingsView: React.FC = () => {
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
-              <span className="text-[#A8A8A8] flex items-center gap-2">
+              <label htmlFor="settings-notifications" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
                 <Bell className="w-4 h-4 text-[#A8A8A8]" />
                 Notificações Desktop (SO)
-              </span>
+              </label>
               <input
+                id="settings-notifications"
                 type="checkbox"
                 checked={settings.desktopNotifications}
                 onChange={e => handleNotificationToggle(e.target.checked)}
@@ -486,6 +568,7 @@ export const SettingsView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <input
                   type="password"
+                  aria-label="Chave de API do Gemini"
                   value={geminiKeyInput}
                   onChange={e => setGeminiKeyInput(e.target.value)}
                   placeholder="Cole sua chave AIzaSy..."
@@ -519,6 +602,7 @@ export const SettingsView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <input
                   type="password"
+                  aria-label="Chave de API do OpenRouter"
                   value={openRouterKeyInput}
                   onChange={e => setOpenRouterKeyInput(e.target.value)}
                   placeholder="Cole sua chave sk-or-..."
@@ -536,9 +620,10 @@ export const SettingsView: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8]">Modelo TTS Padrão</span>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-ttsModel" className="text-[#A8A8A8]">Modelo TTS Padrão</label>
               <select
+                id="settings-ttsModel"
                 value={settings.ttsModel === 'gemini-3.8-flash' ? 'gemini-3.8-flash-tts' : settings.ttsModel}
                 onChange={e => {
                   updateSettings({ ttsModel: e.target.value as TTSModelChoice });
@@ -552,10 +637,11 @@ export const SettingsView: React.FC = () => {
               </select>
             </div>
 
-            <div className="flex items-center justify-between">
-              <span className="text-[#A8A8A8]">Voz da Assistente</span>
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="settings-ttsVoice" className="text-[#A8A8A8]">Voz da Assistente</label>
               <div className="flex items-center gap-2">
                 <select
+                  id="settings-ttsVoice"
                   value={settings.ttsVoice}
                   onChange={e => {
                     updateSettings({ ttsVoice: e.target.value as any });
@@ -570,6 +656,7 @@ export const SettingsView: React.FC = () => {
                   <option value="Charon">Charon (Neutro / Profundo)</option>
                 </select>
                 <button
+                  type="button"
                   onClick={handleTestVoice}
                   disabled={isTestingVoice}
                   className="px-3.5 py-1.5 rounded-lg font-semibold transition-all duration-200 flex items-center gap-1.5 shadow-md hover:opacity-90 active:scale-95 cursor-pointer text-xs disabled:opacity-50"
@@ -589,6 +676,7 @@ export const SettingsView: React.FC = () => {
             <div className="pt-2 border-t border-[#222222] flex items-center justify-between text-[11px] text-[#A8A8A8]">
               <span className="truncate">Workspace: <code className="text-white font-mono">{settings.workspacePath}</code></span>
               <button
+                type="button"
                 onClick={handleSelectWorkspace}
                 className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#262626] border border-[#333333] rounded text-[11px] text-white transition-colors shrink-0 cursor-pointer"
               >
@@ -600,8 +688,9 @@ export const SettingsView: React.FC = () => {
             {/* Modal Inline para Alterar Workspace (Elimina window.prompt) */}
             {isEditingWorkspace && (
               <div className="p-3 bg-[#0E0E0E] border border-[#333333] rounded-lg space-y-2 mt-2">
-                <label className="text-[11px] text-[#CCCCCC] block font-medium">Novo Caminho do Workspace:</label>
+                <label htmlFor="settings-workspace" className="text-[11px] text-[#CCCCCC] block font-medium">Novo Caminho do Workspace:</label>
                 <input
+                  id="settings-workspace"
                   type="text"
                   value={workspaceInput}
                   onChange={e => setWorkspaceInput(e.target.value)}
@@ -644,6 +733,7 @@ export const SettingsView: React.FC = () => {
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              type="button"
               onClick={handleExportFullBackup}
               className="flex items-center gap-2 px-4 py-2 bg-[#1A1A1A] hover:bg-[#252525] border border-[#333333] hover:border-[var(--accent-primary)] rounded-lg text-white font-medium text-xs transition-colors shrink-0 shadow-sm cursor-pointer"
             >
@@ -653,6 +743,7 @@ export const SettingsView: React.FC = () => {
             {/* CORREÇÃO (falsa promessa): botão de IMPORTAR backup — restauração real
                 de todos os registros via storageAdapter.restoreFromBackup */}
             <button
+              type="button"
               onClick={() => void handleImportBackup()}
               className="flex items-center gap-2 px-4 py-2 bg-[#1A1A1A] hover:bg-[#252525] border border-[#333333] hover:border-[var(--accent-primary)] rounded-lg text-white font-medium text-xs transition-colors shrink-0 shadow-sm cursor-pointer"
             >

@@ -82,28 +82,39 @@ export async function executeLocalTool(
       const result = await invokeTauri<LocalExecutionResult>('execute_local_tool', {
         payload: { toolName, parameters, sessionId, consentToken: uiConsentToken }
       });
-      return result;
+      const isUnsupportedInRust =
+        result &&
+        result.success === false &&
+        typeof result.error === 'string' &&
+        (result.error.includes('Ferramenta desconhecida') || result.error.includes('não suportada no Tauri'));
+      const isNodeUiConsentFallback =
+        Boolean(uiConsentToken) &&
+        result &&
+        result.success === false &&
+        (result.code === 'NATIVE_PERMISSION_BLOCKED' ||
+          (typeof result.error === 'string' &&
+            (result.error.includes('CONSENT_TOKEN_INVALID_OR_MISSING') ||
+              result.error.includes('CONSENT_SECRET_MISSING'))));
+      if (!isUnsupportedInRust && !isNodeUiConsentFallback) {
+        return result;
+      }
+      // Se não implementada no Rust ou se o token é do fluxo Express UI-Consent, segue ao backend Express local
     } catch (err: any) {
-      return {
-        success: false,
-        toolName,
-        decision: 'DENY',
-        riskLevel: 'R1',
-        error: err?.message || 'Erro ao invocar comando nativo Tauri.',
-        code: 'TAURI_INVOKE_ERROR',
-        simulated: false,
-        executionTimeMs: Date.now() - startTime,
-        timestamp: new Date().toISOString()
-      };
+      const msg = String(err?.message || '');
+      if (!msg.includes('desconhecida') && !msg.includes('não suportada')) {
+        // Ainda tenta o backend Express caso o servidor local esteja ativo em localhost:3000
+      }
     }
   }
 
-  // Fallback transparente para o servidor Express (Web Preview)
+  // Fallback transparente para o servidor Express (Web Preview ou Tauri híbrido com Express)
   try {
-    // Em Node.js (servidor Express executando automações no backend), fetch
-    // exige URL absoluta — caminhos relativos como '/api/tools/execute' falham
-    // com "Failed to parse URL". No browser, o caminho relativo é o correto.
-    const toolsUrl = (typeof window === 'undefined')
+    // Em Node.js ou contexto tauri:// sem origin http, usa localhost:3000 explicitamente
+    const isNonHttpBrowser =
+      typeof window !== 'undefined' &&
+      typeof window.location?.protocol === 'string' &&
+      !window.location.protocol.startsWith('http');
+    const toolsUrl = (typeof window === 'undefined' || isNonHttpBrowser)
       ? `http://localhost:${(typeof process !== 'undefined' && process.env?.PORT) || 3000}/api/tools/execute`
       : '/api/tools/execute';
 

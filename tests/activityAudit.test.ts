@@ -32,8 +32,9 @@ describe('Aba Atividade & Auditoria (ActivityView Audit Suite)', () => {
     });
   });
 
-  test('ACT-01: Ring Buffer do addActivityLog limita a 200 logs max em memória', () => {
-    for (let i = 0; i < 250; i++) {
+  test(`ACT-01: Ring Buffer do addActivityLog limita a ${MAX_ACTIVITY_LOGS} logs max em memória`, () => {
+    const totalToPush = MAX_ACTIVITY_LOGS + 50;
+    for (let i = 0; i < totalToPush; i++) {
       useLioraStore.getState().addActivityLog({
         category: 'tool',
         summary: `Log de teste #${i}`,
@@ -46,7 +47,7 @@ describe('Aba Atividade & Auditoria (ActivityView Audit Suite)', () => {
 
     const logs = useLioraStore.getState().activityLogs;
     assert.strictEqual(logs.length, MAX_ACTIVITY_LOGS, `Deveria limitar a exatamente ${MAX_ACTIVITY_LOGS} itens`);
-    assert.strictEqual(logs[0].summary, 'Log de teste #249', 'O log mais recente deve estar no topo');
+    assert.strictEqual(logs[0].summary, `Log de teste #${totalToPush - 1}`, 'O log mais recente deve estar no topo');
   });
 
   test('ACT-02: Persistência no LocalStorage com chave liora_activity_logs_v1', () => {

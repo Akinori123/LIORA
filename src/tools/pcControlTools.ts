@@ -304,6 +304,7 @@ export const pcManageAppsTool: ToolDefinition<{
   category: 'system',
   riskLevel: 'R0', // list é R0; kill/launch escalam para R2 via requiredConfirmation
   isSimulated: false,
+  timeoutMs: 15000,
   parameters: {
     type: 'object',
     properties: {
@@ -373,6 +374,21 @@ export const pcManageAppsTool: ToolDefinition<{
       const PROTECTED_SESSION = /^(explorer|svchost)(\.exe)?$/i;
       if (PROTECTED_EXACT.test(processNameForCheck) || PROTECTED_SESSION.test(processNameForCheck)) {
         return { success: false, error: `PROTECTED_PROCESS: encerrar '${processNameForCheck}' (PID ${params.pid || '—'}) é bloqueado — processo crítico do sistema.`, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      // Adaptabilidade Cloud Web Preview (Linux headless sem interface gráfica de desktop)
+      if (!isOsDryRun() && shouldUseWebPreviewDesktopFallback()) {
+        const displayName = processNameForCheck || target;
+        return {
+          success: true,
+          action: 'kill',
+          target,
+          resolvedProcessName: displayName,
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Encerramento do processo '${displayName}' simulado (ambiente em nuvem sem interface gráfica de desktop).`,
+          timestamp: new Date().toISOString()
+        };
       }
 
       // BUG CORRIGIDO (dupla extensão): antes gerava taskkill /IM "chrome.exe.exe"
@@ -502,6 +518,7 @@ export const pcSimulateInputTool: ToolDefinition<{
   category: 'system',
   riskLevel: 'R2', // todo input simulado é R2 — pode agir em qualquer app do usuário
   isSimulated: false,
+  timeoutMs: 15000,
   parameters: {
     type: 'object',
     properties: {
@@ -520,9 +537,7 @@ export const pcSimulateInputTool: ToolDefinition<{
   execute: async (params) => {
     const platform = os.platform();
     const isDryRun = isOsDryRun();
-    if (platform !== 'win32' && platform !== 'darwin' && !isDryRun) {
-      return { success: false, error: 'INPUT_UNSUPPORTED: automação de input nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
-    }
+    const isWebPreviewSimulated = !isDryRun && shouldUseWebPreviewDesktopFallback();
 
     // ---- click (x, y) ----
     if (params.action === 'click') {
@@ -531,6 +546,22 @@ export const pcSimulateInputTool: ToolDefinition<{
       if (x < 0 || y < 0) return { success: false, error: 'MISSING_COORDS: informe x e y para o clique.', simulated: false, timestamp: new Date().toISOString() };
       if (isDryRun) {
         return { success: true, action: 'click', x, y, doubleClick: Boolean(params.doubleClick), simulated: true, timestamp: new Date().toISOString() };
+      }
+      if (isWebPreviewSimulated) {
+        return {
+          success: true,
+          action: 'click',
+          x,
+          y,
+          doubleClick: Boolean(params.doubleClick),
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Clique em (${x}, ${y}) simulado (ambiente em nuvem sem interface gráfica de desktop).`,
+          timestamp: new Date().toISOString()
+        };
+      }
+      if (platform !== 'win32' && platform !== 'darwin') {
+        return { success: false, error: 'INPUT_UNSUPPORTED: automação de clique nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
       }
       if (platform === 'win32') {
         // BOM UTF-8 + SetCursorPos funciona com coordenadas inteiras — sem problema
@@ -552,15 +583,15 @@ for ($i = 0; $i -lt ${clicks}; $i++) {
   Start-Sleep -Milliseconds 60
 }
 Write-Output "OK"`;
-        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 10000);
+        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 15000);
         const ok = res.stdout.includes('OK');
         return { success: ok, action: 'click', x, y, doubleClick: Boolean(params.doubleClick), message: ok ? `Clique executado em (${x}, ${y}).` : `Falha no clique: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
       }
-      // macOS: cliclick (se instalado) ou osascript
+      // macOS: osascript
       const script = params.doubleClick
         ? `osascript -e 'tell application "System Events" to click at {${x}, ${y}}' -e 'delay 0.08' -e 'tell application "System Events" to click at {${x}, ${y}}'`
         : `osascript -e 'tell application "System Events" to click at {${x}, ${y}}'`;
-      const res = await runReal(script, 10000);
+      const res = await runReal(script, 15000);
       return { success: res.code === 0, action: 'click', x, y, simulated: false, timestamp: new Date().toISOString() };
     }
 
@@ -569,53 +600,30 @@ Write-Output "OK"`;
       const text = (params.text || '').slice(0, 1000);
       if (!text) return { success: false, error: 'MISSING_TEXT: informe o texto a digitar.', simulated: false, timestamp: new Date().toISOString() };
       if (isDryRun) {
-        return { success: true, action: 'type', length: text.length, simulated: true, timestamp: new Date().toISOString() };
+        return { success: true, action: 'type', length: text.length, dryRun: true, simulated: true, timestamp: new Date().toISOString() };
+      }
+      if (isWebPreviewSimulated) {
+        return {
+          success: true,
+          action: 'type',
+          length: text.length,
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Digitação de ${text.length} caractere(s) simulada (ambiente em nuvem sem interface gráfica de desktop).`,
+          timestamp: new Date().toISOString()
+        };
+      }
+      if (platform !== 'win32' && platform !== 'darwin') {
+        return { success: false, error: 'INPUT_UNSUPPORTED: digitação nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
       }
 
-      // CORREÇÃO (race condition abrir app + digitar): após pc_manage_apps launch,
-      // o processo demora para criar a janela e ganhar foco do Windows — teclas
-      // enviadas antes se perdem no limbo. Aguarda o FOCO estabilizar (polling
-      // do título da janela ativa) antes de injetar, com timeout de segurança.
-      const waitBeforeType = Math.max(0, Math.min(5000, params.waitFocusMs ?? 1200));
-      if (platform === 'win32' && waitBeforeType > 0) {
-        const ps = `
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class WinFocus {
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-}
-"@
-$deadline = (Get-Date).AddMilliseconds(${waitBeforeType})
-$last = ''
-while ((Get-Date) -lt $deadline) {
-  $h = [WinFocus]::GetForegroundWindow()
-  $sb = New-Object System.Text.StringBuilder(256)
-  [WinFocus]::GetWindowText($h, $sb, 256) | Out-Null
-  $t = $sb.ToString()
-  if ($t -ne $last) { $last = $t; Start-Sleep -Milliseconds 250; continue }
-  if ($t -ne '') { Write-Output $t; break }
-  Start-Sleep -Milliseconds 150
-}`;
-        await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], waitBeforeType + 3000);
-        // Janela identificada ou timeout de cortesia — segue para a digitação
-      } else if (waitBeforeType > 0) {
-        await new Promise(r => setTimeout(r, waitBeforeType));
-      }
+      // CORREÇÃO (timeout 5000ms em pc_simulate_input): antes, abriam-se DOIS processos
+      // PowerShell separados (1º compilando C# WinFocus + polling loop de 250ms, 2º WScript.Shell
+      // SendKeys), ultrapassando facilmente 5s em cold start. Agora consolidamos numa ÚNICA
+      // invocação PowerShell leve com timeout de 15000ms e resolução imediata após SendKeys.
+      const waitBeforeType = Math.max(0, Math.min(5000, params.waitFocusMs ?? 400));
 
       if (platform === 'win32') {
-        // CORREÇÕES (Etapa B — input sujo):
-        // 1. Quebras de linha reais (\n, \r\n) → {ENTER} (SendKeys não entende \n
-        //    literal, e linhas coladas viravam texto embaralhado num campo só)
-        // 2. Aspas duplas → escape PowerShell correto ('' dentro de string single-quoted
-        //    não protege contra " que fecha a string em contextos de comando)
-        // 3. Caracteres de controle (\x00-\x1F) removidos — nunca podem entrar no P-Invoke
-        // 4. ORDEM CRÍTICA: escapar os metacaracteres do SendKeys ANTES de inserir
-        //    {ENTER}/{TAB}. Se o escape rodasse depois, ele re-escaparia as próprias
-        //    chaves das sequências ({ENTER} viraria {{ENTER}{}}, que o SendKeys
-        //    digita como TEXTO literal em vez de pressionar Enter).
         const escaped = text
           .replace(/\r\n|\r/g, '\n')
           .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')  // controles exceto \n (0x0A) e \t (0x09)
@@ -623,15 +631,18 @@ while ((Get-Date) -lt $deadline) {
           .replace(/'/g, "''")
           .replace(/\n/g, '{ENTER}')
           .replace(/\t/g, '{TAB}');
-        // BOM UTF-8: garante que acentos/cirílico/chinês cheguem intactos ao PowerShell
-        // (sem BOM, o PowerShell 5.1 interpreta o script como ANSI do sistema e
-        // caracteres não-Latin1 viram lixo '?')
-        const ps = `\ufeff$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${escaped}')`;
-        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 10000);
-        return { success: res.code === 0, action: 'type', length: text.length, message: res.code === 0 ? `Texto digitado (${text.length} caracteres) no app focado.` : `Falha ao digitar: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
+        const sleepStep = waitBeforeType > 0 ? `Start-Sleep -Milliseconds ${waitBeforeType}; ` : '';
+        const ps = `\ufeff${sleepStep}$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${escaped}'); Write-Output "OK"`;
+        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 15000);
+        const ok = res.code === 0 || res.stdout.includes('OK');
+        return { success: ok, action: 'type', length: text.length, message: ok ? `Texto digitado (${text.length} caracteres) no app focado.` : `Falha ao digitar: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      if (waitBeforeType > 0) {
+        await new Promise(r => setTimeout(r, waitBeforeType));
       }
       const script = `osascript -e 'tell application "System Events" to keystroke ${JSON.stringify(text)}'`;
-      const res = await runReal(script, 10000);
+      const res = await runReal(script, 15000);
       return { success: res.code === 0, action: 'type', length: text.length, simulated: false, timestamp: new Date().toISOString() };
     }
 
@@ -679,9 +690,25 @@ while ((Get-Date) -lt $deadline) {
         return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f12.`, simulated: false, timestamp: new Date().toISOString() };
       }
 
+      if (isDryRun) {
+        return { success: true, action: 'hotkey', keys: combo, dryRun: true, simulated: true, timestamp: new Date().toISOString() };
+      }
+
+      if (isWebPreviewSimulated) {
+        return {
+          success: true,
+          action: 'hotkey',
+          keys: combo,
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Atalho '${combo}' simulado (ambiente em nuvem sem interface gráfica de desktop).`,
+          timestamp: new Date().toISOString()
+        };
+      }
+
       if (platform === 'win32') {
         const ps = `$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${sendKeys.replace(/'/g, "''")}')`;
-        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 10000);
+        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 15000);
         return { success: res.code === 0, action: 'hotkey', keys: combo, message: res.code === 0 ? `Atalho '${combo}' enviado ao app focado.` : `Falha no atalho: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
       }
 
@@ -702,13 +729,13 @@ while ((Get-Date) -lt $deadline) {
         } else {
           script = `osascript -e 'tell application "System Events" to keystroke "${key}"'`;
         }
-        const res = await runReal(script, 10000);
+        const res = await runReal(script, 15000);
         return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
       }
 
       if (platform === 'linux') {
         const linuxKey = combo.replace('ctrl', 'ctrl').replace('win', 'super');
-        const res = await runReal(`xdotool key ${JSON.stringify(linuxKey)} 2>/dev/null`, 10000);
+        const res = await runReal(`xdotool key ${JSON.stringify(linuxKey)} 2>/dev/null`, 15000);
         return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
       }
 
@@ -1014,6 +1041,7 @@ export const openApplicationTool: ToolDefinition<{
   category: 'system',
   riskLevel: 'R2',
   isSimulated: false,
+  timeoutMs: 15000,
   parameters: {
     type: 'object',
     properties: {
@@ -1056,6 +1084,7 @@ export const openBrowserTool: ToolDefinition<{
   category: 'system',
   riskLevel: 'R2',
   isSimulated: false,
+  timeoutMs: 15000,
   parameters: {
     type: 'object',
     properties: {
