@@ -1,0 +1,149 @@
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+LIORA server running on http://localhost:3000
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_ISSUED] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397489922',
+  consentAuditId: '37be210e-b389-401e-9a1b-c4ed6889ddfb',
+  expiresAt: 1795397554911
+}
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  riskLevel: 'R2',
+  sessionId: 'sess-1795397489922',
+  hasConsentToken: true,
+  rawParametersKeys: [ 'command' ]
+}
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_CONSUMING] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397489922',
+  hasToken: true,
+  tokenPrefix: '4c4c25bf'
+}
+[ToolRegistry] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'unknown',
+  rawParamsKeys: [ 'command' ]
+}
+[ToolRegistry] [HANDSHAKE: resolved] { toolName: 'system_exec_sandbox', success: true, executionTimeMs: 55 }
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_ISSUED] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397523903',
+  consentAuditId: 'e8ad25bb-2383-43fe-9c05-39c26325d8cd',
+  expiresAt: 1795397588874
+}
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  riskLevel: 'R2',
+  sessionId: 'sess-1795397523903',
+  hasConsentToken: true,
+  rawParametersKeys: [ 'command' ]
+}
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_CONSUMING] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397523903',
+  hasToken: true,
+  tokenPrefix: '229908e0'
+}
+[ToolRegistry] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'unknown',
+  rawParamsKeys: [ 'command' ]
+}
+[ToolRegistry] [HANDSHAKE: resolved] { toolName: 'system_exec_sandbox', success: true, executionTimeMs: 50 }
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_ISSUED] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397599534',
+  consentAuditId: '6fa49736-129a-4521-bbb4-daa9fe89de21',
+  expiresAt: 1795397664519
+}
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  riskLevel: 'R2',
+  sessionId: 'sess-1795397599534',
+  hasConsentToken: true,
+  rawParametersKeys: [ 'command' ]
+}
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_CONSUMING] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397599534',
+  hasToken: true,
+  tokenPrefix: '47c90219'
+}
+[ToolRegistry] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'unknown',
+  rawParamsKeys: [ 'command' ]
+}
+[ToolRegistry] [HANDSHAKE: resolved] { toolName: 'system_exec_sandbox', success: true, executionTimeMs: 52 }
+[2m22:33:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/views/HomeView.tsx[22m
+[2m22:33:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_ISSUED] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397648206',
+  consentAuditId: '3dc8224e-ecdd-4bde-9b92-049da317c94b',
+  expiresAt: 1795397713196
+}
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  riskLevel: 'R2',
+  sessionId: 'sess-1795397648206',
+  hasConsentToken: true,
+  rawParametersKeys: [ 'command' ]
+}
+[PermissionEngine] [HANDSHAKE: user_action - TOKEN_CONSUMING] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'sess-1795397648206',
+  hasToken: true,
+  tokenPrefix: '11fb8cf3'
+}
+[ToolRegistry] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  sessionId: 'unknown',
+  rawParamsKeys: [ 'command' ]
+}
+[ToolRegistry] [HANDSHAKE: resolved] { toolName: 'system_exec_sandbox', success: true, executionTimeMs: 50 }
+[2m22:35:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m22:35:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/views/ConversationView.tsx, /src/components/Sidebar.tsx, /src/components/Header.tsx, /src/components/views/ActivityView.tsx, /src/components/views/HomeView.tsx, /src/components/views/MemoryView.tsx, /src/components/views/DevicesView.tsx, /src/components/views/DeveloperView.tsx, /src/components/views/IntegrationsView.tsx, /src/components/views/SettingsView.tsx, /src/components/views/AutomationsView.tsx, /src/components/GlobalVoiceBar.tsx and 9 more[22m
+[2m22:35:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m22:36:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/components/views/ConversationView.tsx, /src/components/Sidebar.tsx, /src/components/Header.tsx, /src/components/views/ActivityView.tsx, /src/components/views/HomeView.tsx, /src/components/views/MemoryView.tsx, /src/components/views/DevicesView.tsx, /src/components/views/DeveloperView.tsx, /src/components/views/IntegrationsView.tsx, /src/components/views/SettingsView.tsx, /src/components/views/AutomationsView.tsx, /src/components/GlobalVoiceBar.tsx and 9 more[22m
+[2m22:36:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[2m22:37:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/views/HomeView.tsx[22m
+[2m22:37:25[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/index.css[22m
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'workspace_write_file',
+  riskLevel: 'R1',
+  sessionId: 'test-session',
+  hasConsentToken: false,
+  rawParametersKeys: [ 'path', 'content', 'filePath' ]
+}
+[PermissionEngine] [HANDSHAKE: pending] {
+  toolName: 'workspace_write_file',
+  riskLevel: 'R1',
+  code: 'REQUIRES_USER_CONFIRMATION',
+  sessionId: 'test-session',
+  parametersHash: '0ac2263a8b8fef22e9368ac34af2582a63f482c9f630d1665ffd72216dd8ec53'
+}
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'workspace_read_file',
+  riskLevel: 'R0',
+  sessionId: 'test-session',
+  hasConsentToken: false,
+  rawParametersKeys: [ 'path', 'filePath' ]
+}
+[PermissionEngine] [HANDSHAKE: requested] {
+  toolName: 'system_exec_sandbox',
+  riskLevel: 'R2',
+  sessionId: 'test-session',
+  hasConsentToken: false,
+  rawParametersKeys: [ 'command', 'args' ]
+}
+[PermissionEngine] [HANDSHAKE: pending] {
+  toolName: 'system_exec_sandbox',
+  riskLevel: 'R2',
+  code: 'REQUIRES_USER_CONFIRMATION',
+  sessionId: 'test-session',
+  parametersHash: 'db986c2500dc3b951cb85dbd6a4e0f7d2bff04e926a90fa196c41b2f927ce7ad'
+}

@@ -32,36 +32,13 @@ import { integrationsVault } from './src/services/integrationsVault';
 // CORREÇÃO (Etapa 6 — hash canônico do consentimento de UI coerente com o PermissionEngine)
 import { computeParametersHash } from './src/security/canonicalizer';
 import { semanticMemoryService } from './src/services/memory/semanticMemoryService';
+import { devicesManager } from './src/services/devicesManager';
+import { DEFAULT_SYSTEM_INSTRUCTION } from './src/app/systemInstruction';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const isDirectRun = Boolean(process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
-
-const DEFAULT_SYSTEM_INSTRUCTION = 
-  "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
-  "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
-  "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Cockpit, Automações, Desenvolvedor, Integrações, Configurações). " +
-  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade. " +
-  "Quando o usuário pedir uma AÇÃO (abrir/navegar/consultar/criar/executar), você DEVE chamar a ferramenta apropriada em vez de apenas responder em texto. " +
-  "NUNCA afirme que executou, criou, excluiu, pesquisou ou mostrou algo se a chamada de ferramenta não retornou success: true com dados reais. " +
-  "EXCLUSIVIDADE DE AÇÃO: para consultas paralelas de lugares distintos (ex: 'farmácias E mercados'), priorize a mais relevante e pergunte se deseja a outra — NUNCA abra múltiplas abas/janelas de mapas em paralelo. " +
-  "BLINDAGEM ABSOLUTA CONTRA SUCESSO FALSO: você SÓ pode afirmar que executou uma ação se a resposta da ferramenta trouxe success: true. " +
-  "Se a ferramenta falhou, retornou erro ou não foi chamada, você DEVE dizer honestamente 'Mestre, não consegui fazer X porque Y' — NUNCA diga 'já abri', 'já fiz', 'pronto, está aberto' sem a confirmação real da ferramenta. " +
-  "CICLO DE VIDA DAS FERRAMENTAS (INÍCIO, MEIO E FIM): Pense sempre na intenção completa do Mestre do início ao fim. Se ele pedir uma ação simples (ex: 'abra o bloco de notas'), execute a abertura via ferramenta e pergunte proativamente se deseja que você escreva algo, crie um relatório, anote ideias ou salve um arquivo. " +
-  "Se ele pedir ações compostas (ex: 'abra o bloco de notas e escreva um relatório/minhas ideias', 'abra outra aba', 'digite X e salve', 'feche o bloco de notas'), ENCADEIE as ferramentas necessárias passo a passo até concluir o objetivo: " +
-  "1) INÍCIO: abra/garanta o aplicativo (`pc_manage_apps` com action='launch' ou `open_application`) ou crie arquivo diretamente (`workspace_write_file` / `file_write_and_modify`); " +
-  "2) MEIO: para escrever no app aberto use `pc_simulate_input` com action='type' e `waitFocusMs: 800`, ou use `pc_simulate_input` com action='hotkey' para abrir nova aba (`Ctrl+T`), fechar aba (`Ctrl+W`), alternar abas (`Ctrl+Tab`) ou salvar (`Ctrl+S`); " +
-  "3) FIM: quando o Mestre pedir para encerrar ou fechar um app, use `pc_manage_apps` com action='kill' (processo) ou `pc_simulate_input` com action='hotkey' (`Alt+F4`). " +
-  "PERMISSÕES, CONSENTIMENTO E MODO DESENVOLVEDOR: Ferramentas R0 rodam automaticamente; ferramentas R1 e R2 pausam para autorização se a política não estiver liberada. " +
-  "Se uma ferramenta retornar `requiresConsent: true` ou `REQUIRES_USER_CONFIRMATION`, NUNCA finja que a ação ocorreu: explique exatamente qual etapa pausou e por quê (nível R1/R2), e oriente o Mestre que ele pode autorizar AGORA clicando em 'Aprovar' na tela ou dizendo por voz 'Confirmar' / 'Autorizar' (ou 'Cancelar' para abortar). " +
-  "Apenas se o Mestre quiser aprovação automática contínua sem interrupções futuras, informe que ele pode habilitar 'Auto-Consentimento Operador (R1/R2)' ou definir a política individual ('Sempre Permitir') na aba Desenvolvedor — você pode navegar até lá via `navigateToTab` se ele pedir. " +
-  "EXECUÇÃO HONESTA (REAL vs. SIMULADO): Se `simulated: true` estiver no retorno, declare explicitamente que a etapa ocorreu em `[Modo Simulado / Web Preview]` sem efeito físico no sistema operacional. " +
-  "LOCAIS POR APELIDO: para navegar para 'minha casa', 'trabalho', 'faculdade' ou apelidos similares, chame PRIMEIRO resolve_place_alias para buscar o endereço na memória do usuário. " +
-  "Se não estiver lá, pergunte o endereço e ensine a LIORA com save_place_alias ou addMemory — na próxima vez a navegação será automática. NUNCA invente ou adivinhe endereços. " +
-  "Ordens de navegação de interface devem usar a ferramenta navigateToTab; ordens de consulta de sistema devem usar system_info ou getSystemStatus. " +
-  "NAVEGAÇÃO E MAPAS: Você POSSUI ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), chame 'open_gps_navigation' com o destino informado. Quando o usuário perguntar por locais próximos ('mercado mais próximo', 'farmácia', 'posto'), chame 'maps_search_places'. " +
-  "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown, com linguagem especificada e boas práticas de engenharia de software.";
 
 function getTemporalContext(): string {
   const now = new Date();
@@ -325,7 +302,19 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   // FASE 1: instala as ferramentas NATIVAS REAIS no Tool Registry.
   // O servidor Express roda na máquina do usuário, portanto executa ações reais:
   // leitura/escrita no disco, comandos CLI com whitelist, telemetria real.
-  installNativeServerTools(toolRegistry);
+  //
+  // GUARDA (auditoria de boot): a instalação é isolada. Se qualquer módulo de
+  // ferramenta nativa (fs/path, e-mail, browser agent) falhar ao carregar neste
+  // runtime, o servidor continua de pé com o registry declarativo — antes uma
+  // exceção aqui derrubava TODAS as rotas HTTP/SSE (app abria sem chat).
+  try {
+    installNativeServerTools(toolRegistry);
+  } catch (nativeToolsErr: any) {
+    console.warn(
+      '[ToolRegistry] Ferramentas nativas indisponíveis neste runtime:',
+      nativeToolsErr?.message || nativeToolsErr
+    );
+  }
 
   // NÚCLEO DE CONTROLE TOTAL DO PC: registro direto das ferramentas de visão,
   // apps/inputs e arquivos no Tool Registry compartilhado (declarações vão ao
@@ -395,12 +384,15 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       return { toolName, success: false, error: `Ferramenta '${toolName}' não registrada.`, simulated: true, riskLevel: 'R0' as const, data: null };
     }
     const risk = (
-      toolName === 'pc_manage_apps' && params?.action !== 'list'
-        ? 'R2'
+      toolDef.mutatingActions && toolDef.mutatingActions.includes(String(params?.action))
+        ? (toolDef.mutatingRiskLevel ?? 'R2')
         : (toolDef.riskLevel || 'R0')
     ) as 'R0' | 'R1' | 'R2' | 'R3';
     
-    // Auto-consentimento auditado para ações utilitárias legítimas solicitadas pelo operador por voz
+    // Auto-consentimento auditado para ações utilitárias legítimas solicitadas pelo operador por voz.
+    // Inclui as aberturas de app/navegador (R2 declarado em pcControlTools): antes
+    // `open_application` ficava fora da lista e TODO pedido "abra o bloco de notas"
+    // pausava no ConsentCard mesmo com o operador falando o comando.
     const isOperatorSafeAction = 
       toolName === 'navigateToTab' || 
       toolName === 'openSettings' || 
@@ -481,8 +473,32 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     };
   }
 
+  /**
+   * Declarações de tools oferecidas ao modelo (chat/Live), JÁ FILTRADAS pelo
+   * perfil de segurança ativo. Sem o filtro o modelo era instruído a chamar
+   * ferramentas que o PermissionEngine sempre nega e as INEXISTENTES no registry
+   * (`navigateToTab`, `openSettings`, `triggerAutomation`) — o servidor respondia
+   * "Ferramenta 'X' não registrada" e o pedido do operador era perdido.
+   */
+  function buildModelToolDeclarations() {
+    const denied = new Set<string>([
+      ...(permissionEngine.activeProfile.deniedTools || []),
+      ...TOOLS_WITHOUT_SERVER_IMPLEMENTATION
+    ]);
+    return toolRegistry.toGeminiDeclarations({ filter: (tool) => !denied.has(tool.name) });
+  }
+
+  // Tools de contexto de voz que NÃO existem no registry do servidor: a ação é
+  // executada no CLIENTE (store). Declará-las ao modelo só produzia
+  // TOOL_NOT_FOUND; a navegação por voz já é interceptada por intenção no store.
+  const TOOLS_WITHOUT_SERVER_IMPLEMENTATION = new Set([
+    'navigateToTab',
+    'openSettings',
+    'triggerAutomation'
+  ]);
+
   let ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY || '',
+    apiKey: (process.env.GEMINI_API_KEY || '').trim().replace(/^['"]|['"]$/g, ''),
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -501,8 +517,9 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     if (fs.existsSync(envPath)) {
       content = fs.readFileSync(envPath, 'utf8');
     }
+    const cleanVal = (keyValue || '').trim().replace(/^['"]|['"]$/g, '');
     const regex = new RegExp(`^${keyName}=.*$`, 'm');
-    const newLine = `${keyName}="${keyValue.replace(/"/g, '\\"')}"`;
+    const newLine = `${keyName}="${cleanVal.replace(/"/g, '\\"')}"`;
     if (regex.test(content)) {
       content = content.replace(regex, newLine);
     } else {
@@ -1129,7 +1146,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
             contents: agentContents,
             config: {
               systemInstruction: effectiveSystemInstruction,
-              tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }]
+              tools: [{ functionDeclarations: buildModelToolDeclarations() }]
             }
           });
 
@@ -1392,16 +1409,36 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       if (v.expiresAt < Date.now()) activePairTokens.delete(k);
     }
 
-    // Descobre IPs locais reais para o QR
+    // Descobre IPs locais reais para o QR (compatível com Node 18+, dual-stack e priorizando Wi-Fi/Ethernet doméstica)
     const nets = os.networkInterfaces();
     const lanIps: string[] = [];
     for (const name of Object.keys(nets)) {
       for (const net of (nets as any)[name] || []) {
-        if (net.family === 'IPv4' && !net.internal) {
+        const isIpv4 = net.family === 'IPv4' || (net as any).family === 4;
+        if (isIpv4 && !net.internal && net.address) {
           lanIps.push(net.address);
+        } else if (
+          (net.family === 'IPv6' || (net as any).family === 6) &&
+          !net.internal &&
+          typeof net.address === 'string' &&
+          net.address.startsWith('::ffff:')
+        ) {
+          lanIps.push(net.address.replace('::ffff:', ''));
         }
       }
     }
+    // Prioriza faixas domésticas típicas (192.168.x.x e 10.x.x.x) sobre redes virtuais (WSL, Docker, VM)
+    lanIps.sort((a, b) => {
+      const isA_192 = a.startsWith('192.168.');
+      const isB_192 = b.startsWith('192.168.');
+      if (isA_192 && !isB_192) return -1;
+      if (!isA_192 && isB_192) return 1;
+      const isA_10 = a.startsWith('10.');
+      const isB_10 = b.startsWith('10.');
+      if (isA_10 && !isB_10) return -1;
+      if (!isA_10 && isB_10) return 1;
+      return 0;
+    });
     const port = Number(process.env.PORT || 3000); // porta de exibição para QR pairing
     const primaryIp = lanIps[0] || 'localhost';
 
@@ -1515,6 +1552,16 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
     for (const w of waiters) w(device);
     pairWaiters.delete(token);
 
+    // CORREÇÃO (pareamento que "sumia"): o servidor criava o dispositivo mas nunca
+    // o registrava no DevicesManager — se a janela do PC já estava aberta, o celular
+    // pareado não aparecia em "Dispositivos" até um reload completo (só o IPC
+    // efêmero carregava o payload). Agora entra no registro persistido + SSE.
+    try {
+      devicesManager.addDevice(device as any);
+    } catch (devErr) {
+      console.warn('[Pairing] Falha ao registrar dispositivo pareado no DevicesManager:', devErr);
+    }
+
     (globalThis as any).__lioraLastPairedDevice = device;
     res.json({ success: true, deviceId: device.id });
   });
@@ -1586,6 +1633,42 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
   app.get('/api/pair/last', (_req, res) => {
     const device = (globalThis as any).__lioraLastPairedDevice;
     res.json({ success: Boolean(device), device: device || null });
+  });
+
+  // SSE de eventos de dispositivo em tempo real: o servidor (fonte da verdade do
+  // pareamento) avisa a UI quando um celular é vinculado, removido ou quando um
+  // comando é despachado — sem polling nem reload completo.
+  app.get('/api/devices/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    res.write(`data: ${JSON.stringify({ type: 'CONNECTED', timestamp: new Date().toISOString() })}\n\n`);
+
+    const unsubscribe = devicesManager.subscribe((event) => {
+      try {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        (res as any).flush?.();
+      } catch {
+        // Cliente fechou no meio da escrita — o handler de close limpa a inscrição
+      }
+    });
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: ping\n\n`);
+      } catch {}
+    }, 25000);
+    if (typeof (heartbeat as any)?.unref === 'function') (heartbeat as any).unref();
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.on('close', cleanup);
+    req.on('aborted', cleanup);
   });
 
   app.get('/api/health', (req, res) => {
@@ -1802,9 +1885,14 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       const event = await integrationsVault.ingestWebhook(provider, eventType, payload, signature, timestampHeader);
       return res.status(200).json({ success: true, eventId: event.id, status: 'PROCESSED' });
     } catch (err: any) {
-      const isReplay = String(err?.message || '').includes('Replay Attack') || String(err?.message || '').includes('desfasagem temporal');
-      const isBadSig = String(err?.message || '').includes('HMAC');
+      const message = String(err?.message || '');
+      const isReplay = message.includes('Replay Attack') || message.includes('desfasagem temporal');
+      const isBadSig = message.includes('HMAC');
       const status = (isReplay || isBadSig) ? 401 : 400;
+      if (message.includes('SECRET_NOT_CONFIGURED') || message.includes('MISSING_TIMESTAMP')) {
+        // Diagnóstico honesto: a recusa é de CONFIGURAÇÃO, não do provedor.
+        console.warn(`[Webhook:${req.params.provider}] Recusado (${message}). Cadastre o webhookSecret da integração; webhooks sem autenticação são bloqueados por padrão.`);
+      }
       return res.status(status).json({ success: false, error: err?.message || 'Falha no processamento do webhook.' });
     }
   });
@@ -1928,10 +2016,12 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         }
       }
 
-      // riskLevel explícito do registry (resolve R1/R2 e escala pc_manage_apps mutável para R2)
+      // riskLevel explícito do registry (resolve R1/R2 e escala ações MUTÁVEIS
+      // de pc_manage_apps — launch/kill/close/focus/minimize/maximize/restore —
+      // para R2 a partir do contrato `mutatingActions` da própria tool).
       const toolRiskLevel = (
-        toolName === 'pc_manage_apps' && parameters?.action !== 'list'
-          ? 'R2'
+        toolDef?.mutatingActions && toolDef.mutatingActions.includes(String(parameters?.action))
+          ? toolDef.mutatingRiskLevel ?? 'R2'
           : toolDef?.riskLevel
       ) as any;
       // Consentimento HMAC emitido pelo PermissionEngine após validação do token de UI
@@ -2029,17 +2119,51 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
   // Setup Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
+    // CORREÇÃO (porta 24678 presa por órfão): libera a porta do HMR de processos
+    // node/tsx órfãos antes de o Vite tentar abri-la (mesma lógica do boot da 3000).
+    if (process.env.VITE_HMR_PORT) {
+      try {
+        const { exec } = await import('child_process');
+        const hmrPort = Number(process.env.VITE_HMR_PORT);
+        const out = await new Promise<string>((resolve) => {
+          exec(`netstat -ano -p tcp | findstr ":${hmrPort} " | findstr "LISTENING"`, (e, stdout) => resolve(e ? '' : String(stdout)));
+        });
+        const hmrPids = new Set(
+          out.split('\n').map((l) => l.trim().split(/\s+/).pop()).filter((p) => p && /^\d+$/.test(p))
+        );
+        for (const pid of hmrPids) {
+          const name = await new Promise<string>((resolve) => {
+            exec(`tasklist /fi "PID eq ${pid}" /fo csv /nh`, (e, stdout) => {
+              const m = String(stdout).split('"')[1];
+              resolve(e ? '' : (m || ''));
+            });
+          });
+          const lower = name.toLowerCase();
+          if (lower === 'node.exe' || lower === 'tsx.exe') {
+            console.warn(`[LIORA] Porta HMR ${hmrPort} ocupada por processo órfão (${name} PID ${pid}) — encerrando-o automaticamente.`);
+            await new Promise<void>((resolve) => { exec(`taskkill /PID ${pid} /F`, () => resolve()); });
+          } else {
+            console.warn(`[LIORA] Porta HMR ${hmrPort} ocupada por ${name || 'processo desconhecido'} (PID ${pid}) — NÃO encerrado automaticamente.`);
+          }
+        }
+        if (hmrPids.size > 0) await new Promise((r) => setTimeout(r, 500));
+      } catch { /* rede de segurança: o Vite ainda reporta o erro se não conseguir */ }
+    }
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        // CORREÇÃO (porta 24678 em uso): fixa a porta do HMR e desativa o
-        // StrictPort fallback silencioso — com hmr.port explícito, instâncias
-        // anteriores em colisão produzem warning claro em vez de comportamento
-        // imprevisível de porta aleatória.
-        hmr: { port: Number(process.env.VITE_HMR_PORT || 24678) }
+        // CORREÇÃO (porta 24678 em uso): fixa a porta do HMR para evitar
+        // comportamento imprevisível de porta aleatória em colisões.
+        // CORREÇÃO (deprecação do Vite): middlewareMode não usa server.ws (o WS
+        // HMR é roteado pelo próprio servidor HTTP do Express) — porta fixada
+        // via ws.port apenas se fornecida.
+        ...(process.env.VITE_HMR_PORT
+          ? { ws: { port: Number(process.env.VITE_HMR_PORT) } }
+          : {})
       },
       appType: 'spa',
     });
+    _activeViteServer = vite;
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
@@ -2069,13 +2193,14 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         try {
           const originUrl = new URL(origin);
           const isLocal = originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1';
+          const isTauri = originUrl.hostname.includes('tauri') || origin.startsWith('tauri:') || origin.startsWith('http://tauri');
           const isSameHost = originUrl.host === host;
           const isAISStudio = originUrl.hostname.endsWith('run.app') || 
                               originUrl.hostname.endsWith('aistudio.google.com') ||
                               originUrl.hostname.endsWith('googleusercontent.com') ||
                               originUrl.hostname.endsWith('usercontent.goog') ||
                               origin === 'null';
-          if (!isLocal && !isSameHost && !isAISStudio && process.env.NODE_ENV === 'production') {
+          if (!isLocal && !isSameHost && !isTauri && !isAISStudio && process.env.NODE_ENV === 'production') {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
@@ -2179,23 +2304,40 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
       liveState = 'OFF';
     };
 
+    // Helper seguro para envio via WebSocket evitando unhandled rejections
+    const safeSend = (payload: any) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          const msg = typeof payload === 'string' ? payload : JSON.stringify(payload);
+          ws.send(msg);
+        } catch (e) {
+          console.warn('[WebSocket Voice] Falha ao enviar via safeSend:', e);
+        }
+      }
+    };
+
     // Send TRANSPORT_CONNECTED message as required
-    ws.send(JSON.stringify({
+    safeSend({
       type: 'TRANSPORT_CONNECTED',
       message: 'Canal WebSocket interno seguro estabelecido com sucesso.',
       timestamp: new Date().toISOString()
-    }));
+    });
 
     ws.on('message', async (data, isBinary) => {
-      const dataLen = Buffer.isBuffer(data) ? data.length : Buffer.from(data as any).length;
-      if (dataLen > 64 * 1024) {
-        ws.send(JSON.stringify({ type: 'ERROR', message: 'Payload muito grande (limite 64KB).' }));
-        ws.close(1009, 'Message too big');
-        return;
-      }
+      try {
+        const dataLen = Buffer.isBuffer(data) ? data.length : Buffer.from(data as any).length;
+        if (dataLen > 64 * 1024) {
+          safeSend({ type: 'ERROR', message: 'Payload muito grande (limite 64KB).' });
+          try { ws.close(1009, 'Message too big'); } catch {}
+          return;
+        }
 
       // 1. Processamento de pacotes binários de áudio nativo (PCM 16-bit 16kHz)
       if (isBinary) {
+        if (liveState === 'CONNECTING') {
+          // Handshake com a API Gemini Live ainda em andamento — descarta chunks de aquecimento sem quebrar a sessão
+          return;
+        }
         if (liveState !== 'ACTIVE' || !liveSession) {
           ws.send(JSON.stringify({ 
             type: 'AUDIO_CHUNK_REJECTED', 
@@ -2307,15 +2449,26 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
             liveState = 'CONNECTING';
             const requestedModel = payload.model || 'gemini-3.8-live';
 
-            const liveAiClient = payload.apiKey ? new GoogleGenAI({
-              apiKey: payload.apiKey,
+            // Gemini Live aceita estritamente apenas Modality.AUDIO em responseModalities.
+            // A combinação [AUDIO, TEXT] é rejeitada pelo Google com código 1007.
+            // Transcrições de entrada e saída são obtidas via inputAudioTranscription e eventos de áudio.
+            const responseModalities = [Modality.AUDIO];
+
+            const rawLiveKey = (payload.apiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+            const liveAiClient = rawLiveKey ? new GoogleGenAI({
+              apiKey: rawLiveKey,
               httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
             }) : ai;
 
             liveSession = await liveAiClient.live.connect({
               model: requestedModel,
               config: {
-                responseModalities: [Modality.AUDIO],
+                // TEXT + AUDIO quando solicitado pelo cliente (modo &quot;sem voz dupla&quot;), senão só áudio.
+                responseModalities,
+                // Transcrição da FALA DO MESTRE: sem isto o cliente não recebe texto
+                // do usuário e o gate de atenção (wake word) nunca libera o turno —
+                // a LIORA ouve o primeiro comando, responde e fica em silêncio depois.
+                inputAudioTranscription: {},
                 speechConfig: {
                   voiceConfig: {
                     prebuiltVoiceConfig: { voiceName: requestedVoice }
@@ -2324,7 +2477,7 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                 // P0 (paridade voz x chat): mesma arsenal de ferramentas do chat de texto.
                 // O Gemini Live agora pode chamar navigateToTab, system_info, calculate_route,
                 // triggerAutomation etc. exatamente como no /api/gemini/chat/stream.
-                tools: [{ functionDeclarations: toolRegistry.toGeminiDeclarations() }],
+                tools: [{ functionDeclarations: buildModelToolDeclarations() }],
                 systemInstruction: payload.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION
               },
               callbacks: {
@@ -2350,6 +2503,17 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                         timestamp: new Date().toISOString()
                       }));
                     }
+                  }
+
+                  // Transcrição de ENTRADA do usuário em tempo real (gate de atenção/wake word)
+                  const inTranscription = liveMsg.serverContent?.inputTranscription?.text;
+                  if (inTranscription) {
+                    ws.send(JSON.stringify({
+                      type: 'TRANSCRIPTION',
+                      text: inTranscription,
+                      role: 'user',
+                      timestamp: new Date().toISOString()
+                    }));
                   }
 
                   // Transcrição de saída do modelo em tempo real
@@ -2433,7 +2597,8 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
                     })();
                   }
                 },
-                onclose: () => {
+                onclose: (closeEv: any) => {
+                  console.warn('[Gemini Live] Sessão encerrada pelo Google:', closeEv?.reason || closeEv?.code || closeEv);
                   cleanupLive();
                   if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({
@@ -2498,6 +2663,9 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 
         // Chunks de áudio em formato JSON base64
         if (payload.type === 'AUDIO_CHUNK') {
+          if (liveState === 'CONNECTING') {
+            return;
+          }
           if (liveState !== 'ACTIVE' || !liveSession) {
             ws.send(JSON.stringify({ type: 'AUDIO_CHUNK_REJECTED', reason: 'Nenhuma sessão Live ativa.' }));
             return;
@@ -2521,6 +2689,14 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         }
 
         if (payload.type === 'LIVE_MESSAGE') {
+          if (liveState === 'CONNECTING') {
+            // Aguarda brevemente o handshake com o Gemini Live terminar antes de avaliar
+            let waited = 0;
+            while (liveState === 'CONNECTING' && waited < 4000) {
+              await new Promise(r => setTimeout(r, 150));
+              waited += 150;
+            }
+          }
           if (liveState !== 'ACTIVE' || !liveSession) {
             ws.send(JSON.stringify({ type: 'GEMINI_LIVE_ERROR', message: 'Nenhuma sessão Gemini Live ativa.' }));
             return;
@@ -2573,10 +2749,11 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         if (payload.type === 'CLIENT_INTERRUPTED') {
           if (liveSession) {
             try {
-              liveSession.sendClientContent?.({
-                turns: [],
-                turnComplete: true
-              });
+              // FIM DE FALA REAL (correção): enviar `turns: []` fazia o Gemini
+              // descartar o áudio acumulado em vez de processá-lo — a LIORA nunca
+              // respondia. `audioStreamEnd` sinaliza "terminei de falar" e libera
+              // a geração sobre o que já foi enviado pelo sendRealtimeInput.
+              liveSession.sendRealtimeInput?.({ audioStreamEnd: true });
             } catch {}
           }
           ws.send(JSON.stringify({ type: 'INTERRUPTED', source: 'CLIENT_ACOUSTIC_VAD', timestamp: new Date().toISOString() }));
@@ -2593,9 +2770,12 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
         ws.send(JSON.stringify({ type: 'ACK', received: payload.type || 'UNKNOWN' }));
 
       } catch (err) {
-        ws.send(JSON.stringify({ type: 'ERROR', message: 'Mensagem JSON inválida.' }));
+        safeSend({ type: 'ERROR', message: 'Mensagem JSON inválida.' });
       }
-    });
+    } catch (unhandledMsgErr) {
+      console.error('[WebSocket Voice] Erro capturado no listener de mensagem do socket:', unhandledMsgErr);
+    }
+  });
 
     ws.on('close', () => {
       cleanupLive();
@@ -2641,12 +2821,20 @@ async function startServer(explicitPort?: number): Promise<http.Server> {
 }
 
 let _activeHttpServer: http.Server | null = null;
+let _activeViteServer: any = null;
 
 /**
  * FIX 7: encerra limpo o servidor Express (usado pelos testes de integração
  * para subir/derrubar o ciclo de vida dentro da suíte, sem processo externo).
  */
 export async function stopServer(): Promise<void> {
+  if (_activeViteServer) {
+    try {
+      await _activeViteServer.close();
+    } catch { /* ignore */ }
+    _activeViteServer = null;
+  }
+
   if (_activeHttpServer) {
     const srv = _activeHttpServer;
     _activeHttpServer = null;
@@ -2682,13 +2870,150 @@ export async function stopServer(): Promise<void> {
 // Exporta explicitamente para os testes de integração usarem (Fix 7)
 export { startServer };
 
+/**
+ * Identifica se este processo foi iniciado por um LAUNCHER DE DESENVOLVIMENTO
+ * (npm/npx/tauri/vite) e retorna a cadeia de ascendentes ainda viva.
+ *
+ * Serve para o servidor se encerrar quando o Tauri/Vite morre — caso contrário o
+ * `server.ts` fica órfão ouvindo na porta 3000 e o `npm run tauri dev` termina
+ * com "beforeDevCommand terminated with a non-zero status code".
+ */
+function detectDevLaunchers(): number[] {
+  try {
+    if (process.platform !== 'win32') {
+      return process.ppid && process.ppid > 1 ? [process.ppid] : [];
+    }
+    const { execSync } = require('node:child_process') as typeof import('node:child_process');
+    const out = execSync(
+      'powershell -NoProfile -Command "$id=$PID; for($i=0;$i -lt 6;$i++){ $p=Get-CimInstance Win32_Process -Filter \"ProcessId=$id\" -ErrorAction SilentlyContinue; if(-not $p){break}; Write-Output ($p.ProcessId.ToString()+\"|\"+$p.Name+\"|\"+$p.ParentProcessId); $id=$p.ParentProcessId; if($id -le 4){break} }"',
+      { encoding: 'utf8', timeout: 4000 }
+    );
+    const chain = String(out).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const isDevLauncher = /node\.exe|npm|npx|tauri|vite|cmd\.exe|powershell|conhost/i;
+    if (!chain.some((line) => isDevLauncher.test(line))) return [];
+    const pids: number[] = [];
+    for (const line of chain) {
+      const pid = Number(line.split('|')[0]);
+      if (Number.isFinite(pid) && pid > 1 && pid !== process.pid) pids.push(pid);
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
 // Auto-start apenas quando executado diretamente como processo (não quando importado por testes)
 if (isDirectRun) {
+  // CORREÇÃO DEFINITIVA ("beforeDevCommand terminated with non-zero status" +
+  // processo órfão segurando a porta 3000):
+  //
+  // O `tsx server.ts` roda como FILHO do Vite/Tauri e, quando o Tauri encerrava, o
+  // filho sobrevivia segurando a porta 3000 — o `npm run dev` nunca terminava e o
+  // Tauri abortava o boot seguinte.
+  //
+  // Detecção de "modo desenvolvimento": quando o processo foi iniciado por um
+  // launcher de dev (npx/tauri/vite), guardamos a CADEIA de ascendentes e
+  // verificamos periodicamente se ela continua viva. Se não estiver, o servidor
+  // encerra limpo. Sem launcher (execução direta/avulsa) nada acontece.
+  const ancestors = detectDevLaunchers();
+  if (ancestors.length > 0) {
+    const orphanWatchdog = setInterval(() => {
+      const alive = ancestors.some((pid) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (!alive) {
+        clearInterval(orphanWatchdog);
+        console.info('[LIORA Server] Launcher de desenvolvimento encerrado — desligando o servidor (evita órfão na porta 3000).');
+        void stopServer().catch(() => {}).finally(() => process.exit(0));
+      }
+    }, 2000);
+    if (typeof (orphanWatchdog as any)?.unref === 'function') (orphanWatchdog as any).unref();
+  }
+
+  // CORREÇÃO (porta 3000 presa por processo órfão): quando o `npm run tauri dev`
+  // anterior é morto sem graceful shutdown (fechamento da janela, kill do terminal,
+  // crash), o child tsx server.ts sobrevive e segura a porta 3000 — o boot seguinte
+  // falhava com EADDRINUSE. Agora detectamos e matamos o processo órfão ANTES de
+  // subir o servidor (apenas quando o processo na porta é um node/tsx/liora, nunca
+  // um serviço alheio do usuário).
+  const freePortIfOrphaned = async (port: number): Promise<void> => {
+    try {
+      const net = await import('net');
+      const busy = await new Promise<boolean>((resolve) => {
+        const probe = net.createConnection({ port, host: '127.0.0.1' });
+        probe.once('connect', () => { probe.destroy(); resolve(true); });
+        probe.once('error', () => resolve(false));
+        setTimeout(() => { try { probe.destroy(); } catch {} resolve(false); }, 800);
+      });
+      if (!busy) return;
+      const { exec } = await import('child_process');
+      const out = await new Promise<string>((resolve) => {
+        exec(`netstat -ano -p tcp | findstr ":${port} " | findstr "LISTENING"`, (e, stdout) => resolve(e ? '' : String(stdout)));
+      });
+      const pids = new Set(
+        out.split('\n').map((l) => l.trim().split(/\s+/).pop()).filter((p) => p && /^\d+$/.test(p))
+      );
+      for (const pid of pids) {
+        if (!pid || Number(pid) === process.pid) continue;
+        const name = await new Promise<string>((resolve) => {
+          exec(`tasklist /fi "PID eq ${pid}" /fo csv /nh`, (e, stdout) => {
+            const m = String(stdout).split('"')[1];
+            resolve(e ? '' : (m || ''));
+          });
+        });
+        const lower = name.toLowerCase();
+        // Só mata o processo da porta se ele for CLARAMENTE uma instância LIORA
+        // (node/tsx executando este projeto). Antes qualquer `node.exe` na porta
+        // 3000 era derrubado — inclusive um servidor do usuário não relacionado.
+        // Consulta a linha de comando para confirmar.
+        const cmdline = await new Promise<string>((resolve) => {
+          exec(
+            `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CommandLine"`,
+            (e, stdout) => resolve(e ? '' : String(stdout || '').trim())
+          );
+        });
+        const looksLikeLiora = /server\.ts|LIORA|liora/i.test(cmdline);
+        if ((lower === 'node.exe' || lower === 'tsx.exe') && looksLikeLiora) {
+          console.warn(`[LIORA] Porta ${port} ocupada por processo órfão do LIORA (${name} PID ${pid}) — encerrando-o automaticamente.`);
+          await new Promise<void>((resolve) => {
+            exec(`taskkill /PID ${pid} /F`, () => resolve());
+          });
+        } else {
+          console.warn(`[LIORA] Porta ${port} ocupada por ${name || 'processo desconhecido'} (PID ${pid}) — NÃO encerrado automaticamente (não é uma instância do LIORA). Libere manualmente ou use outra porta.`);
+        }
+      }
+      // Pequena espera para o SO liberar o socket (TIME_WAIT)
+      if (pids.size > 0) await new Promise((r) => setTimeout(r, 500));
+    } catch (e) {
+      // Qualquer falha na auto-liberação não deve impedir o boot — o handler de
+      // EADDRINUSE abaixo continua como rede de segurança.
+    }
+  };
+
+  await freePortIfOrphaned(3000);
+  // CORREÇÃO (24678 presa): a porta HMR do Vite também pode ficar presa por um
+  // node/tsx órfão (o `tsx server.ts` não é filho do Vite, então o graceful
+  // shutdown do server.ts não cobre ela). Liberamos também antes do boot.
+  await freePortIfOrphaned(24678);
+
   // Bug hunt (unhandled rejection): startServer pode falhar (porta ocupada, EACCES)
   // — registra e encerra com código não-zero em vez de derrubar o processo silenciosamente.
   startServer().catch((err) => {
     console.error('[LIORA Server] Falha fatal ao iniciar o servidor:', err);
     process.exit(1);
+  });
+
+  // Blindagem de resiliência: protege o processo contra interrupções espúrias
+  process.on('unhandledRejection', (reason) => {
+    console.error('[LIORA Server] unhandledRejection capturado (servidor protegido contra crash):', reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[LIORA Server] uncaughtException capturado (servidor protegido contra crash):', err);
   });
 
   // CORREÇÃO (processo órfão segurando portas): quando o `npm run tauri dev` é
@@ -2702,8 +3027,11 @@ if (isDirectRun) {
   };
   process.on('SIGINT', () => void gracefulExit('SIGINT'));
   process.on('SIGTERM', () => void gracefulExit('SIGTERM'));
-  // Windows: Ctrl+C em pipeline npm chega como SIGHUP em alguns cenários
-  process.on('SIGHUP', () => void gracefulExit('SIGHUP'));
+  // Windows: SIGHUP é gerado falsamente pelo Windows Console Host ao desacoplar/abrir janelas Tauri.
+  // Somente escuta SIGHUP em ambientes POSIX (Linux/macOS).
+  if (process.platform !== 'win32') {
+    process.on('SIGHUP', () => void gracefulExit('SIGHUP'));
+  }
   // Fecha o HMR websocket server do Vite junto (parte do mesmo processo)
   process.on('exit', () => {
     try { _activeHttpServer?.closeAllConnections?.(); } catch { /* ignore */ }

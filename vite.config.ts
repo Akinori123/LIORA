@@ -16,12 +16,18 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        external: ['fs', 'os', 'path', 'child_process'],
+      },
+    },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // CORREÇÃO (deprecação do Vite): usar server.ws em vez de server.hmr legado.
+      // HMR desativado via DISABLE_HMR env var (AI Studio) e watch desativado
+      // quando DISABLE_HMR=true para economizar CPU durante edições do agente.
+      ...(process.env.DISABLE_HMR === 'true'
+        ? { ws: false as const, watch: null }
+        : { ws: { port: Number(process.env.VITE_HMR_PORT || 24678) } }),
     },
   };
 });

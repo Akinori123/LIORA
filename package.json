@@ -11,12 +11,14 @@
     "lint": "tsc --noEmit",
     "tauri": "tauri",
     "test": "tsx --test tests/*.test.ts src/utils/chatContext.test.ts",
+    "test:run": "tsx --test tests/*.test.ts src/utils/chatContext.test.ts",
     "test:transcription": "tsx --test tests/transcriptionDynamic.test.ts",
     "test:persistence": "tsx --test tests/persistenceAudit.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/api": "^2.12.5",
     "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^6.1.1",
     "clsx": "^2.1.1",
