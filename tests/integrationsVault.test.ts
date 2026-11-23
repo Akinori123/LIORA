@@ -47,13 +47,19 @@ test('INT-02: Validação Criptográfica de Webhooks HMAC SHA-256', async () => 
   });
 
   // 2. Ingestão de webhook com assinatura válida deve passar
-  const validIngest = await vault.ingestWebhook('mercadopago', 'payment.approved', payload, `sha256=${validSignature}`);
+  const validIngest = await vault.ingestWebhook(
+    'mercadopago',
+    'payment.approved',
+    payload,
+    `sha256=${validSignature}`,
+    new Date().toISOString()
+  );
   assert.strictEqual(validIngest.verifiedSignature, true);
 
   // 3. Ingestão com assinatura HMAC inválida deve lançar exceção
   await assert.rejects(
     async () => {
-      await vault.ingestWebhook('mercadopago', 'payment.approved', payload, 'sha256=invalid_signature_hash');
+      await vault.ingestWebhook('mercadopago', 'payment.approved', payload, 'sha256=invalid_signature_hash', new Date().toISOString());
     },
     /Rejeição de Webhook por assinatura HMAC inválida/
   );
@@ -167,6 +173,33 @@ test('INT-06: Proteção contra Replay Attacks em Webhooks (Janela Estrita de 5 
       await vault.ingestWebhook('github', 'repo.push', payload, sig, expiredHeader);
     },
     /Replay Attack/
+  );
+});
+
+test('INT-06b: Webhook sem segredo cadastrado é RECUSADO (fail-closed)', async () => {
+  const bus = new EventBus();
+  const vault = new IntegrationsVault(bus);
+  const payload = { event: 'repo.push', commit: 'c9999' };
+
+  // Nenhum webhookSecret configurado para 'slack' neste vault.
+  await assert.rejects(
+    async () => {
+      await vault.ingestWebhook('slack', 'any.event', payload, 'sha256=whatever', new Date().toISOString());
+    },
+    /SECRET_NOT_CONFIGURED/,
+    'Sem segredo, qualquer POST público poderia publicar no barramento e disparar automações'
+  );
+});
+
+test('INT-06c: Webhook sem timestamp é RECUSADO (janela anti-replay não pode ser burlada)', async () => {
+  const bus = new EventBus();
+  const vault = new IntegrationsVault(bus);
+
+  await assert.rejects(
+    async () => {
+      await vault.ingestWebhook('github', 'repo.push', { event: 'repo.push' }, 'sha256=abc');
+    },
+    /MISSING_TIMESTAMP/
   );
 });
 

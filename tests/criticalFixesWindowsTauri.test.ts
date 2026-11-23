@@ -141,7 +141,7 @@ test('Bug 2a: localBridge falls back to Express backend when Tauri Rust returns 
     const res = await executeLocalTool('pc_simulate_input', { action: 'type', text: 'Teste' }, 'sess-tauri', 'tok-1');
     assert.equal(res.success, true);
     assert.match(fetchCalledUrl, /\/api\/tools\/execute$/);
-    assert.equal(res.data?.message, 'Texto enviado via Express bridge.');
+    assert.equal((res.data as { message?: string } | undefined)?.message, 'Texto enviado via Express bridge.');
   } finally {
     globalThis.fetch = prevFetch;
     if (prevWindow === undefined) delete (globalThis as any).window;
@@ -330,7 +330,7 @@ test('Bug 5 (Audit): localBridge falls back to Express when Tauri rejects ui-con
     );
     assert.equal(res.success, true);
     assert.equal(fetchHeaders?.['x-liora-ui-consent'], 'ui-consent-12345');
-    assert.equal(res.data?.opened, true);
+    assert.equal((res.data as { opened?: boolean } | undefined)?.opened, true);
   } finally {
     globalThis.fetch = prevFetch;
     if (prevWindow === undefined) delete (globalThis as any).window;

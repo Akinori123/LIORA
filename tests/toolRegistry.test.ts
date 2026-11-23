@@ -39,7 +39,9 @@ test('1. Tool Registry - Initial state and default simulated tools', async (t) =
     'email_fetch_and_read', 'email_send_or_reply',
     'calendar_list_events', 'calendar_create_event',
     'start_background_task', 'cancel_background_task',
-    'vault_store_credential', 'vault_get_credential', 'vault_delete_credential'
+    'vault_store_credential', 'vault_get_credential', 'vault_delete_credential',
+    // Captura frame real da webcam no navegador e chama a API visual (R0, sem consentimento).
+    'camera_inspect_object'
   ]);
 
   for (const tool of tools) {

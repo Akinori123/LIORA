@@ -347,11 +347,13 @@ test('T19 & T20: PersistÃªncia e retryMessage continuam funcionando perfeitame
   resetStore();
   const sessId = useLioraStore.getState().createSession('Retry & Persistence');
   
+  const retryFixture: ChatMessage[] = [
+    { id: 'u1', sender: 'user', text: 'Mensagem para retry', timestamp: '10:00:00', status: 'completed' },
+    { id: 'a1', sender: 'assistant', text: '', timestamp: '10:00:01', status: 'error', errorMessage: 'Falha simulada', errorCode: 'AUTH_ERROR' }
+  ];
   useLioraStore.setState({
-    messages: [
-      { id: 'u1', sender: 'user', text: 'Mensagem para retry', timestamp: '10:00:00', status: 'completed' },
-      { id: 'a1', sender: 'assistant', text: '', timestamp: '10:00:01', status: 'error', errorMessage: 'Falha simulada', errorCode: 'AUTH_ERROR' }
-    ]
+    sessions: useLioraStore.getState().sessions.map(s => s.id === sessId ? { ...s, messages: retryFixture } : s),
+    messages: retryFixture
   });
 
   const originalFetch = globalThis.fetch;

@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { useLioraStore } from '../src/store/lioraStore.ts';
-import { ChatMessage } from '../src/types.ts';
+import { ChatMessage, ConversationSession } from '../src/types.ts';
 
 test('store initial state has chat enabled with clean defaults', () => {
   const state = useLioraStore.getState();
@@ -21,11 +21,30 @@ test('retryMessage replaces failed assistant message without duplicating user tu
   const userMsgId = 'user-test-1';
   const failedMsgId = 'failed-test-1';
 
+  const fixtureMessages: ChatMessage[] = [
+    { id: userMsgId, sender: 'user', text: 'Pergunta teste', timestamp: '10:00', status: 'completed' },
+    { id: failedMsgId, sender: 'assistant', text: '', timestamp: '10:00', status: 'error', errorCode: 'AUTH_ERROR', errorMessage: 'Falha simulada' }
+  ];
+
+  // O retry opera por sessão (sessions[activeSessionId].messages) — o fixture precisa
+  // espelhar essa estrutura, senão o teste passava lendo `messages` enquanto a
+  // sessão persistida ficava vazia (foi exatamente o bug real corrigido).
+  const activeSessionId = useLioraStore.getState().activeSessionId || 'sess-test-1';
+  const activeSession = useLioraStore.getState().sessions.find(s => s.id === activeSessionId);
+  const fixtureSessions: ConversationSession[] = activeSession
+    ? useLioraStore.getState().sessions.map(s => s.id === activeSessionId ? { ...s, messages: fixtureMessages } : s)
+    : [{
+        id: activeSessionId,
+        title: 'Teste',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messages: fixtureMessages
+      }];
+
   useLioraStore.setState({
-    messages: [
-      { id: userMsgId, sender: 'user', text: 'Pergunta teste', timestamp: '10:00', status: 'completed' },
-      { id: failedMsgId, sender: 'assistant', text: '', timestamp: '10:00', status: 'error', errorCode: 'AUTH_ERROR', errorMessage: 'Falha simulada' }
-    ],
+    sessions: fixtureSessions,
+    activeSessionId,
+    messages: fixtureMessages,
     isGenerating: false
   });
 
