@@ -170,6 +170,20 @@ export function validateToolParameters(
     }
   }
 
+  // CORREÇÃO (auditoria profunda): campos presentes no payload mas AUSENTES do
+  // esquema eram SILENCIOSAMENTE descartados (o `sanitized` só recebia chaves
+  // declaradas). Com `additionalProperties !== false` — o caso de quase todas
+  // as tools — `pc_manage_apps({ action:'minimize', processName:'chrome' })`
+  // perdia `processName` e a tool falhava com MISSING_TARGET sem explicação.
+  // Agora, quando o esquema permite propriedades extras, elas são preservadas.
+  if (schema.additionalProperties !== false) {
+    for (const [key, val] of Object.entries(params)) {
+      if (!Object.prototype.hasOwnProperty.call(schemaProps, key) && sanitized[key] === undefined) {
+        sanitized[key] = val;
+      }
+    }
+  }
+
   return {
     valid: errors.length === 0,
     errors,

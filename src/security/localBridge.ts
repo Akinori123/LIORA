@@ -9,7 +9,8 @@ import { PermissionDecisionEffect } from './types';
 export interface LocalExecutionResult {
   toolName: string;
   success: boolean;
-  data?: any;
+  /** Payload devolvido pela ferramenta (forma livre, validado nos consumidores). */
+  data?: unknown;
   error?: string;
   simulated: boolean;
   riskLevel: ToolRiskLevel;
@@ -23,8 +24,17 @@ export interface LocalExecutionResult {
 
 export interface LocalExecutionRequest {
   toolName: string;
-  parameters: Record<string, any>;
+  parameters: Record<string, unknown>;
   sessionId?: string;
+}
+
+/**
+ * Estreita um payload JSON livre para um objeto indexável sem recorrer a `any`.
+ */
+export function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /**
@@ -55,7 +65,7 @@ export async function invokeTauri<T>(cmd: string, args?: Record<string, any>): P
  */
 export async function executeLocalTool(
   toolName: string,
-  parameters: Record<string, any> = {},
+  parameters: Record<string, unknown> = {},
   sessionId: string = 'default-session',
   uiConsentToken?: string
 ): Promise<LocalExecutionResult> {
@@ -76,13 +86,21 @@ export async function executeLocalTool(
 
   const isDesktop = isTauriEnvironment();
 
+  // Normalização defensiva de parâmetros entre convenções Tauri (path) e Web/Gemini (filePath)
+  const normalizedParams = { ...(parameters || {}) };
+  if (normalizedParams.filePath && !normalizedParams.path) {
+    normalizedParams.path = normalizedParams.filePath;
+  } else if (normalizedParams.path && !normalizedParams.filePath) {
+    normalizedParams.filePath = normalizedParams.path;
+  }
+
   if (isDesktop) {
     try {
       // Invocação nativa Tauri invoke()
       const result = await invokeTauri<LocalExecutionResult>('execute_local_tool', {
-        payload: { toolName, parameters, sessionId, consentToken: uiConsentToken }
+        payload: { toolName, parameters: normalizedParams, sessionId, consentToken: uiConsentToken }
       });
-      const isUnsupportedInRust =
+      const isUnsupportedInRustResult =
         result &&
         result.success === false &&
         typeof result.error === 'string' &&
@@ -95,14 +113,28 @@ export async function executeLocalTool(
           (typeof result.error === 'string' &&
             (result.error.includes('CONSENT_TOKEN_INVALID_OR_MISSING') ||
               result.error.includes('CONSENT_SECRET_MISSING'))));
-      if (!isUnsupportedInRust && !isNodeUiConsentFallback) {
+      if (!isUnsupportedInRustResult && !isNodeUiConsentFallback) {
         return result;
       }
       // Se não implementada no Rust ou se o token é do fluxo Express UI-Consent, segue ao backend Express local
-    } catch (err: any) {
-      const msg = String(err?.message || '');
-      if (!msg.includes('desconhecida') && !msg.includes('não suportada')) {
-        // Ainda tenta o backend Express caso o servidor local esteja ativo em localhost:3000
+    } catch (err: unknown) {
+      const msg = String((err as { message?: unknown } | null)?.message ?? err ?? '');
+      const isUnsupportedInRust =
+        msg.includes('desconhecida') || msg.includes('não suportada') || msg.includes('nao suportada');
+      if (!isUnsupportedInRust) {
+        // Falha REAL do IPC nativo: não pode ser mascarada por um fallback que
+        // poderia responder com um resultado simulado de outra camada.
+        return {
+          success: false,
+          toolName,
+          decision: 'DENY',
+          riskLevel: 'R0',
+          error: msg || 'Falha na comunicação IPC com o backend nativo (Tauri).',
+          code: 'NATIVE_IPC_ERROR',
+          simulated: false,
+          executionTimeMs: Date.now() - startTime,
+          timestamp: new Date().toISOString()
+        };
       }
     }
   }
@@ -130,27 +162,28 @@ export async function executeLocalTool(
     const response = await fetch(toolsUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ toolName, parameters })
+      body: JSON.stringify({ toolName, parameters: normalizedParams })
     });
 
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
       throw new Error(`Resposta não-JSON do servidor (${response.status})`);
     }
-    const data = await response.json();
+    const data = asRecord(await response.json()) ?? {};
+    const innerData = asRecord(data.data);
     return {
       success: Boolean(data.success),
-      toolName: data.toolName || toolName,
-      decision: data.decision || (response.ok ? 'ALLOW' : 'DENY'),
-      riskLevel: data.riskLevel || 'R0',
-      data: data.output || data.data,
-      error: data.error,
-      code: data.code,
-      parametersHash: data.parametersHash,
-      auditId: data.auditId,
-      simulated: Boolean(data.simulated ?? data.data?.simulated ?? true),
+      toolName: typeof data.toolName === 'string' ? data.toolName : toolName,
+      decision: (data.decision as LocalExecutionResult['decision']) || (response.ok ? 'ALLOW' : 'DENY'),
+      riskLevel: (data.riskLevel as LocalExecutionResult['riskLevel']) || 'R0',
+      data: data.output ?? data.data,
+      error: typeof data.error === 'string' ? data.error : undefined,
+      code: typeof data.code === 'string' ? data.code : undefined,
+      parametersHash: typeof data.parametersHash === 'string' ? data.parametersHash : undefined,
+      auditId: typeof data.auditId === 'string' ? data.auditId : undefined,
+      simulated: Boolean(data.simulated ?? innerData?.simulated ?? true),
       executionTimeMs: Date.now() - startTime,
-      timestamp: data.timestamp || new Date().toISOString()
+      timestamp: typeof data.timestamp === 'string' ? data.timestamp : new Date().toISOString()
     };
   } catch (netErr: any) {
     return {

@@ -4,6 +4,31 @@
  */
 
 import { ToolDefinition } from './types';
+import { validateShellCommand } from './commandGuard';
+
+/**
+ * Normaliza um caminho RELATIVO do workspace e rejeita qualquer tentativa de
+ * escapar da raiz (absoluto, drive letter, traversal literal ou pós-normalização).
+ * Retorna '' quando o caminho é inválido — nenhum chamador deve gravar nada.
+ */
+export function normalizeWorkspaceRelativePath(rawPath: unknown): string {
+  if (typeof rawPath !== 'string') return '';
+  const trimmed = rawPath.trim().replace(/\\/g, '/');
+  if (!trimmed) return '';
+  if (trimmed.startsWith('/') || /^[a-zA-Z]:/.test(trimmed)) return '';
+  // Resolve `.` e `..` ANTES de validar (o literal '..' pode aparecer no meio).
+  const segments: string[] = [];
+  for (const part of trimmed.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (segments.length === 0) return ''; // escapou da raiz
+      segments.pop();
+      continue;
+    }
+    segments.push(part);
+  }
+  return segments.join('/');
+}
 
 /**
  * Catálogo estrito de fixtures virtuais em memória para o preview da LIORA.
@@ -127,7 +152,11 @@ export const workspaceReadFileTool: ToolDefinition<
   execute: async (params) => {
     const rawPath = params.filePath;
     const maxLines = params.maxLines || 100;
-    const normalized = rawPath.trim().replace(/^[./\\]+/, '');
+    // Mesma normalização segura da escrita (nada de `docs/../../../etc/passwd`).
+    const normalized = normalizeWorkspaceRelativePath(rawPath);
+    if (!normalized) {
+      throw new Error('PATH_TRAVERSAL_BLOCKED: Tentativa de acesso a caminho absoluto ou fora do workspace virtual.');
+    }
 
     const virtualContent = VIRTUAL_WORKSPACE_CATALOG[normalized];
     if (typeof virtualContent !== 'string') {
@@ -189,6 +218,12 @@ export const systemExecSimulatedTool: ToolDefinition<
   },
   execute: async (params) => {
     const cmd = params.command.trim();
+    // Guarda ÚNICA compartilhada com a execução real (commandGuard).
+    // Antes a validação era duplicada e divergente entre os dois sandboxes.
+    const guard = validateShellCommand(cmd);
+    if (!guard.valid) {
+      throw new Error(`${guard.code}: ${guard.message}`);
+    }
     let stdout = '';
     const stderr = '';
     const exitCode = 0;
@@ -268,14 +303,24 @@ export const workspaceWriteFileTool: ToolDefinition<
     const rawPath = params.filePath.trim();
     const content = params.content;
 
-    // Verificação estrita contra Path Traversal
-    if (rawPath.includes('..') || rawPath.startsWith('/') || rawPath.includes(':\\')) {
-      throw new Error('PATH_TRAVERSAL_BLOCKED: Tentativa de acesso a caminho absoluto ou fora do workspace virtual.');
-    }
-
-    const normalized = rawPath.replace(/^[./\\]+/, '');
+    // Verificação estrita contra Path Traversal.
+    // CORREÇÃO (auditoria profunda): `rawPath.includes('..')` só barrava o
+    // literal. Caminhos como `workspace/./../evil.txt` passavam, eram
+    // normalizados por `replace(/^[./\\]+/, '')` e gravavam fora do prefixo
+    // `workspace/` no catálogo virtual. Agora o caminho é NORMALIZADO antes de
+    // validado (mesmo critério do módulo de comandos e do Rust).
+    const normalized = normalizeWorkspaceRelativePath(rawPath);
     if (!normalized) {
-      throw new Error('INVALID_PATH: Caminho de arquivo inválido.');
+      // Distingue "caminho malformado" de "tentativa de escapar" para que o
+      // erro chegue ao usuário/modelo com o código correto (o teste de segurança
+      // e o log de auditoria dependem de PATH_TRAVERSAL_BLOCKED).
+      const looksLikeTraversal =
+        rawPath.includes('..') || rawPath.trim().startsWith('/') || rawPath.includes(':');
+      throw new Error(
+        looksLikeTraversal
+          ? 'PATH_TRAVERSAL_BLOCKED: Tentativa de acesso a caminho absoluto ou fora do workspace virtual.'
+          : 'INVALID_PATH: Caminho de arquivo inválido.'
+      );
     }
 
     // Gravar no catálogo virtual em memória
@@ -614,6 +659,7 @@ export const getSystemStatusTool: ToolDefinition<
   },
   execute: async () => {
     return {
+      success: true,
       status: 'OPERATIONAL',
       ready: true,
       message: 'LIORA Core operacional em ambiente seguro.'

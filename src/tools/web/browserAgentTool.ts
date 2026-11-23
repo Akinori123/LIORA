@@ -290,7 +290,13 @@ export const webBrowserAgentTool: ToolDefinition<{
       try {
         openRes = await browserOpenUrlTool.execute({ url: urlCheck.url });
       } catch (launchErr: any) {
-        result.error = String(launchErr?.message || 'Falha ao iniciar o browser.');
+        // CORREÇÃO (erro honesto): quando o Playwright não está instalado, a mensagem
+        // some no `error` genérico. Explicita a instalação para o modelo/usuário.
+        const rawMsg = String(launchErr?.message || 'Falha ao iniciar o browser.');
+        const looksLikeMissingModule = /Cannot find (module|package)|ERR_MODULE_NOT_FOUND|Executable doesn't exist|playwright/i.test(rawMsg);
+        result.error = looksLikeMissingModule
+          ? `BROWSER_INSTALL_REQUIRED: o navegador headless não está disponível neste ambiente (${rawMsg.slice(0, 120)}). Instale com 'npx playwright install chromium' ou use open_browser com o navegador do usuário.`
+          : rawMsg;
         return result;
       }
       if (!openRes || !openRes.success) {

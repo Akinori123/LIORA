@@ -155,6 +155,8 @@ export const QuickOverlay: React.FC<QuickOverlayProps> = ({
             <Command className="w-5 h-5 text-[var(--accent-primary)] shrink-0" />
             <input
               ref={inputRef}
+              id="quick-overlay-input"
+              name="quick-overlay-input"
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}

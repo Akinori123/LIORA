@@ -228,6 +228,8 @@ export const ActivityView: React.FC = () => {
           <div className="relative flex-1">
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-[#777777]" />
             <input
+              id="activity-search-query"
+              name="activity-search-query"
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -287,6 +289,8 @@ export const ActivityView: React.FC = () => {
 
           {/* Category Filter */}
           <select
+            id="activity-filter-category"
+            name="activity-filter-category"
             aria-label="Filtrar por categoria"
             value={filterCategory}
             onChange={(e) => setFilterCategory(e.target.value)}
@@ -302,6 +306,8 @@ export const ActivityView: React.FC = () => {
 
           {/* Risk Level Filter */}
           <select
+            id="activity-filter-risk"
+            name="activity-filter-risk"
             aria-label="Filtrar por nível de risco"
             value={filterRisk}
             onChange={(e) => setFilterRisk(e.target.value)}
@@ -316,6 +322,8 @@ export const ActivityView: React.FC = () => {
 
           {/* Status Filter */}
           <select
+            id="activity-filter-status"
+            name="activity-filter-status"
             aria-label="Filtrar por status"
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}

@@ -6,14 +6,16 @@
 import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../../store/lioraStore';
-import { Settings as SettingsIcon, Shield, Volume2, Cpu, Download, RefreshCw, Palette, Globe, Bell, CheckCircle2, FolderOpen, Play, Key, Check, Database, Upload } from 'lucide-react';
-import { LogVerbosity, TTSModelChoice } from '../../types/settings';
+import { Settings as SettingsIcon, Shield, Volume2, Cpu, Download, RefreshCw, Palette, Globe, Bell, CheckCircle2, FolderOpen, Play, Key, Check, Database, Upload, Hand, Camera, Sliders, Sparkles, Keyboard, Zap, Repeat, Box, Video } from 'lucide-react';
+import { LogVerbosity, TTSModelChoice, GestureSensitivityLevel } from '../../types/settings';
 import { eventBus } from '../../utils/eventBus';
 import { THEME_PALETTES } from '../../utils/themeColors';
 import { storageAdapter } from '../../services/storageAdapter';
 import { isTauriEnvironment } from '../../security/localBridge';
+import { invoke } from '@tauri-apps/api/core';
 
 import { speechService } from '../../services/speechService';
+import { gestureService } from '../../services/gestureService';
 import { integrationsVault } from '../../services/integrationsVault';
 import { VaultManagerPanel } from '../security/VaultManagerPanel';
 
@@ -87,6 +89,30 @@ export const SettingsView: React.FC = () => {
   const [isEditingWorkspace, setIsEditingWorkspace] = React.useState(false);
   const [workspaceInput, setWorkspaceInput] = React.useState('');
   const [timeoutDraft, setTimeoutDraft] = React.useState<string>(() => String(settings.requestTimeoutMs));
+
+  // Fonte de vídeo do controle por gestos: webcam do PC ou câmera do CELULAR
+  // (DroidCam/Iriun/Camo expõem uma webcam virtual reconhecida pelo Windows).
+  const [cameras, setCameras] = React.useState<Array<{ deviceId: string; label: string; isLikelyPhone: boolean }>>([]);
+  const [camerasReady, setCamerasReady] = React.useState(false);
+  const [preferredCamera, setPreferredCamera] = React.useState<string>(gestureService.getPreferredDevice() || '');
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      void gestureService.listCameras().then(list => {
+        if (cancelled) return;
+        setCameras(list);
+        setCamerasReady(true);
+      });
+    };
+    load();
+    const mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+    mediaDevices?.addEventListener?.('devicechange', load);
+    return () => {
+      cancelled = true;
+      mediaDevices?.removeEventListener?.('devicechange', load);
+    };
+  }, []);
 
   React.useEffect(() => {
     setTimeoutDraft(String(settings.requestTimeoutMs));
@@ -366,355 +392,736 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
-      {/* CORREÇÃO (UI): items-start impede que cards de uma mesma linha se estiquem
-          à altura do card vizinho — antes, 'Segurança & Governança' alongava até
-          a altura do card de Áudio (muito alto), criando um bloco enorme vazio. */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-        {/* Visual Themes & Identity */}
-        <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
-          <div className="flex items-center gap-3">
-            <Palette className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
-            <h3 className="font-semibold text-white text-base">Identidade Visual & Temas</h3>
-          </div>
-          <p className="text-xs text-[#A8A8A8]">Selecione o perfil de cores e variáveis CSS dinâmicas da interface.</p>
-          
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-            {Object.values(THEME_PALETTES).map(t => {
-              const active = settings.theme === t.id;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => {
-                    updateSettings({ theme: t.id });
-                    notifyChange(`Tema alterado para ${t.label}`);
-                  }}
-                  className={`flex flex-col p-3 rounded-lg border text-left transition-all relative ${
-                    active 
-                      ? 'bg-[#1C1C1C]' 
-                      : 'bg-[#0A0A0A] border-[#222222] hover:border-[#333333]'
-                  }`}
-                  style={active ? { borderColor: t.hex, boxShadow: `0 0 16px ${t.hex}35` } : undefined}
-                >
-                  <div className="flex items-center justify-between gap-2 w-full mb-1">
-                    <span className="font-medium text-xs text-white flex items-center gap-1.5 min-w-0 truncate">
-                      {active && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: t.hex }} />}
-                      <span className="truncate">{t.label}</span>
-                    </span>
-                    <span className="w-3.5 h-3.5 rounded-full ring-2 ring-black shrink-0" style={{ backgroundColor: t.hex }} />
-                  </div>
-                  <span className="text-[10px] text-[#A8A8A8] line-clamp-2">{t.desc}</span>
-                  {active && (
-                    <span 
-                      className="mt-2 inline-flex items-center self-start text-[9px] font-mono uppercase tracking-wider font-bold px-1.5 py-0.5 rounded"
-                      style={{ backgroundColor: `${t.hex}20`, color: t.hex }}
-                    >
-                      Tema Ativo
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* General & Performance */}
-        <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
-          <div className="flex items-center gap-3">
-            <Cpu className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
-            <h3 className="font-semibold text-white text-base">Geral & Desempenho</h3>
-          </div>
-
-          <div className="space-y-4 pt-2 text-xs">
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-language" className="text-[#A8A8A8] flex items-center gap-2">
-                <Globe className="w-4 h-4 text-[#A8A8A8]" />
-                Idioma Principal (IA & UI)
-              </label>
-              <select
-                id="settings-language"
-                value={settings.language}
-                onChange={e => {
-                  updateSettings({ language: e.target.value as any });
-                  notifyChange('Idioma atualizado com sucesso.');
-                }}
-                className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
-              >
-                <option value="pt-BR">Português Brasileiro (pt-BR)</option>
-                <option value="en-US">English (en-US)</option>
-                <option value="es-ES">Español (es-ES)</option>
-              </select>
+      {/* Grid de 2 Colunas Independentes: elimina completamente qualquer vão vertical vazio entre os cards */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        {/* COLUNA ESQUERDA: Aparência, Governança & Visão Computacional */}
+        <div className="space-y-6">
+          {/* Identidade Visual & Temas */}
+          <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <Palette className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+              <h3 className="font-semibold text-white text-base">Identidade Visual & Temas</h3>
             </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-orbQuality" className="text-[#A8A8A8]">Qualidade da Orb 3D (VRAM)</label>
-              <select
-                id="settings-orbQuality"
-                value={settings.orbQuality}
-                onChange={e => {
-                  updateSettings({ orbQuality: e.target.value as any });
-                  notifyChange('Qualidade da Orb atualizada.');
-                }}
-                className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
-              >
-                <option value="auto">Automática (WebGL)</option>
-                <option value="high">Alta Fidelidade</option>
-                <option value="balanced">Balanceada</option>
-                <option value="low">Baixo Consumo</option>
-              </select>
-            </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-timeout" className="text-[#A8A8A8]">Timeout de Requisições (ms) [1s-60s]</label>
-              <input
-                id="settings-timeout"
-                type="number"
-                min="1000"
-                max="60000"
-                step="1000"
-                value={timeoutDraft}
-                onChange={e => setTimeoutDraft(e.target.value)}
-                onBlur={commitTimeoutDraft}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') {
-                    commitTimeoutDraft();
-                  }
-                }}
-                className="w-24 bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-right focus:outline-none focus:border-[var(--accent-primary)]"
-              />
+            <p className="text-xs text-[#A8A8A8]">Selecione o perfil de cores e variáveis CSS dinâmicas da interface.</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+              {Object.values(THEME_PALETTES).map(t => {
+                const active = settings.theme === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => {
+                      updateSettings({ theme: t.id });
+                      notifyChange(`Tema alterado para ${t.label}`);
+                    }}
+                    className={`flex flex-col p-3 rounded-lg border text-left transition-all relative ${
+                      active 
+                        ? 'bg-[#1C1C1C]' 
+                        : 'bg-[#0A0A0A] border-[#222222] hover:border-[#333333]'
+                    }`}
+                    style={active ? { borderColor: t.hex, boxShadow: `0 0 16px ${t.hex}35` } : undefined}
+                  >
+                    <div className="flex items-center justify-between gap-2 w-full mb-1">
+                      <span className="font-medium text-xs text-white flex items-center gap-1.5 min-w-0 truncate">
+                        {active && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: t.hex }} />}
+                        <span className="truncate">{t.label}</span>
+                      </span>
+                      <span className="w-3.5 h-3.5 rounded-full ring-2 ring-black shrink-0" style={{ backgroundColor: t.hex }} />
+                    </div>
+                    <span className="text-[10px] text-[#A8A8A8] line-clamp-2">{t.desc}</span>
+                    {active && (
+                      <span 
+                        className="mt-2 inline-flex items-center self-start text-[9px] font-mono uppercase tracking-wider font-bold px-1.5 py-0.5 rounded"
+                        style={{ backgroundColor: `${t.hex}20`, color: t.hex }}
+                      >
+                        Tema Ativo
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
-        </div>
 
-        {/* Security & Enforcement — self-start: nunca estica para a altura do card vizinho */}
-        <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4 self-start">
-          <div className="flex items-center gap-3">
-            <Shield className="w-5 h-5 text-emerald-400" />
-            <h3 className="font-semibold text-white text-base">Segurança & Governança (R0–R3)</h3>
-          </div>
-
-          <div className="space-y-4 pt-2 text-xs">
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-security" className="text-[#A8A8A8]">Nível de Execução de Políticas</label>
-              <select
-                id="settings-security"
-                value={settings.securityEnforcementLevel}
-                onChange={e => handleSecurityLevelChange(e.target.value)}
-                className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
-              >
-                <option value="strict">Estrito (Padrão LIORA)</option>
-                <option value="balanced">Balanceado</option>
-                <option value="permissive">Permissivo (Atenção)</option>
-              </select>
+          {/* Segurança & Governança (R0–R3) */}
+          <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <Shield className="w-5 h-5 text-emerald-400" />
+              <h3 className="font-semibold text-white text-base">Segurança & Governança (R0–R3)</h3>
             </div>
 
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-logVerbosity" className="text-[#A8A8A8]">Verbosidade de Logs de Auditoria</label>
-              <select
-                id="settings-logVerbosity"
-                value={settings.logVerbosity}
-                onChange={e => {
-                  updateSettings({ logVerbosity: e.target.value as LogVerbosity });
-                  notifyChange('Verbosidade de logs atualizada.');
-                }}
-                className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
-              >
-                <option value="error">Apenas Erros</option>
-                <option value="warn">Avisos e Erros</option>
-                <option value="info">Padrão (Info)</option>
-                <option value="debug">Completo (Debug)</option>
-              </select>
-            </div>
-
-            <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
-              <label htmlFor="settings-notifications" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
-                <Bell className="w-4 h-4 text-[#A8A8A8]" />
-                Notificações Desktop (SO)
-              </label>
-              <input
-                id="settings-notifications"
-                type="checkbox"
-                checked={settings.desktopNotifications}
-                onChange={e => handleNotificationToggle(e.target.checked)}
-                className="w-4 h-4 rounded cursor-pointer"
-                style={{ accentColor: 'var(--accent-primary)' }}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Audio & Voice */}
-        <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
-          <div className="flex items-center gap-3">
-            <Volume2 className="w-5 h-5 text-blue-400" />
-            <h3 className="font-semibold text-white text-base">Áudio, Voz & Transcrição</h3>
-          </div>
-
-          <div className="space-y-4 pt-2 text-xs">
-            {/* Gemini API Key direct config */}
-            <div className="p-3 bg-[#0A0A0A] border border-[#222222] rounded-lg space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-white font-medium flex items-center gap-1.5">
-                  <Key className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
-                  Chave de API do Gemini (Cofre & Voz)
-                </span>
-                <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
-                  activeGeminiKey ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                }`}>
-                  {activeGeminiKey ? '● Configurada e Ativa' : '○ Pendente no Cofre'}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="password"
-                  aria-label="Chave de API do Gemini"
-                  value={geminiKeyInput}
-                  onChange={e => setGeminiKeyInput(e.target.value)}
-                  placeholder="Cole sua chave AIzaSy..."
-                  className="flex-1 bg-[#141414] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-xs focus:outline-none focus:border-[var(--accent-primary)] placeholder:text-[#555555]"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleSaveGeminiKey()}
-                  disabled={isSavingKey || !geminiKeyInput.trim()}
-                  className="px-3 py-1.5 bg-[#222222] hover:bg-[#333333] border border-[#444444] rounded text-white font-medium text-xs transition-colors shrink-0 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
-                >
-                  {isSavingKey ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-emerald-400" />}
-                  <span>Salvar</span>
-                </button>
-              </div>
-            </div>
-
-            {/* OpenRouter API Key direct config */}
-            <div className="p-3 bg-[#0A0A0A] border border-[#222222] rounded-lg space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-white font-medium flex items-center gap-1.5">
-                  <Key className="w-3.5 h-3.5 text-blue-400" />
-                  Chave de API do OpenRouter (Backup / Contingência)
-                </span>
-                <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
-                  activeOpenRouterKey ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                }`}>
-                  {activeOpenRouterKey ? '● Contingência Ativa' : '○ Opcional'}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="password"
-                  aria-label="Chave de API do OpenRouter"
-                  value={openRouterKeyInput}
-                  onChange={e => setOpenRouterKeyInput(e.target.value)}
-                  placeholder="Cole sua chave sk-or-..."
-                  className="flex-1 bg-[#141414] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-xs focus:outline-none focus:border-blue-400 placeholder:text-[#555555]"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleSaveOpenRouterKey()}
-                  disabled={isSavingOpenRouterKey || !openRouterKeyInput.trim()}
-                  className="px-3 py-1.5 bg-[#222222] hover:bg-[#333333] border border-[#444444] rounded text-white font-medium text-xs transition-colors shrink-0 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
-                >
-                  {isSavingOpenRouterKey ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-emerald-400" />}
-                  <span>Salvar</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-ttsModel" className="text-[#A8A8A8]">Modelo TTS Padrão</label>
-              <select
-                id="settings-ttsModel"
-                value={settings.ttsModel === 'gemini-3.8-flash' ? 'gemini-3.8-flash-tts' : settings.ttsModel}
-                onChange={e => {
-                  updateSettings({ ttsModel: e.target.value as TTSModelChoice });
-                  notifyChange('Modelo TTS atualizado.');
-                }}
-                className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-mono focus:outline-none focus:border-[var(--accent-primary)]"
-              >
-                <option value="gemini-3.8-flash-lite-tts">gemini-3.8-flash-lite-tts (Neural Rápido)</option>
-                <option value="gemini-3.8-flash-tts">gemini-3.8-flash-tts (Alta Fidelidade)</option>
-                <option value="system-speech">API de Voz do Sistema (Nativo)</option>
-              </select>
-            </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="settings-ttsVoice" className="text-[#A8A8A8]">Voz da Assistente</label>
-              <div className="flex items-center gap-2">
+            <div className="space-y-4 pt-2 text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-security" className="text-[#A8A8A8]">Nível de Execução de Políticas</label>
                 <select
-                  id="settings-ttsVoice"
-                  value={settings.ttsVoice}
+                  id="settings-security"
+                  name="settings-security"
+                  value={settings.securityEnforcementLevel}
+                  onChange={e => handleSecurityLevelChange(e.target.value)}
+                  className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
+                >
+                  <option value="strict">Estrito (Padrão LIORA)</option>
+                  <option value="balanced">Balanceado</option>
+                  <option value="permissive">Permissivo (Atenção)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-logVerbosity" className="text-[#A8A8A8]">Verbosidade de Logs de Auditoria</label>
+                <select
+                  id="settings-logVerbosity"
+                  name="settings-logVerbosity"
+                  value={settings.logVerbosity}
                   onChange={e => {
-                    updateSettings({ ttsVoice: e.target.value as any });
-                    notifyChange('Voz da assistente atualizada.');
+                    updateSettings({ logVerbosity: e.target.value as LogVerbosity });
+                    notifyChange('Verbosidade de logs atualizada.');
                   }}
                   className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
                 >
-                  <option value="Aoede">Aoede (Expressiva / Recomendada)</option>
-                  <option value="Kore">Kore (Feminina / Suave)</option>
-                  <option value="Puck">Puck (Masculina / Amigável)</option>
-                  <option value="Fenrir">Fenrir (Masculina / Firme)</option>
-                  <option value="Charon">Charon (Neutro / Profundo)</option>
+                  <option value="error">Apenas Erros</option>
+                  <option value="warn">Avisos e Erros</option>
+                  <option value="info">Padrão (Info)</option>
+                  <option value="debug">Completo (Debug)</option>
                 </select>
-                <button
-                  type="button"
-                  onClick={handleTestVoice}
-                  disabled={isTestingVoice}
-                  className="px-3.5 py-1.5 rounded-lg font-semibold transition-all duration-200 flex items-center gap-1.5 shadow-md hover:opacity-90 active:scale-95 cursor-pointer text-xs disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'var(--accent-primary)',
-                    color: '#000000',
-                    boxShadow: '0 0 12px var(--accent-glow)'
-                  }}
-                  title="Testar Voz via API Gemini"
-                >
-                  {isTestingVoice ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-black" /> : <Play className="w-3.5 h-3.5 fill-black text-black" />}
-                  <span>{isTestingVoice ? 'Sintetizando...' : 'Testar'}</span>
-                </button>
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
+                <label htmlFor="settings-notifications" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
+                  <Bell className="w-4 h-4 text-[#A8A8A8]" />
+                  Notificações Desktop (SO)
+                </label>
+                <input
+                  id="settings-notifications"
+                  name="settings-notifications"
+                  type="checkbox"
+                  checked={settings.desktopNotifications}
+                  onChange={e => handleNotificationToggle(e.target.checked)}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Visão Computacional, Câmera & Controle por Gestos de Mão */}
+          <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start sm:items-center gap-3">
+                <Camera className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5 sm:mt-0" />
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-semibold text-white text-base">
+                      Câmera & Visão Computacional
+                    </h3>
+                    <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-mono uppercase whitespace-nowrap">
+                      Visão da LIORA
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#A8A8A8] mt-0.5">
+                    Permite à LIORA ver seu ambiente, rosto, documentos e responder a perguntas visuais com IA multimodal.
+                  </p>
+                </div>
+              </div>
+
+              {/* Toggle de Ativação da Câmera */}
+              <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                <label htmlFor="settings-camera-enabled" className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    id="settings-camera-enabled"
+                    name="settings-camera-enabled"
+                    type="checkbox"
+                    checked={Boolean(settings.cameraEnabled || settings.gestureControlEnabled)}
+                    onChange={e => {
+                      const enabled = e.target.checked;
+                      updateSettings({ cameraEnabled: enabled, ...(!enabled ? { gestureControlEnabled: false } : {}) });
+                      if (enabled) {
+                        void gestureService.start();
+                      } else {
+                        gestureService.stop();
+                      }
+                      notifyChange(enabled ? 'Câmera e visão computacional ativadas.' : 'Câmera desativada.');
+                    }}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-[#222222] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#333333] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--accent-primary)]"></div>
+                </label>
               </div>
             </div>
 
-            <div className="pt-2 border-t border-[#222222] flex items-center justify-between text-[11px] text-[#A8A8A8]">
-              <span className="truncate">Workspace: <code className="text-white font-mono">{settings.workspacePath}</code></span>
-              <button
-                type="button"
-                onClick={handleSelectWorkspace}
-                className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#262626] border border-[#333333] rounded text-[11px] text-white transition-colors shrink-0 cursor-pointer"
-              >
-                <FolderOpen className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
-                Alterar...
-              </button>
+            <div className="space-y-4 pt-2 text-xs">
+              {/* Toggle Separado de Controle do Mouse por Gestos de Mão */}
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
+                <div className="max-w-md">
+                  <label htmlFor="settings-gesture-enabled" className="text-white font-medium flex items-center gap-2 cursor-pointer">
+                    <Hand className="w-4 h-4 text-amber-400" />
+                    Controle do Mouse por Gestos de Mão (Cursor Virtual)
+                  </label>
+                  <span className="text-[10px] text-[#888888] ml-6 block">
+                    Permite guiar o ponteiro do mouse na tela movendo a mão e clicar fechando o punho (independente da câmera só para visão).
+                  </span>
+                </div>
+                <input
+                  id="settings-gesture-enabled"
+                  name="settings-gesture-enabled"
+                  type="checkbox"
+                  checked={settings.gestureControlEnabled ?? false}
+                  onChange={e => {
+                    const checked = e.target.checked;
+                    updateSettings({ 
+                      gestureControlEnabled: checked,
+                      ...(checked ? { cameraEnabled: true } : {})
+                    });
+                    gestureService.setCursorControlEnabled(checked);
+                    notifyChange(checked ? 'Controle por gestos ativado.' : 'Controle por gestos desativado.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+              {/* Sensibilidade */}
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <label htmlFor="settings-gesture-sensitivity" className="text-white font-medium flex items-center gap-1.5 cursor-pointer">
+                    <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                    Sensibilidade do Rastreamento
+                  </label>
+                  <span className="text-[10px] text-[#888888]">Velocidade de reação aos movimentos da mão</span>
+                </div>
+                <select
+                  id="settings-gesture-sensitivity"
+                  name="settings-gesture-sensitivity"
+                  value={settings.gestureSensitivity || 'high'}
+                  onChange={e => {
+                    updateSettings({ gestureSensitivity: e.target.value as any });
+                    notifyChange(`Sensibilidade de gestos ajustada para ${e.target.value}.`);
+                  }}
+                  className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)] cursor-pointer"
+                >
+                  <option value="low">Baixa (1.2x)</option>
+                  <option value="medium">Média (2.2x)</option>
+                  <option value="high">Alta (4.0x) — Recomendada ⚡</option>
+                  <option value="ultra">Ultra-Responsiva (6.5x) 🔥</option>
+                </select>
+              </div>
+
+              {/* Cursor Virtual HUD */}
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
+                <div>
+                  <label htmlFor="settings-gesture-feedback" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
+                    <Hand className="w-4 h-4 text-[var(--accent-primary)]" />
+                    Cursor Virtual de Mão na Tela (HUD)
+                  </label>
+                  <span className="text-[10px] text-[#666666] ml-6 block">Mostra um ponto de luz acompanhando o centróide da mão</span>
+                </div>
+                <input
+                  id="settings-gesture-feedback"
+                  name="settings-gesture-feedback"
+                  type="checkbox"
+                  checked={settings.gestureVisualFeedback ?? true}
+                  onChange={e => {
+                    updateSettings({ gestureVisualFeedback: e.target.checked });
+                    notifyChange('Cursor visual atualizado.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+
+              {/* Fonte de vídeo: webcam do PC ou CÂMERA DO CELULAR (DroidCam/Iriun/Camo) */}
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-[#222222]">
+                <div className="min-w-0">
+                  <label htmlFor="settings-camera-device" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
+                    <Video className="w-4 h-4 text-amber-400" />
+                    Fonte de Vídeo
+                  </label>
+                  <span className="text-[10px] text-[#666666] ml-6 block">
+                    Usar a câmera do celular? Instale DroidCam/Iriun no celular e no PC, conecte-os e escolha a câmera abaixo (📱)
+                  </span>
+                </div>
+                <select
+                  id="settings-camera-device"
+                  name="settings-camera-device"
+                  value={camerasReady ? preferredCamera : ''}
+                  onChange={e => {
+                    const value = e.target.value;
+                    setPreferredCamera(value);
+                    gestureService.setPreferredDevice(value || null);
+                    // Reprograma a câmera aberta EXATAMENTE UMA VEZ: o
+                    // setPreferredDevice já fazia a troca em quente e o restart()
+                    // logo em seguida derrubava a stream de novo (o vídeo piscava
+                    // e voltava para a câmera padrão em máquinas lentas).
+                    notifyChange(
+                      value
+                        ? 'Câmera selecionada e reaberta.'
+                        : 'Voltou para a câmera padrão do PC.'
+                    );
+                  }}
+                  className="bg-[#161616] border border-[#2B2B2B] rounded-lg px-2 py-1.5 text-[11px] text-white max-w-[220px]"
+                >
+                  <option value="">Câmera padrão do PC</option>
+                  {cameras.map(cam => (
+                    <option key={cam.deviceId} value={cam.deviceId}>
+                      {cam.isLikelyPhone ? '📱 ' : ''}{cam.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Inversão do Eixo X (Modo Espelho / Direto) */}
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
+                <div>
+                  <label htmlFor="settings-gesture-invert-x" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
+                    <Repeat className="w-4 h-4 text-amber-400" />
+                    Inverter Movimento Horizontal (Eixo X)
+                  </label>
+                  <span className="text-[10px] text-[#666666] ml-6 block">
+                    Alterne caso o cursor mova-se para a esquerda quando você move a mão para a direita
+                  </span>
+                </div>
+                <input
+                  id="settings-gesture-invert-x"
+                  name="settings-gesture-invert-x"
+                  type="checkbox"
+                  checked={settings.gestureInvertX ?? false}
+                  onChange={e => {
+                    updateSettings({ gestureInvertX: e.target.checked });
+                    gestureService.setInvertX(e.target.checked);
+                    notifyChange(e.target.checked ? 'Eixo horizontal invertido.' : 'Eixo horizontal normalizado.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+
+              {/* Rastreamento & Inspeção de Objetos */}
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
+                <div>
+                  <label htmlFor="settings-gesture-object-tracking" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
+                    <Box className="w-4 h-4 text-amber-400" />
+                    Rastreamento de Objetos & Documentos
+                  </label>
+                  <span className="text-[10px] text-[#666666] ml-6 block">
+                    Identifica quando você exibe documentos, rótulos ou peças na frente da câmera
+                  </span>
+                </div>
+                <input
+                  id="settings-gesture-object-tracking"
+                  name="settings-gesture-object-tracking"
+                  type="checkbox"
+                  checked={settings.gestureObjectTracking ?? true}
+                  onChange={e => {
+                    updateSettings({ gestureObjectTracking: e.target.checked });
+                    notifyChange('Rastreamento de objetos atualizado.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+
+              {/* Mapa de Gestos Suportados */}
+              <div className="p-3 bg-[#0A0A0A] border border-[#222222] rounded-xl grid grid-cols-1 sm:grid-cols-3 gap-2 text-center">
+                <div className="p-2 bg-[#141414] rounded-lg">
+                  <span className="text-base block">🖐️</span>
+                  <span className="text-white font-semibold text-[11px] block mt-0.5">Mover a Mão</span>
+                  <span className="text-[10px] text-[#888888]">Controla o ponteiro luminoso na tela</span>
+                </div>
+                <div className="p-2 bg-[#141414] rounded-lg">
+                  <span className="text-base block">✊</span>
+                  <span className="text-white font-semibold text-[11px] block mt-0.5">Fechar a Mão</span>
+                  <span className="text-[10px] text-emerald-400 font-medium">Clique virtual no item apontado</span>
+                </div>
+                <div className="p-2 bg-[#141414] rounded-lg">
+                  <span className="text-base block">↕️</span>
+                  <span className="text-white font-semibold text-[11px] block mt-0.5">Mão Cima / Baixo</span>
+                  <span className="text-[10px] text-[#888888]">Rolagem fluida de páginas e chat</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* COLUNA DIREITA: Performance, Áudio & Produtividade do Mestre */}
+        <div className="space-y-6">
+          {/* Geral & Desempenho */}
+          <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <Cpu className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+              <h3 className="font-semibold text-white text-base">Geral & Desempenho</h3>
             </div>
 
-            {/* Modal Inline para Alterar Workspace (Elimina window.prompt) */}
-            {isEditingWorkspace && (
-              <div className="p-3 bg-[#0E0E0E] border border-[#333333] rounded-lg space-y-2 mt-2">
-                <label htmlFor="settings-workspace" className="text-[11px] text-[#CCCCCC] block font-medium">Novo Caminho do Workspace:</label>
+            <div className="space-y-4 pt-2 text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-language" className="text-[#A8A8A8] flex items-center gap-2">
+                  <Globe className="w-4 h-4 text-[#A8A8A8]" />
+                  Idioma Principal (IA & UI)
+                </label>
+                <select
+                  id="settings-language"
+                  name="settings-language"
+                  value={settings.language}
+                  onChange={e => {
+                    updateSettings({ language: e.target.value as any });
+                    notifyChange('Idioma atualizado com sucesso.');
+                  }}
+                  className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
+                >
+                  <option value="pt-BR">Português Brasileiro (pt-BR)</option>
+                  <option value="en-US">English (en-US)</option>
+                  <option value="es-ES">Español (es-ES)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-orbQuality" className="text-[#A8A8A8]">Qualidade da Orb 3D (VRAM)</label>
+                <select
+                  id="settings-orbQuality"
+                  name="settings-orbQuality"
+                  value={settings.orbQuality}
+                  onChange={e => {
+                    updateSettings({ orbQuality: e.target.value as any });
+                    notifyChange('Qualidade da Orb atualizada.');
+                  }}
+                  className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
+                >
+                  <option value="auto">Automática (WebGL)</option>
+                  <option value="high">Alta Fidelidade</option>
+                  <option value="balanced">Balanceada</option>
+                  <option value="low">Baixo Consumo</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-timeout" className="text-[#A8A8A8]">Timeout de Requisições (ms) [1s-60s]</label>
                 <input
-                  id="settings-workspace"
-                  type="text"
-                  value={workspaceInput}
-                  onChange={e => setWorkspaceInput(e.target.value)}
-                  placeholder="./workspace ou C:\projetos"
-                  className="w-full bg-[#181818] border border-[#444444] rounded px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[var(--accent-primary)]"
+                  id="settings-timeout"
+                  name="settings-timeout"
+                  type="number"
+                  min="1000"
+                  max="60000"
+                  step="1000"
+                  value={timeoutDraft}
+                  onChange={e => setTimeoutDraft(e.target.value)}
+                  onBlur={commitTimeoutDraft}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      commitTimeoutDraft();
+                    }
+                  }}
+                  className="w-24 bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-right focus:outline-none focus:border-[var(--accent-primary)]"
                 />
-                <div className="flex items-center justify-end gap-2 pt-1">
+              </div>
+
+              <AutostartToggle notifyChange={notifyChange} />
+            </div>
+          </div>
+
+          {/* Áudio, Voz & Transcrição */}
+          <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <Volume2 className="w-5 h-5 text-blue-400" />
+              <h3 className="font-semibold text-white text-base">Áudio, Voz & Transcrição</h3>
+            </div>
+
+            <div className="space-y-4 pt-2 text-xs">
+              {/* Gemini API Key direct config */}
+              <div className="p-3 bg-[#0A0A0A] border border-[#222222] rounded-lg space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-white font-medium flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
+                    Chave de API do Gemini (Cofre & Voz)
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
+                    activeGeminiKey ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                  }`}>
+                    {activeGeminiKey ? '● Configurada e Ativa' : '○ Pendente no Cofre'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="settings-gemini-key"
+                    name="gemini_api_key"
+                    type="password"
+                    autoComplete="current-password"
+                    aria-label="Chave de API do Gemini"
+                    value={geminiKeyInput}
+                    onChange={e => setGeminiKeyInput(e.target.value)}
+                    placeholder="Cole sua chave AIzaSy..."
+                    className="flex-1 bg-[#141414] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-xs focus:outline-none focus:border-[var(--accent-primary)] placeholder:text-[#555555]"
+                  />
                   <button
                     type="button"
-                    onClick={() => setIsEditingWorkspace(false)}
-                    className="px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#252525] border border-[#333333] text-xs text-[#888888] rounded cursor-pointer"
+                    onClick={() => handleSaveGeminiKey()}
+                    disabled={isSavingKey || !geminiKeyInput.trim()}
+                    className="px-3 py-1.5 bg-[#222222] hover:bg-[#333333] border border-[#444444] rounded text-white font-medium text-xs transition-colors shrink-0 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
                   >
-                    Cancelar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSaveWorkspace}
-                    className="px-3 py-1 bg-[var(--accent-primary)] hover:opacity-90 text-xs font-semibold text-white rounded shadow cursor-pointer"
-                  >
-                    Salvar
+                    {isSavingKey ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-emerald-400" />}
+                    <span>Salvar</span>
                   </button>
                 </div>
               </div>
-            )}
+
+              {/* OpenRouter API Key direct config */}
+              <div className="p-3 bg-[#0A0A0A] border border-[#222222] rounded-lg space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-white font-medium flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-blue-400" />
+                    Chave de API do OpenRouter (Backup / Contingência)
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
+                    activeOpenRouterKey ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                  }`}>
+                    {activeOpenRouterKey ? '● Contingência Ativa' : '○ Opcional'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="settings-openrouter-key"
+                    name="openrouter_api_key"
+                    type="password"
+                    autoComplete="current-password"
+                    aria-label="Chave de API do OpenRouter"
+                    value={openRouterKeyInput}
+                    onChange={e => setOpenRouterKeyInput(e.target.value)}
+                    placeholder="Cole sua chave sk-or-..."
+                    className="flex-1 bg-[#141414] border border-[#333333] rounded px-3 py-1.5 text-white font-mono text-xs focus:outline-none focus:border-blue-400 placeholder:text-[#555555]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleSaveOpenRouterKey()}
+                    disabled={isSavingOpenRouterKey || !openRouterKeyInput.trim()}
+                    className="px-3 py-1.5 bg-[#222222] hover:bg-[#333333] border border-[#444444] rounded text-white font-medium text-xs transition-colors shrink-0 disabled:opacity-50 flex items-center gap-1 cursor-pointer"
+                  >
+                    {isSavingOpenRouterKey ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-emerald-400" />}
+                    <span>Salvar</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-ttsModel" className="text-[#A8A8A8]">Modelo TTS Padrão</label>
+                <select
+                  id="settings-ttsModel"
+                  name="settings-ttsModel"
+                  value={settings.ttsModel === 'gemini-3.8-flash' ? 'gemini-3.8-flash-tts' : settings.ttsModel}
+                  onChange={e => {
+                    updateSettings({ ttsModel: e.target.value as TTSModelChoice });
+                    notifyChange('Modelo TTS atualizado.');
+                  }}
+                  className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-mono focus:outline-none focus:border-[var(--accent-primary)]"
+                >
+                  <option value="gemini-3.8-flash-lite-tts">gemini-3.8-flash-lite-tts (Neural Rápido)</option>
+                  <option value="gemini-3.8-flash-tts">gemini-3.8-flash-tts (Alta Fidelidade)</option>
+                  <option value="system-speech">API de Voz do Sistema (Nativo)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-ttsVoice" className="text-[#A8A8A8]">Voz da Assistente</label>
+                <div className="flex items-center gap-2">
+                  <select
+                    id="settings-ttsVoice"
+                    name="settings-ttsVoice"
+                    value={settings.ttsVoice}
+                    onChange={e => {
+                      updateSettings({ ttsVoice: e.target.value as any });
+                      notifyChange('Voz da assistente atualizada.');
+                    }}
+                    className="bg-[#0A0A0A] border border-[#333333] rounded px-3 py-1.5 text-white font-medium focus:outline-none focus:border-[var(--accent-primary)]"
+                  >
+                    <option value="Aoede">Aoede (Expressiva / Recomendada)</option>
+                    <option value="Kore">Kore (Feminina / Suave)</option>
+                    <option value="Puck">Puck (Masculina / Amigável)</option>
+                    <option value="Fenrir">Fenrir (Masculina / Firme)</option>
+                    <option value="Charon">Charon (Neutro / Profundo)</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleTestVoice}
+                    disabled={isTestingVoice}
+                    className="px-3.5 py-1.5 rounded-lg font-semibold transition-all duration-200 flex items-center gap-1.5 shadow-md hover:opacity-90 active:scale-95 cursor-pointer text-xs disabled:opacity-50"
+                    style={{
+                      backgroundColor: 'var(--accent-primary)',
+                      color: '#000000',
+                      boxShadow: '0 0 12px var(--accent-glow)'
+                    }}
+                    title="Testar Voz via API Gemini"
+                  >
+                    {isTestingVoice ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-black" /> : <Play className="w-3.5 h-3.5 fill-black text-black" />}
+                    <span>{isTestingVoice ? 'Sintetizando...' : 'Testar'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="settings-speechRate" className="text-[#A8A8A8] flex items-center gap-1.5 cursor-pointer">
+                  Velocidade de Fala da LIORA: <span className="font-mono text-white font-bold">{((settings.speechRate || 1.05)).toFixed(2)}x</span>
+                </label>
+                <input
+                  id="settings-speechRate"
+                  name="settings-speechRate"
+                  type="range"
+                  min="0.80"
+                  max="1.40"
+                  step="0.05"
+                  value={settings.speechRate ?? 1.05}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    updateSettings({ speechRate: val });
+                  }}
+                  className="w-36 accent-[var(--accent-primary)] cursor-pointer"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222]">
+                <label htmlFor="settings-handsFreeVoice" className="text-[#A8A8A8] flex items-center gap-2 cursor-pointer">
+                  <Volume2 className="w-4 h-4 text-emerald-400" />
+                  Autorização Hands-Free por Voz (Diga "sim" ou "autorizo")
+                </label>
+                <input
+                  id="settings-handsFreeVoice"
+                  name="settings-handsFreeVoice"
+                  type="checkbox"
+                  checked={settings.handsFreeVoiceConsent ?? true}
+                  onChange={e => {
+                    updateSettings({ handsFreeVoiceConsent: e.target.checked });
+                    notifyChange(e.target.checked ? 'Autorização por voz ativada.' : 'Autorização por voz desativada.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+
+              <div className="pt-2 border-t border-[#222222] flex items-center justify-between text-[11px] text-[#A8A8A8]">
+                <span className="truncate">Workspace: <code className="text-white font-mono">{settings.workspacePath}</code></span>
+                <button
+                  type="button"
+                  onClick={handleSelectWorkspace}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#262626] border border-[#333333] rounded text-[11px] text-white transition-colors shrink-0 cursor-pointer"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
+                  Alterar...
+                </button>
+              </div>
+
+              {/* Modal Inline para Alterar Workspace (Elimina window.prompt) */}
+              {isEditingWorkspace && (
+                <div className="p-3 bg-[#0E0E0E] border border-[#333333] rounded-lg space-y-2 mt-2">
+                  <label htmlFor="settings-workspace" className="text-[11px] text-[#CCCCCC] block font-medium">Novo Caminho do Workspace:</label>
+                  <input
+                    id="settings-workspace"
+                    name="settings-workspace"
+                    type="text"
+                    value={workspaceInput}
+                    onChange={e => setWorkspaceInput(e.target.value)}
+                    placeholder="./workspace ou C:\projetos"
+                    className="w-full bg-[#181818] border border-[#444444] rounded px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[var(--accent-primary)]"
+                  />
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingWorkspace(false)}
+                      className="px-2.5 py-1 bg-[#1A1A1A] hover:bg-[#252525] border border-[#333333] text-xs text-[#888888] rounded cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveWorkspace}
+                      className="px-3 py-1 bg-[var(--accent-primary)] hover:opacity-90 text-xs font-semibold text-white rounded shadow cursor-pointer"
+                    >
+                      Salvar
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Facilidades & Produtividade do Mestre */}
+          <div className="bg-[#111111] border border-[#222222] rounded-xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <Sparkles className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+              <div>
+                <h3 className="font-semibold text-white text-base">Facilidades & Produtividade do Mestre</h3>
+                <p className="text-xs text-[#A8A8A8]">Preferências dedicadas para conveniência e foco no dia a dia.</p>
+              </div>
+            </div>
+
+            <div className="space-y-4 pt-2 text-xs">
+              {/* Modo Stealth / Foco */}
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <label htmlFor="settings-stealthMode" className="text-white font-medium flex items-center gap-2 cursor-pointer">
+                    <Zap className="w-3.5 h-3.5 text-amber-400" />
+                    Modo Foco / Silencioso (Stealth)
+                  </label>
+                  <span className="text-[10px] text-[#888888] block">Suprime notificações distrativas para imersão total</span>
+                </div>
+                <input
+                  id="settings-stealthMode"
+                  name="settings-stealthMode"
+                  type="checkbox"
+                  checked={settings.stealthMode ?? false}
+                  onChange={e => {
+                    updateSettings({ stealthMode: e.target.checked });
+                    notifyChange(e.target.checked ? 'Modo Stealth ativado.' : 'Modo normal restaurado.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+
+              {/* Saudação de Boas-Vindas */}
+              <div className="flex items-center justify-between pt-2 border-t border-[#222222] gap-3">
+                <div>
+                  <label htmlFor="settings-welcomeGreeting" className="text-white font-medium flex items-center gap-2 cursor-pointer">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                    Saudação Vocal ao Iniciar
+                  </label>
+                  <span className="text-[10px] text-[#888888] block">LIORA recebe o Mestre com uma saudação calorosa ao abrir</span>
+                </div>
+                <input
+                  id="settings-welcomeGreeting"
+                  name="settings-welcomeGreeting"
+                  type="checkbox"
+                  checked={settings.welcomeGreeting ?? true}
+                  onChange={e => {
+                    updateSettings({ welcomeGreeting: e.target.checked });
+                    notifyChange(e.target.checked ? 'Saudação vocal ativada.' : 'Saudação vocal desativada.');
+                  }}
+                  className="w-4 h-4 rounded cursor-pointer"
+                  style={{ accentColor: 'var(--accent-primary)' }}
+                />
+              </div>
+
+              {/* Guia de Atalhos Rápidos de Produtividade */}
+              <div className="pt-2 border-t border-[#222222] space-y-2">
+                <span className="text-white font-medium flex items-center gap-1.5 text-[11px]">
+                  <Keyboard className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                  Atalhos Rápidos de Produtividade
+                </span>
+                <div className="grid grid-cols-2 gap-2 text-[10px]">
+                  <div className="p-2 bg-[#0A0A0A] border border-[#222222] rounded flex items-center justify-between">
+                    <span className="text-[#888888]">Barra de Espaço</span>
+                    <span className="text-white font-mono font-bold bg-[#1A1A1A] px-1.5 py-0.5 rounded">Voz</span>
+                  </div>
+                  <div className="p-2 bg-[#0A0A0A] border border-[#222222] rounded flex items-center justify-between">
+                    <span className="text-[#888888]">Esc</span>
+                    <span className="text-white font-mono font-bold bg-[#1A1A1A] px-1.5 py-0.5 rounded">Silenciar</span>
+                  </div>
+                  <div className="p-2 bg-[#0A0A0A] border border-[#222222] rounded flex items-center justify-between">
+                    <span className="text-[#888888]">F12</span>
+                    <span className="text-white font-mono font-bold bg-[#1A1A1A] px-1.5 py-0.5 rounded">DevTools</span>
+                  </div>
+                  <div className="p-2 bg-[#0A0A0A] border border-[#222222] rounded flex items-center justify-between">
+                    <span className="text-[#888888]">Gestos Mão</span>
+                    <span className="text-white font-mono font-bold bg-[#1A1A1A] px-1.5 py-0.5 rounded">Rolagem</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -782,6 +1189,98 @@ export const SettingsView: React.FC = () => {
       </details>
 
 
+    </div>
+  );
+};
+
+/**
+ * Toggle "Iniciar com o Windows".
+ * Usa comandos nativos Tauri (autostart_get_status / autostart_set_enabled)
+ * que gravam/removem a entrada no registro HKCU\...\CurrentVersion\Run.
+ * No ambiente Web Preview / Navegador, salva e sincroniza a preferência para o app desktop.
+ */
+const AutostartToggle: React.FC<{ notifyChange: (msg: string) => void }> = ({ notifyChange }) => {
+  const [enabled, setEnabled] = React.useState<boolean>(false);
+  const [available, setAvailable] = React.useState<boolean>(true);
+  const [busy, setBusy] = React.useState<boolean>(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!isTauriEnvironment()) {
+      // No ambiente navegador/web preview, carrega preferência salva
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('liora_autostart_pref') : null;
+      setEnabled(saved !== 'false');
+      return;
+    }
+    invoke<{ enabled: boolean } | boolean>('autostart_get_status')
+      .then(res => {
+        if (!cancelled) {
+          setAvailable(true);
+          const isEnabled = typeof res === 'boolean' ? res : Boolean(res?.enabled);
+          setEnabled(isEnabled);
+        }
+      })
+      .catch(err => { if (!cancelled) setError(String(err)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const next = !enabled;
+    try {
+      if (!isTauriEnvironment()) {
+        localStorage.setItem('liora_autostart_pref', String(next));
+        setEnabled(next);
+        notifyChange(next ? 'Preferência salva: LIORA iniciará com o Windows no aplicativo desktop.' : 'LIORA não iniciará com o Windows.');
+        return;
+      }
+      const res = await invoke<{ enabled: boolean } | boolean>('autostart_set_enabled', { enabled: next });
+      const isEnabled = typeof res === 'boolean' ? res : Boolean(res?.enabled);
+      setEnabled(isEnabled);
+      notifyChange(next ? 'LIORA iniciará com o Windows.' : 'LIORA não iniciará mais com o Windows.');
+    } catch (err) {
+      setError(String(err));
+      notifyChange('Falha ao alterar inicialização com o Windows.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3 pt-2 border-t border-[#222222]">
+      <div>
+        <label htmlFor="settings-autostart" className="text-white font-medium flex items-center gap-2 cursor-pointer flex-wrap">
+          <Play className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>Iniciar com o Windows</span>
+          <span className="text-[10px] bg-[#222222] text-[#A8A8A8] border border-[#333333] px-1.5 py-0.5 rounded font-mono whitespace-nowrap">
+            {isTauriEnvironment() ? 'Nativo SO' : 'Desktop Windows'}
+          </span>
+        </label>
+        <span className="text-[10px] text-[#888888] ml-6 block">
+          Inicia a LIORA minimizada na bandeja do sistema ao ligar o PC
+        </span>
+      </div>
+      <button
+        id="settings-autostart"
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        disabled={!available || busy}
+        onClick={toggle}
+        className={`relative w-11 h-6 rounded-full transition-colors ${
+          enabled ? 'bg-[var(--accent-primary)]' : 'bg-[#333333]'
+        } ${!available || busy ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'} shrink-0`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+            enabled ? 'translate-x-5' : ''
+          }`}
+        />
+      </button>
+      {error && <span className="text-[10px] text-red-400 block">{error}</span>}
     </div>
   );
 };

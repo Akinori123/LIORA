@@ -11,7 +11,7 @@ import { isTauriEnvironment, invokeTauri } from '../security/localBridge';
 import { auditLogger } from '../security/auditLogger';
 import { computeParametersHash } from '../security/canonicalizer';
 import { eventBus } from '../utils/eventBus';
-import { storageAdapter } from './storageAdapter';
+import { storageAdapter, readJsonList, writeJsonList } from './storageAdapter';
 
 export const INITIAL_DEVICES_REGISTRY: DeviceEntity[] = [
   {
@@ -43,10 +43,21 @@ export const INITIAL_DEVICES_REGISTRY: DeviceEntity[] = [
 export const COMMANDS_STORAGE_KEY = 'liora_device_commands_v1';
 export const USER_DEVICES_STORAGE_KEY = 'liora_user_devices_v1';
 
+export interface DeviceSSEEvent {
+  type: 'DEVICE_ADDED' | 'DEVICE_REMOVED' | 'DEVICE_STATUS_CHANGED' | 'DEVICE_COMMAND' | 'TELEMETRY_UPDATED';
+  deviceId?: string;
+  device?: DeviceEntity;
+  command?: DeviceCommand;
+  connected?: boolean;
+  timestamp: string;
+}
+
 export class DevicesManager {
   private devices: Map<string, DeviceEntity> = new Map();
   private commandLogs: DeviceCommand[] = [];
   private permissionEngine: PermissionEngine;
+  // Clientes SSE aguardando eventos de dispositivo (pareamento, status, comandos).
+  private sseClients: Set<(event: DeviceSSEEvent) => void> = new Set();
 
   constructor(engine: PermissionEngine = permissionEngine) {
     this.permissionEngine = engine;
@@ -65,24 +76,12 @@ export class DevicesManager {
     }
 
     // 2. Carrega dispositivos reais pareados pelo usuário
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const raw = localStorage.getItem(USER_DEVICES_STORAGE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            for (const d of parsed) {
-              if (d && d.id && d.id !== 'dev-1') {
-                this.devices.set(d.id, {
-                  ...d,
-                  capabilities: Array.isArray(d.capabilities) ? [...d.capabilities] : []
-                });
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('[DevicesManager] Erro ao carregar dispositivos pareados do armazenamento:', err);
+    for (const d of readJsonList<DeviceEntity>(USER_DEVICES_STORAGE_KEY)) {
+      if (d && d.id && d.id !== 'dev-1') {
+        this.devices.set(d.id, {
+          ...d,
+          capabilities: Array.isArray(d.capabilities) ? [...d.capabilities] : []
+        });
       }
     }
   }
@@ -90,12 +89,7 @@ export class DevicesManager {
   private persistUserDevices(): void {
     const userList = Array.from(this.devices.values()).filter(d => d.id !== 'dev-1');
     storageAdapter.save('devices', 'paired_list', userList).catch(() => {});
-    if (typeof localStorage === 'undefined') return;
-    try {
-      localStorage.setItem(USER_DEVICES_STORAGE_KEY, JSON.stringify(userList));
-    } catch (err) {
-      console.warn('[DevicesManager] Erro ao salvar dispositivos pareados:', err);
-    }
+    writeJsonList(USER_DEVICES_STORAGE_KEY, userList);
   }
 
   public addDevice(device: DeviceEntity): DeviceEntity {
@@ -107,7 +101,29 @@ export class DevicesManager {
       name: device.name,
       timestamp: new Date().toISOString()
     });
+    this.emitSSE({ type: 'DEVICE_ADDED', deviceId: device.id, device, connected: device.connected, timestamp: new Date().toISOString() });
     return device;
+  }
+
+  /**
+   * Assina eventos de dispositivo em tempo real (usado pelo endpoint SSE do servidor).
+   * Retorna a função de cancelamento.
+   */
+  public subscribe(listener: (event: DeviceSSEEvent) => void): () => void {
+    this.sseClients.add(listener);
+    return () => {
+      this.sseClients.delete(listener);
+    };
+  }
+
+  private emitSSE(event: DeviceSSEEvent): void {
+    for (const listener of Array.from(this.sseClients)) {
+      try {
+        listener(event);
+      } catch (err) {
+        console.warn('[DevicesManager] Erro ao emitir evento SSE de dispositivo:', err);
+      }
+    }
   }
 
   public removeDevice(deviceId: string): boolean {
@@ -121,31 +137,16 @@ export class DevicesManager {
       name: dev.name,
       timestamp: new Date().toISOString()
     });
+    this.emitSSE({ type: 'DEVICE_REMOVED', deviceId, device: dev, connected: false, timestamp: new Date().toISOString() });
     return true;
   }
 
   private loadStoredCommandLogs(): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      const raw = localStorage.getItem(COMMANDS_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.commandLogs = parsed.slice(0, 50);
-        }
-      }
-    } catch (err) {
-      console.warn('[DevicesManager] Failed to load stored device command logs:', err);
-    }
+    this.commandLogs = readJsonList<DeviceCommand>(COMMANDS_STORAGE_KEY).slice(0, 50);
   }
 
   private persistCommandLogs(): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      localStorage.setItem(COMMANDS_STORAGE_KEY, JSON.stringify(this.commandLogs.slice(0, 50)));
-    } catch (err) {
-      console.warn('[DevicesManager] Failed to persist device command logs:', err);
-    }
+    writeJsonList(COMMANDS_STORAGE_KEY, this.commandLogs, 50);
   }
 
   public getDevices(): DeviceEntity[] {
@@ -180,6 +181,13 @@ export class DevicesManager {
     }
 
     eventBus.publish('DEVICE_STATUS_CHANGED', { deviceId: id, connected, name: dev.name, timestamp: new Date().toISOString() });
+    this.emitSSE({
+      type: 'DEVICE_STATUS_CHANGED',
+      deviceId: id,
+      device: { ...dev },
+      connected,
+      timestamp: new Date().toISOString()
+    });
 
     if (!connected) {
       eventBus.publish('DEVICE_DISCONNECTED', { deviceId: id, name: dev.name, timestamp: new Date().toISOString() });
@@ -371,6 +379,37 @@ export class DevicesManager {
     payload: Record<string, any> = {},
     options?: { consentToken?: string; uiConfirmed?: boolean; sessionId?: string }
   ): Promise<DeviceCommand> {
+    try {
+      return await this.dispatchCommand(deviceId, commandType, riskLevel, payload, options);
+    } catch (err: any) {
+      // CORREÇÃO (UI presa em "executando..."): o diagrama de comandos da
+      // DevicesView depende da promessa resolver. Qualquer throw no caminho
+      // (auditoria, hash de parâmetros, motor de permissões) rejeitava a
+      // promessa e a tela ficava permanentemente em "Enviando comando", sem
+      // nenhum registro no log de comandos. Fail-closed com registro real.
+      const timestamp = new Date().toISOString();
+      const failedItem: DeviceCommand = {
+        id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        deviceId,
+        commandType,
+        payload,
+        riskLevel,
+        timestamp,
+        status: 'BLOCKED_BY_POLICY',
+        resultSummary: `Comando não despachado: ${err?.message || 'falha inesperada no gerenciador de dispositivos'}`
+      };
+      this.recordCommandItem(failedItem);
+      return failedItem;
+    }
+  }
+
+  private async dispatchCommand(
+    deviceId: string,
+    commandType: DeviceCommand['commandType'],
+    riskLevel: ToolRiskLevel = 'R0',
+    payload: Record<string, any> = {},
+    options?: { consentToken?: string; uiConfirmed?: boolean; sessionId?: string }
+  ): Promise<DeviceCommand> {
     const timestamp = new Date().toISOString();
     const cmdId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const sessionId = options?.sessionId || 'devices-session';
@@ -443,13 +482,23 @@ export class DevicesManager {
       resultSummary
     };
 
+    this.recordCommandItem(commandItem);
+    return commandItem;
+  }
+
+  private recordCommandItem(commandItem: DeviceCommand): void {
     this.commandLogs.unshift(commandItem);
     if (this.commandLogs.length > 50) {
       this.commandLogs.pop();
     }
     this.persistCommandLogs();
-
-    return commandItem;
+    this.emitSSE({
+      type: 'DEVICE_COMMAND',
+      deviceId: commandItem.deviceId,
+      device: this.devices.get(commandItem.deviceId),
+      command: commandItem,
+      timestamp: commandItem.timestamp
+    });
   }
 
   public getCommandLogs(): DeviceCommand[] {

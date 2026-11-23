@@ -14,7 +14,7 @@ import { eventBus } from '../utils/eventBus';
 import { permissionEngine, PermissionEngine } from '../security/permissionEngine';
 import { toolRegistry } from '../tools/registry';
 import { verifierEngine } from '../tools/verifier';
-import { isTauriEnvironment, executeLocalTool, LocalExecutionResult } from '../security/localBridge';
+import { isTauriEnvironment, executeLocalTool, LocalExecutionResult, asRecord } from '../security/localBridge';
 import { computeParametersHash } from '../security/canonicalizer';
 import { auditLogger } from '../security/auditLogger';
 import { IAuditLogger } from '../security/types';
@@ -547,7 +547,13 @@ export class AutomationsEngine {
     }
 
     // REGRA DE SEGURANÇA FUNDAMENTAL (Marco 8.2):
-    // Bloqueio FAIL-CLOSED automático para execuções autônomas/background de ferramentas R1, R2 ou R3
+    // Bloqueio FAIL-CLOSED automático para execuções autônomas/background de ferramentas R1, R2 ou R3.
+    // CORREÇÃO (consentimento inalcançável): antes o bloqueio também valia para
+    // acionamento MANUAL na UI — como ele retorna antes da avaliação do
+    // PermissionEngine, o status 'WAITING_CONSENT' nunca acontecia e o botão
+    // "Aprovar Execução" era código morto (o usuário só via "Bloqueado"). O
+    // caminho manual é supervisionado pelo próprio operador e a avaliação de
+    // permissão logo abaixo continua decidindo (DENY → WAITING_CONSENT).
     if (!isManual && (action.expectedRiskLevel === 'R1' || action.expectedRiskLevel === 'R2' || action.expectedRiskLevel === 'R3')) {
       let parametersHash = '';
       try {
@@ -649,7 +655,7 @@ export class AutomationsEngine {
         // Se a avaliação conceder ALLOW (ex: ferramentas R0 permitidas na política ou ações validadas)
         if (evaluation.decision === 'ALLOW') {
           const isNative = isTauriEnvironment() || this.preferNative || this.hasCustomBridge;
-          let executionOutput: any = null;
+          let executionOutput: unknown = null;
           let success = true;
           let errorMsg: string | undefined;
           let isSimulated = true;
@@ -682,7 +688,7 @@ export class AutomationsEngine {
                   }
                   success = true;
                   executionOutput = rawResult;
-                  isSimulated = Boolean(rawResult?.simulated ?? toolDef.isSimulated);
+                  isSimulated = Boolean(asRecord(rawResult)?.simulated ?? toolDef.isSimulated);
                   return true;
                 } else {
                   const bridgeRes = await this.executeBridge(toolName, parameters, sessionId);
@@ -931,7 +937,7 @@ export class AutomationsEngine {
     }
 
     // Com consentimento válido, despachar a ação nativa real via executeBridge (Tauri IPC)
-    let executionOutput: any = null;
+    let executionOutput: unknown = null;
     let success = true;
     let errorMsg: string | undefined;
     let isSimulated = false;
@@ -960,7 +966,7 @@ export class AutomationsEngine {
           } else {
             success = true;
           }
-          isSimulated = Boolean(executionOutput?.simulated ?? toolDef.isSimulated);
+          isSimulated = Boolean(asRecord(executionOutput)?.simulated ?? toolDef.isSimulated);
         } else {
           const bridgeRes = await this.executeBridge(toolName, parameters, sessionId);
           success = bridgeRes.success;

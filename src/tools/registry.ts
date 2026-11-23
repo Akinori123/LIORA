@@ -7,7 +7,8 @@ import {
   ToolDefinition, 
   ToolSummary, 
   ToolExecutionResult, 
-  ToolExecutionContext 
+  ToolExecutionContext,
+  ToolRiskLevel
 } from './types';
 import { 
   validateToolParameters, 
@@ -38,6 +39,7 @@ import {
 // o modelo (chat e Live) nunca as recebia, e pedia "mercado mais próximo" falhava.
 import { openGpsNavigationTool, mapsSearchPlacesTool } from './navigation/navigationActionTool';
 import { resolvePlaceAliasTool, savePlaceAliasTool } from './navigation/placeAliasTool';
+import { cameraInspectObjectTool } from './cameraVisionTool';
 
 export const DEFAULT_TOOL_TIMEOUT_MS = 5000;
 
@@ -67,6 +69,7 @@ export class ToolRegistry {
     this.registerTool(mapsSearchPlacesTool);
     this.registerTool(resolvePlaceAliasTool);
     this.registerTool(savePlaceAliasTool);
+    this.registerTool(cameraInspectObjectTool);
   }
 
   /**
@@ -108,6 +111,22 @@ export class ToolRegistry {
       parameters: JSON.parse(JSON.stringify(tool.parameters)),
       outputSchema: tool.outputSchema ? JSON.parse(JSON.stringify(tool.outputSchema)) : undefined
     };
+  }
+
+  /**
+   * Risco EFETIVO de uma execução considerando o contrato declarativo da própria
+   * ferramenta (`mutatingActions`). Fonte única usada por servidor, chat e UI —
+   * antes o backend tinha uma lista manual (`pc_manage_apps && action !== 'list'`)
+   * que divergia do enum real e deixava `close`/`minimize` fora do consentimento.
+   */
+  public resolveRiskLevel(toolName: string, params: Record<string, any> = {}): ToolRiskLevel | undefined {
+    const tool = this.tools.get(toolName);
+    if (!tool) return undefined;
+    const action = typeof params?.action === 'string' ? params.action : undefined;
+    if (action && tool.mutatingActions?.includes(action)) {
+      return tool.mutatingRiskLevel ?? 'R2';
+    }
+    return tool.riskLevel;
   }
 
   /**
@@ -281,10 +300,21 @@ export class ToolRegistry {
       }
 
       const executionTimeMs = Math.round(performance.now() - start);
+      // CORREÇÃO (verdade única de sucesso): o resultado da tool pode declarar
+      // `data.success === false` (falha REPORTADA pela própria ferramenta, ex:
+      // regra de automação inexistente, arquivo não encontrado). Antes o registry
+      // devolvia `success: true` e só o servidor remendava — quem consumia o
+      // registry direto (UI/Developer, agente de voz) via "executado com sucesso"
+      // num erro real. O campo `success` agora reflete a execução REAL.
+      const reportedFailure = data && typeof data === 'object' && (data as any).success === false;
+      const reportedError = reportedFailure
+        ? String((data as any).error || (data as any).message || 'Ferramenta reportou falha.')
+        : undefined;
       const resResult: ToolExecutionResult = {
         toolName,
-        success: true,
+        success: !reportedFailure,
         data,
+        error: reportedError,
         simulated: Boolean(data?.simulated ?? tool.isSimulated),
         riskLevel: tool.riskLevel,
         executionTimeMs,
@@ -293,7 +323,7 @@ export class ToolRegistry {
       };
       console.log('[ToolRegistry] [HANDSHAKE: resolved]', {
         toolName,
-        success: true,
+        success: !reportedFailure,
         executionTimeMs
       });
       return resResult;
@@ -357,16 +387,41 @@ export class ToolRegistry {
     return out;
   }
 
-  public toGeminiDeclarations(): Array<{ name: string; description: string; parameters: any }> {
-    return Array.from(this.tools.values()).map(tool => {
-      const geminiProps: Record<string, any> = {};
-      const requiredProps: string[] = tool.parameters.required || [];
+  /**
+   * Converte ferramentas registradas para o formato FunctionDeclaration do Gemini.
+   *
+   * `options.filter` (auditoria profunda): o modelo recebia TODAS as tools, inclusive
+   * as que o perfil de segurança NEGA (`workspace_read_file`). O modelo chamava a
+   * tool, o PermissionEngine negava e o usuário via “bloqueado” para algo que
+   * nunca seria permitido — além de gastar tokens com ferramentas inúteis.
+   */
+  public toGeminiDeclarations(options: { filter?: (tool: ToolSummary) => boolean } = {}): Array<{ name: string; description: string; parameters: any }> {
+    const filter = options.filter;
+    return Array.from(this.tools.values())
+      .filter((tool) => {
+        if (!filter) return true;
+        try {
+          return filter({
+            name: tool.name,
+            description: tool.description,
+            category: tool.category,
+            riskLevel: tool.riskLevel,
+            isSimulated: tool.isSimulated,
+            parameters: tool.parameters
+          });
+        } catch {
+          return true; // falha na política nunca deve esconder ferramentas por engano
+        }
+      })
+      .map(tool => {
+        const geminiProps: Record<string, any> = {};
+        const requiredProps: string[] = tool.parameters.required || [];
 
-      for (const [key, prop] of Object.entries(tool.parameters.properties)) {
-        geminiProps[key] = ToolRegistry.toGeminiProperty(prop);
-      }
+        for (const [key, prop] of Object.entries(tool.parameters.properties)) {
+          geminiProps[key] = ToolRegistry.toGeminiProperty(prop);
+        }
 
-      return {
+        return {
         name: tool.name,
         description: tool.description,
         parameters: {

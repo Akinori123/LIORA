@@ -134,6 +134,29 @@ const QuantumCoreShader = {
   `
 };
 
+let cachedWebGLAvailable: boolean | null = null;
+function checkWebGLAvailability(): boolean {
+  if (cachedWebGLAvailable !== null) return cachedWebGLAvailable;
+  if (typeof document === 'undefined') return false;
+  try {
+    const probeCanvas = document.createElement('canvas');
+    const webglAttrs = { antialias: false, depth: false, stencil: false };
+    const gl = probeCanvas.getContext('webgl2', webglAttrs) || 
+               probeCanvas.getContext('webgl', webglAttrs) || 
+               probeCanvas.getContext('experimental-webgl', webglAttrs);
+    const supported = Boolean(gl);
+    if (gl) {
+      const ext = (gl as WebGLRenderingContext).getExtension('WEBGL_lose_context');
+      ext?.loseContext();
+    }
+    cachedWebGLAvailable = supported;
+    return supported;
+  } catch {
+    cachedWebGLAvailable = false;
+    return false;
+  }
+}
+
 export const LioraOrb: React.FC<LioraOrbProps> = ({ 
   state, 
   size = '100%', 
@@ -253,16 +276,8 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
     const container = containerRef.current;
     if (!container) return;
 
-    // CORREÇÃO (Orbe sumido no WebView2 do Tauri): detecta a disponibilidade real
-    // de WebGL ANTES de tentar criar o renderer. O WebView2 (WebView do Tauri no
-    // Windows) pode não expor contexto WebGL2/hardware acceleration em certas
-    // configs (GPU blocklist, remote desktop, driver antigo) — o THREE.WebGLRenderer
-    // então lançava depois ou renderizava preto sem erro capturável.
-    const probeCanvas = document.createElement('canvas');
-    const webglAttrs = { antialias: false, depth: false, stencil: false };
-    const webgl2 = probeCanvas.getContext('webgl2', webglAttrs);
-    const webgl1 = webgl2 ? null : probeCanvas.getContext('webgl', webglAttrs) || probeCanvas.getContext('experimental-webgl', webglAttrs);
-    if (!webgl2 && !webgl1) {
+    // Detecta a disponibilidade real de WebGL com cache para não vazar contextos WebGL
+    if (!checkWebGLAvailability()) {
       console.warn('[LioraOrb] WebGL indisponível no WebView (probe falhou). Exibindo núcleo 2D de fallback.');
       setHasWebGLError(true);
       return;
@@ -317,7 +332,10 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
         if (renderer.domElement.parentNode === container) {
           container.removeChild(renderer.domElement);
         }
+        try {
         renderer.dispose();
+        renderer.forceContextLoss();
+      } catch {}
       } catch {
         // Ignora erro secundário durante limpeza defensiva
       }
@@ -699,7 +717,10 @@ export const LioraOrb: React.FC<LioraOrbProps> = ({
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();
       });
-      renderer.dispose();
+      try {
+        renderer.dispose();
+        renderer.forceContextLoss();
+      } catch {}
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }

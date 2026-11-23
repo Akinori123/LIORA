@@ -14,13 +14,14 @@
  * injection block, secret masking). Nenhuma execução ocorre sem validação.
  */
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { validateShellCommand } from './commandGuard';
 import { ToolDefinition } from './types';
 // NÚCLEO DE CONTROLE TOTAL DO PC: visão, apps/inputs e arquivos (R0-R2)
-import { pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, openBrowserTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, isOsDryRun } from './pcControlTools';
+import { pcTakeScreenshotTool, pcManageAppsTool, openApplicationTool, openBrowserTool, pcSimulateInputTool, fileSearchAndReadTool, fileWriteAndModifyTool, pcInspectAppUiTool, isOsDryRun } from './pcControlTools';
 import { shouldUseWebPreviewDesktopFallback } from '../utils/runtimeEnvironment';
 // AGENTE WEB AUTÓNOMO (FASE 1: Browser Use) — R2 com consentimento HMAC
 import { webBrowserAgentTool } from './web/browserAgentTool';
@@ -32,6 +33,9 @@ import { allBackgroundTools } from './async/backgroundTools';
 // FASE 4: COFRE CRIPTOGRAFADO — vault manager (R1 listagem, R2 chave/valor)
 import { allVaultTools } from './security/vaultTools';
 import { allBrowserTools } from './browser/playwrightTool';
+// LEITURA REAL de páginas (Playwright headless): responde com dados da página
+// em vez de "está na sua tela".
+import { browserReadPageTool } from './browser/browserReaderTool';
 import { semanticMemoryService } from '../services/memory/semanticMemoryService';
 import { allCodingTools } from './coding/codingTools';
 import { allIotTools } from './iot/iotTools';
@@ -80,13 +84,33 @@ function ensureWorkspaceRoot(): string {
 
 /** Resolve caminho relativo com bloqueio de path traversal (espelha o canonicalizer do Rust) */
 function resolveSafeWorkspacePath(rawPath: string): string {
-  const trimmed = rawPath.trim();
+  const trimmed = rawPath.trim().replace(/\\/g, '/');
   if (!trimmed) throw new Error('INVALID_PATH: Caminho de arquivo inválido.');
-  if (trimmed.includes('..') || path.isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
+  if (path.isAbsolute(rawPath) || /^[a-zA-Z]:[\\/]/.test(rawPath)) {
     throw new Error('PATH_TRAVERSAL_BLOCKED: Tentativa de acesso a caminho absoluto ou fora do workspace.');
   }
+  // CORREÇÃO (auditoria profunda): `.includes('..')` não detectava traversal em
+  // nada — `path.resolve` já resolve o literal ANTES do teste de prefixo, então
+  // `sub/../../evil.txt` virava `<ws>/../evil.txt`. Agora os segmentos são
+  // resolvidos manualmente e a raiz é reimposta como base inegociável.
+  const segments: string[] = [];
+  for (const part of trimmed.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (segments.length === 0) {
+        throw new Error('PATH_TRAVERSAL_BLOCKED: Caminho resolvido escapou do workspace.');
+      }
+      segments.pop();
+      continue;
+    }
+    if (/[<>:"|?*\0]/.test(part)) {
+      throw new Error('INVALID_PATH: Caractere inválido no caminho do arquivo.');
+    }
+    segments.push(part);
+  }
+  if (segments.length === 0) throw new Error('INVALID_PATH: Caminho de arquivo inválido.');
   const root = ensureWorkspaceRoot();
-  const resolved = path.resolve(root, trimmed);
+  const resolved = path.resolve(root, ...segments);
   // Prefixo simples (startsWith) permitiria pastas irmãs (ex: root=ws, alvo=ws-evil);
   // exigimos que o restante comece com o separador do SO ou que seja a própria raiz.
   if (resolved !== root && !resolved.startsWith(root + path.sep)) {
@@ -95,49 +119,73 @@ function resolveSafeWorkspacePath(rawPath: string): string {
   return resolved;
 }
 
-/** Bloqueia injeção de comandos (mesma regex do tool simulado) */
+/**
+ * Bloqueia injeção de comandos e comandos fora da lista branca.
+ * CORREÇÃO CRÍTICA (auditoria profunda): antes este módulo checava só `\\` e
+ * confiava na lista branca por PREFIXO + espaço — `git status ; whoami`
+ * passava e era executado por um SHELL real (`exec`). Usa agora a guarda única
+ * de `commandGuard` (sem metacaractere, linha única, bind de abertura).
+ */
 function assertNoCommandInjection(cmd: string): void {
-  const dangerousPattern = /[;&|`$<>\\()\n]/;
-  if (dangerousPattern.test(cmd)) {
-    throw new Error('COMMAND_INJECTION_BLOCKED: Caracteres de encadeamento ou injeção detectados e bloqueados.');
+  const guard = validateShellCommand(cmd);
+  if (!guard.valid) {
+    throw new Error(`${guard.code}: ${guard.message}`);
   }
 }
 
-/** Lista branca de prefixos de comando permitidos no sandbox */
-const ALLOWED_COMMAND_PREFIXES = [
-  'git status',
-  'git branch',
-  'git log',
-  'git diff',
-  'npm test',
-  'npm run build',
-  'npm run lint',
-  'node -v',
-  'node --version',
-  'python --version',
-  'uptime',
-  'ls',
-  'dir',
-  'echo'
-];
-
+/** Mantido por compatibilidade: a whitelist vive na guarda única. */
 function assertCommandInWhitelist(cmd: string): void {
-  const isAllowed = ALLOWED_COMMAND_PREFIXES.some(
-    prefix => cmd === prefix || cmd.startsWith(prefix + ' ')
-  );
-  if (!isAllowed) {
-    throw new Error(`COMMAND_NOT_IN_WHITELIST: O comando '${cmd}' não faz parte da lista branca autorizada.`);
+  const guard = validateShellCommand(cmd);
+  if (!guard.valid) {
+    throw new Error(`${guard.code}: ${guard.message}`);
   }
 }
 
-/** Executa comando real via child_process com timeout */
+/**
+ * Executa um comando JÁ validado, SEM shell, dentro do WORKSPACE da LIORA.
+ *
+ * BUG CORRIGIDO (auditoria profunda — execução real):
+ *  - usava `exec(cmd)`, que roda via shell (encadeamento possível se a validação
+ *    fosse burlada) e herda o cwd do processo — no Tauri esse cwd é
+ *    C:\Windows\System32, exatamente o diretório que o guard de confinamento
+ *    do Rust bloqueia. Resultado: `git status` falhava com 'não é um repositório'
+ *    e qualquer comando de projeto não enxergava o workspace.
+ *  - `echo` não existe como executável isolado no Windows (é builtin do shell):
+ *    com shell:false virava ENOENT → exitCode 1 → "falhou" falso. Agora `echo`
+ *    é resolvido internamente (sem shell) e `dir` delega ao `cmd /c dir`.
+ */
 function execRealCommand(cmd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve) => {
-    exec(cmd, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
-      const exitCode = err && typeof (err as any).code === 'number' ? (err as any).code : (err ? 1 : 0);
-      resolve({ stdout: stdout || '', stderr: stderr || '', exitCode });
+  const workspaceRoot = ensureWorkspaceRoot();
+  const parts = cmd.split(/\s+/).filter(Boolean);
+  const binary = (parts[0] || '').toLowerCase();
+  const args = parts.slice(1);
+
+  const run = (file: string, fileArgs: string[]) =>
+    new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
+      execFile(file, fileArgs, { timeout: timeoutMs, windowsHide: true, shell: false, cwd: workspaceRoot }, (err, stdout, stderr) => {
+        const exitCode = err && typeof (err as any).code === 'number' ? (err as any).code : (err ? 1 : 0);
+        resolve({ stdout: stdout || '', stderr: stderr || '', exitCode });
+      });
     });
-  });
+
+  if (binary === 'echo') {
+    // Builtin do shell: reproduz o comportamento sem passar por shell.
+    const text = args.join(' ').replace(/^["']|["']$/g, '');
+    return Promise.resolve({ stdout: `${text}${os.EOL}`, stderr: '', exitCode: 0 });
+  }
+  if (binary === 'dir' && os.platform() === 'win32') {
+    // `dir` também é builtin no Windows; executa via cmd com a string já validada.
+    return run('cmd.exe', ['/c', 'dir', ...args]);
+  }
+  return run(parts[0], args);
+}
+
+/** Alias histórico: execução estruturada = execução real sem shell. */
+function execStructuredCommand(
+  cmd: string,
+  timeoutMs: number
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return execRealCommand(cmd, timeoutMs);
 }
 
 /**
@@ -231,9 +279,10 @@ export const nativeWorkspaceReadFileTool: ToolDefinition<{ filePath: string; max
     requiredFields: ['filePath', 'content', 'lineCount', 'sizeBytes', 'simulated']
   },
   execute: async (params) => {
-    const safePath = resolveSafeWorkspacePath(params.filePath);
+    const rawPath = params.filePath || (params as any).path;
+    const safePath = resolveSafeWorkspacePath(rawPath);
     if (!fs.existsSync(safePath) || !fs.statSync(safePath).isFile()) {
-      throw new Error(`Arquivo '${params.filePath}' não encontrado no workspace real da LIORA.`);
+      throw new Error(`Arquivo '${rawPath}' não encontrado no workspace real da LIORA.`);
     }
     const content = fs.readFileSync(safePath, 'utf-8');
     const lines = content.split('\n');
@@ -241,7 +290,7 @@ export const nativeWorkspaceReadFileTool: ToolDefinition<{ filePath: string; max
     const truncated = lines.length > maxLines;
 
     return {
-      filePath: params.filePath.trim().replace(/^[./\\]+/, ''),
+      filePath: String(rawPath).trim().replace(/^[./\\]+/, ''),
       content: lines.slice(0, maxLines).join('\n'),
       lineCount: Math.min(lines.length, maxLines),
       sizeBytes: Buffer.byteLength(content, 'utf-8'),
@@ -289,7 +338,8 @@ export const nativeWorkspaceWriteFileTool: ToolDefinition<{ filePath: string; co
     requiredFields: ['success', 'filePath', 'bytesWritten', 'simulated']
   },
   execute: async (params) => {
-    const safePath = resolveSafeWorkspacePath(params.filePath);
+    const rawPath = params.filePath || (params as any).path;
+    const safePath = resolveSafeWorkspacePath(rawPath);
     const parent = path.dirname(safePath);
     if (params.createDirs !== false && !fs.existsSync(parent)) {
       fs.mkdirSync(parent, { recursive: true });
@@ -304,7 +354,7 @@ export const nativeWorkspaceWriteFileTool: ToolDefinition<{ filePath: string; co
 
     return {
       success: true,
-      filePath: params.filePath.trim().replace(/^[./\\]+/, ''),
+      filePath: String(rawPath).trim().replace(/^[./\\]+/, ''),
       bytesWritten: Buffer.byteLength(params.content, 'utf-8'),
       absolutePath: safePath,
       isReal: true,
@@ -321,7 +371,13 @@ export const nativeSystemExecSandboxTool: ToolDefinition<{ command: string; time
   name: 'system_exec_sandbox',
   description: 'Executa comandos CLI REAIS com lista branca estrita no sandbox da LIORA.',
   category: 'system',
-  riskLevel: 'R1',
+  // CORREÇÃO (auditoria profunda — nível de risco): a execução REAL de processos
+  // do SO é a ação mais sensível da aplicação. A versão declarativa dizia R1
+  // (rodava com consentimento de nível baixo e entrava na auditoria como leitura
+  // reversível) e o Rust classifica como R3 (bloqueado de vez). O nível correto
+  // para o fluxo interativo é R2 — mesma classe de pc_simulate_input —, exigindo
+  // consentimento explícito por execução, sem permitir bypass automático.
+  riskLevel: 'R2',
   isSimulated: false,
   timeoutMs: 12000, // comando pode pedir até 10s internamente
   parameters: {
@@ -354,7 +410,8 @@ export const nativeSystemExecSandboxTool: ToolDefinition<{ command: string; time
     assertCommandInWhitelist(cmd);
 
     const timeoutMs = params.timeoutMs || 5000;
-    const { stdout, stderr, exitCode } = await execRealCommand(cmd, timeoutMs);
+    // Sem shell: binário + args como vetor (ver execStructuredCommand).
+    const { stdout, stderr, exitCode } = await execStructuredCommand(cmd, timeoutMs);
 
     return {
       success: exitCode === 0,
@@ -1133,16 +1190,25 @@ export const nativeSystemSetVolumeTool: ToolDefinition<{ level: number }, any> =
     }
 
     if (os.platform() === 'win32') {
-      // Tenta via nircmd se disponível
-      const { exitCode, stderr } = await execRealCommand(`nircmd setsysvolume ${clamped * 655}`, 2000);
+      // 1. Tenta via nircmd se disponível
+      const { exitCode } = await execRealCommand(`nircmd setsysvolume ${clamped * 655}`, 2000);
       if (exitCode === 0) {
         return { success: true, level: clamped, method: 'nircmd', simulated: false };
       }
+
+      // 2. Fallback universal nativo via PowerShell (50x VolumeDown depois clamped/2 x VolumeUp)
+      const stepsUp = Math.round(clamped / 2);
+      const psScript = `$w = New-Object -ComObject WScript.Shell; 1..50 | ForEach-Object { $w.SendKeys([char]174) }; if (${stepsUp} -gt 0) { 1..${stepsUp} | ForEach-Object { $w.SendKeys([char]175) } }`;
+      const psRes = await execRealCommand(`powershell -NoProfile -NonInteractive -Command "${psScript}"`, 6000);
+      if (psRes.exitCode === 0) {
+        return { success: true, level: clamped, method: 'powershell_wscript', simulated: false };
+      }
+
       return {
         success: false,
         level: clamped,
         simulated: false,
-        error: stderr.slice(0, 150) || 'nircmd.exe não encontrado para ajustar volume no Windows.'
+        error: psRes.stderr.slice(0, 150) || 'Falha ao ajustar volume nativo no Windows.'
       };
     } else if (os.platform() === 'darwin') {
       const { exitCode, stderr } = await execRealCommand(`osascript -e "set volume output volume ${clamped}"`, 3000);
@@ -1273,6 +1339,26 @@ export const nativeMemoryStoreFactTool: ToolDefinition<{
   },
   execute: async ({ category, key, value, confidence }) => {
     const entry = await semanticMemoryService.storeFact(category, key, value, confidence);
+
+    // CORREÇÃO (fato salvo que "desaparecia" da conversa): o chat injeta contexto a
+    // partir de `useLioraStore.memoryEntries`, mas esta ferramenta só gravava no
+    // SQLite/VectorStore/Markdown — o fato recém-memorizado nunca chegava ao
+    // prompt até um reload completo. Espelha na mesma fonte usada pelo chat.
+    try {
+      const { useLioraStore } = await import('../store/lioraStore');
+      const memoryList = useLioraStore.getState().memoryEntries || [];
+      if (!memoryList.some((m) => m.key === entry.key && m.value === entry.value)) {
+        useLioraStore.getState().addMemory({
+          key: entry.key,
+          value: entry.value,
+          category: entry.category,
+          confidence: entry.confidence
+        });
+      }
+    } catch {
+      // Ambiente sem store (ex: worker) — o SQLite/Markdown continua sendo a verdade
+    }
+
     return {
       success: true,
       entry,
@@ -1325,6 +1411,162 @@ export const nativeMemoryListContextTool: ToolDefinition<{
 };
 
 /**
+ * 18. memory_forget REAL (R1) — Exclui fatos da memória (bug: NÃO EXISTIA).
+ *
+ * Sintoma relatado: "pedi para esquecer o projeto Aurora, confirmei, e continua
+ * na memória". A causa-raiz: o SemanticMemoryService tinha `deleteMemory`,
+ * a store tinha `deleteMemory`, mas **nenhuma ferramenta expunha isso ao
+ * modelo** — ele só podia armazenar e ler, então inventava uma exclusão que
+ * nunca acontecia. Esta tool apaga nas DUAS fontes de verdade:
+ *  - memória semântica (SQLite + VectorStore + Markdown) e
+ *  - `useLioraStore.memoryEntries` (a lista injetada no prompt do chat).
+ * Sem o match por chave/conteúdo, removeria só pelo id interno (que o modelo
+ * não conhece).
+ */
+export const nativeMemoryForgetTool: ToolDefinition<{
+  query: string;
+  matchBy?: 'key' | 'value' | 'any';
+  category?: 'preference' | 'project' | 'fact' | 'routine' | 'journal';
+  dryRun?: boolean;
+}, any> = {
+  name: 'memory_forget',
+  description: 'Remove um fato, preferência ou projeto da memória de longo prazo da LIORA. Use quando o usuário pedir "esqueça", "apague da memória", "delete o que sabe sobre X". Identifica os registros pela chave ou pelo conteúdo (não precisa de ID). AÇÃO MUTÁVEL (R1).',
+  category: 'workspace',
+  riskLevel: 'R1',
+  isSimulated: false,
+  parameters: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: 'Termo que identifica o que esquecer (ex: "projeto Aurora", "endereço da minha casa"). Busca em chave e conteúdo, sem diferenciar maiúsculas/acentos.'
+      },
+      matchBy: {
+        type: 'string',
+        enum: ['key', 'value', 'any'],
+        description: 'Onde procurar o termo. Padrão: any (chave ou conteúdo).',
+        default: 'any'
+      },
+      category: {
+        type: 'string',
+        enum: ['preference', 'project', 'fact', 'routine', 'journal'],
+        description: 'Restringe a busca a uma categoria (opcional).'
+      },
+      dryRun: {
+        type: 'boolean',
+        description: 'Se true, apenas LISTA o que seria removido, sem apagar.',
+        default: false
+      }
+    },
+    required: ['query'],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: 'object',
+    requiredFields: ['success', 'removedCount', 'simulated']
+  },
+  execute: async ({ query, matchBy = 'any', category, dryRun = false }) => {
+    const normalize = (s: unknown) => String(s ?? '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const needle = normalize(query);
+    if (!needle) {
+      return { success: false, removedCount: 0, error: 'MISSING_QUERY: informe o que deve ser esquecido.', simulated: false };
+    }
+
+    /** Um termo como "projeto aurora" casa se TODAS as palavras aparecerem. */
+    const matches = (haystack: string) => {
+      const h = normalize(haystack);
+      return needle.split(' ').every((token) => h.includes(token));
+    };
+
+    await semanticMemoryService.init();
+
+    const semanticTargets = semanticMemoryService.getAllMemories().filter((m) => {
+      if (category && m.category !== category) return false;
+      if (matchBy === 'key') return matches(m.key);
+      if (matchBy === 'value') return matches(m.value);
+      return matches(`${m.key} ${m.value}`);
+    });
+
+    let storeTargets: Array<{ id: string; key: string; value: string }> = [];
+    let storeApi: any = null;
+    try {
+      const { useLioraStore } = await import('../store/lioraStore');
+      storeApi = useLioraStore;
+      const entries = useLioraStore.getState().memoryEntries || [];
+      storeTargets = entries.filter((m: any) => {
+        if (category && m.category !== category) return false;
+        if (matchBy === 'key') return matches(m.key);
+        if (matchBy === 'value') return matches(m.value);
+        return matches(`${m.key} ${m.value}`);
+      }).map((m: any) => ({ id: m.id, key: m.key, value: m.value }));
+    } catch {
+      // Ambiente sem store (worker/teste): a memória semântica continua sendo a verdade
+    }
+
+    const summary = [
+      ...semanticTargets.map((m) => ({ key: m.key, value: m.value, source: 'semantic' as const })),
+      ...storeTargets.map((m) => ({ key: m.key, value: m.value, source: 'store' as const }))
+    ];
+
+    if (dryRun) {
+      return {
+        success: true,
+        dryRun: true,
+        removedCount: 0,
+        wouldRemove: summary,
+        message: summary.length > 0
+          ? `${summary.length} registro(s) seriam removidos.`
+          : `Nenhum registro corresponde a "${query}".`,
+        simulated: false
+      };
+    }
+
+    // 1. Remove da memória semântica (SQLite + vetores + markdown)
+    for (const m of semanticTargets) {
+      try { await semanticMemoryService.deleteMemory(m.id); } catch { /* segue para o próximo */ }
+    }
+    // 2. Remove da lista injetada no prompt do chat (senão "continua na memória")
+    if (storeApi) {
+      for (const m of storeTargets) {
+        try { storeApi.getState().deleteMemory(m.id); } catch { /* item já removido */ }
+      }
+    }
+
+    // 3. Verificação pós-exclusão: nada com o termo pode sobrar em NENHUMA fonte
+    await semanticMemoryService.init();
+    const remainingSemantic = semanticMemoryService.getAllMemories().filter((m) =>
+      (matchBy === 'key' ? matches(m.key) : matchBy === 'value' ? matches(m.value) : matches(`${m.key} ${m.value}`))
+    ).length;
+    let remainingStore = 0;
+    if (storeApi) {
+      remainingStore = (storeApi.getState().memoryEntries || []).filter((m: any) =>
+        (matchBy === 'key' ? matches(m.key) : matchBy === 'value' ? matches(m.value) : matches(`${m.key} ${m.value}`))
+      ).length;
+    }
+    const removedCount = summary.length;
+    const stillThere = remainingSemantic + remainingStore;
+
+    return {
+      success: stillThere === 0,
+      removedCount,
+      removed: summary,
+      stillPresent: stillThere,
+      message: removedCount === 0
+        ? `Nenhum registro na memória correspondia a "${query}". Nada foi apagado.`
+        : stillThere === 0
+          ? `${removedCount} registro(s) sobre "${query}" foram removidos da memória e verificados.`
+          : `${removedCount} registro(s) removidos, mas ${stillThere} ainda permanecem.`,
+      simulated: false
+    };
+  }
+};
+
+/**
  * Instala as ferramentas nativas reais no Tool Registry do servidor,
  * substituindo as versões simuladas de mesmo nome.
  */
@@ -1350,6 +1592,7 @@ export function installNativeServerTools(registry: {
     nativeMemorySemanticSearchTool,
     nativeMemoryStoreFactTool,
     nativeMemoryListContextTool,
+    nativeMemoryForgetTool,
     openGpsNavigationTool,
     mapsSearchPlacesTool,
     resolvePlaceAliasTool,
@@ -1357,6 +1600,7 @@ export function installNativeServerTools(registry: {
     // NÚCLEO DE CONTROLE TOTAL DO PC (Módulos 1-3)
     pcTakeScreenshotTool,
     pcManageAppsTool,
+    pcInspectAppUiTool,
     openApplicationTool,
     openBrowserTool,
     pcSimulateInputTool,
@@ -1372,6 +1616,8 @@ export function installNativeServerTools(registry: {
     // FASE 4: COFRE CRIPTOGRAFADO — vault (R1 listagem, R2 chave/valor)
     ...allVaultTools,
     ...allBrowserTools,
+    // Leitura de página isolada (não precisa de sessão de browser aberta)
+    browserReadPageTool,
     ...allCodingTools,
     ...allIotTools
   ];

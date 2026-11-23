@@ -19,7 +19,21 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   requestTimeoutMs: 15000,
   workspacePath: './workspace',
   securityEnforcementLevel: 'strict',
-  desktopNotifications: true
+  desktopNotifications: true,
+  cameraEnabled: false,
+  gestureControlEnabled: false,
+  gestureSensitivity: 'high',
+  gestureVisualFeedback: true,
+  // Padrão ESPELHO (como a prévia da webcam): mover a mão para a direita
+  // desloca o cursor para a direita. Antes o padrão era `false` (serviço em modo
+  // direto) enquanto a prévia era sempre espelhada — o cursor andava ao
+  // contrário da imagem, e corrigir exigia achar o botão "⇄ Inverter".
+  gestureInvertX: true,
+  gestureObjectTracking: true,
+  speechRate: 1.05,
+  handsFreeVoiceConsent: true,
+  stealthMode: false,
+  welcomeGreeting: true
 };
 
 const VALID_THEMES: ThemeProfile[] = ['crimson', 'emerald', 'amber', 'ice'];
@@ -28,6 +42,7 @@ const VALID_ORB_QUALITIES = ['auto', 'high', 'balanced', 'low'];
 const VALID_LOG_VERBOSITIES = ['error', 'warn', 'info', 'debug'];
 const VALID_SECURITY_LEVELS = ['strict', 'balanced', 'permissive'];
 const VALID_NEURAL_VOICES = ['Aoede', 'Puck', 'Charon', 'Kore', 'Fenrir'];
+const VALID_GESTURE_SENSITIVITIES = ['low', 'medium', 'high', 'ultra'];
 
 function getStorage() {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -126,6 +141,43 @@ export const settingsManager = {
       sanitized.desktopNotifications = obj.desktopNotifications;
     }
 
+    // Visão Computacional & Câmera
+    if (typeof obj.cameraEnabled === 'boolean') {
+      sanitized.cameraEnabled = obj.cameraEnabled;
+    }
+    // Gesture Control (Cursor por Gestos)
+    if (typeof obj.gestureControlEnabled === 'boolean') {
+      sanitized.gestureControlEnabled = obj.gestureControlEnabled;
+    }
+    if (typeof obj.gestureSensitivity === 'string' && VALID_GESTURE_SENSITIVITIES.includes(obj.gestureSensitivity)) {
+      sanitized.gestureSensitivity = obj.gestureSensitivity as any;
+    }
+    if (typeof obj.gestureVisualFeedback === 'boolean') {
+      sanitized.gestureVisualFeedback = obj.gestureVisualFeedback;
+    }
+    if (typeof obj.gestureInvertX === 'boolean') {
+      sanitized.gestureInvertX = obj.gestureInvertX;
+    }
+    if (typeof obj.gestureObjectTracking === 'boolean') {
+      sanitized.gestureObjectTracking = obj.gestureObjectTracking;
+    }
+
+    // Speech Rate & Hands-Free
+    if (typeof obj.speechRate === 'number' && !isNaN(obj.speechRate) && obj.speechRate >= 0.7 && obj.speechRate <= 1.6) {
+      sanitized.speechRate = obj.speechRate;
+    }
+    if (typeof obj.handsFreeVoiceConsent === 'boolean') {
+      sanitized.handsFreeVoiceConsent = obj.handsFreeVoiceConsent;
+    }
+
+    // Facilidades do Mestre
+    if (typeof obj.stealthMode === 'boolean') {
+      sanitized.stealthMode = obj.stealthMode;
+    }
+    if (typeof obj.welcomeGreeting === 'boolean') {
+      sanitized.welcomeGreeting = obj.welcomeGreeting;
+    }
+
     return {
       isValid: errors.length === 0,
       errors,
@@ -149,6 +201,8 @@ export const settingsManager = {
       }
       const parsed = JSON.parse(raw);
       const validation = this.validateAndSanitize(parsed);
+      // Controle de câmera/gestos sempre inicia desligado por padrão no boot para segurança operacional
+      validation.sanitizedSettings.gestureControlEnabled = false;
       if (validation.errors.length > 0) {
         this.saveSettings(validation.sanitizedSettings);
       }

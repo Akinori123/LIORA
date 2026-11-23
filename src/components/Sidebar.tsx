@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../store/lioraStore';
 import { NavTab } from '../types';
@@ -22,6 +22,7 @@ import {
   X,
   Gauge
 } from 'lucide-react';
+import { invokeTauri, isTauriEnvironment } from '../security/localBridge';
 
 export const Sidebar: React.FC = () => {
   const { 
@@ -43,6 +44,22 @@ export const Sidebar: React.FC = () => {
       closeMobileDrawer: s.closeMobileDrawer
     }))
   );
+
+  // Publica a largura REAL da sidebar em `--liora-sidebar-width`.
+  // Motivo: o cursor virtual (Home) e o clique do punho no serviço precisam da
+  // MESMA área útil. Com `100vw` o cursor ficava ~80px à direita da mão no
+  // extremo direito da tela (w-20) e ~256px quando a sidebar está expandida.
+  const setSidebarWidthCssVar = useCallback((el: HTMLElement | null) => {
+    if (!el || typeof window === 'undefined' || typeof ResizeObserver === 'undefined') return;
+    const apply = () => {
+      const isDesktop = window.matchMedia('(min-width: 768px)').matches;
+      const w = isDesktop && el.offsetParent !== null ? el.getBoundingClientRect().width : 0;
+      document.documentElement.style.setProperty('--liora-sidebar-width', `${Math.round(w)}px`);
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+  }, []);
 
   const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: 'Início', icon: <Cpu className="w-5 h-5" /> },
@@ -83,6 +100,7 @@ export const Sidebar: React.FC = () => {
       {/* Main Sidebar / Mobile Drawer */}
       <aside 
         data-testid="app-sidebar"
+        ref={setSidebarWidthCssVar}
         className={`border-r border-[#222222] bg-[#0A0A0A] transition-all duration-300 ${
           isMobileDrawerOpen 
             ? 'fixed inset-y-0 left-0 w-72 max-w-[85vw] z-50 flex flex-col shadow-2xl' 
@@ -91,8 +109,16 @@ export const Sidebar: React.FC = () => {
           isSidebarExpanded ? 'md:w-64' : 'md:w-20'
         }`}
       >
-        {/* Brand Header */}
-        <div className={`flex items-center justify-between py-5 border-b border-[#222222] shrink-0 ${
+        {/* Brand Header — funciona também como área de arraste nativo da janela */}
+        <div
+          onPointerDown={(e) => {
+            if (!isTauriEnvironment() || e.button !== 0) return;
+            const t = e.target as HTMLElement | null;
+            if (t?.closest('button, a, input, [role="button"], [data-no-drag]')) return;
+            void invokeTauri('start_drag').catch(() => {});
+          }}
+          title={isTauriEnvironment() ? 'Arraste para mover a janela' : undefined}
+          className={`flex items-center justify-between py-5 border-b border-[#222222] shrink-0 select-none ${
           isSidebarExpanded || isMobileDrawerOpen ? 'px-4 gap-2' : 'px-2.5 gap-1'
         }`}>
           <div className="flex items-center gap-3 min-w-0">
@@ -142,7 +168,9 @@ export const Sidebar: React.FC = () => {
 
 
         {/* Navigation Links */}
-        <nav className="flex-1 px-3 py-3 space-y-1.5 overflow-y-auto">
+        <nav className={`flex-1 space-y-1.5 overflow-y-auto overflow-x-hidden [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
+          isSidebarExpanded || isMobileDrawerOpen ? 'px-3 py-3' : 'px-2 py-3'
+        }`}>
           {navItems.map((item) => {
             const isActive = activeTab === item.id;
             const showLabel = isSidebarExpanded || isMobileDrawerOpen;
@@ -154,7 +182,9 @@ export const Sidebar: React.FC = () => {
                 data-testid={`nav-item-${item.id}`}
                 aria-label={item.label}
                 title={item.label}
-                className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg text-sm font-medium transition-all group relative ${
+                className={`w-full flex items-center rounded-lg text-sm font-medium transition-all group relative ${
+                  showLabel ? 'gap-3 px-3 py-3' : 'justify-center px-0 py-3'
+                } ${
                   isActive 
                     ? 'bg-[#1A1A1A] text-white border-l-2 shadow-sm' 
                     : 'text-[#A8A8A8] hover:bg-[#141414] hover:text-[#F5F5F5]'

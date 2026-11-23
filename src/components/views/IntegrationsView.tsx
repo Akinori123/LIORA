@@ -365,10 +365,13 @@ export const IntegrationsView: React.FC = () => {
                     {service.scopes.map((scope) => (
                       <label 
                         key={scope.id} 
+                        htmlFor={`int-scope-${service.id}-${scope.id}`}
                         className="flex items-center justify-between p-2 bg-[#141414] hover:bg-[#181818] border border-[#1E1E1E] rounded text-xs cursor-pointer transition-colors"
                       >
                         <div className="flex items-center gap-2">
                           <input 
+                            id={`int-scope-${service.id}-${scope.id}`}
+                            name={`int-scope-${service.id}-${scope.id}`}
                             type="checkbox" 
                             checked={scope.granted}
                             onChange={() => toggleServiceScope(service.id, scope.id)}
@@ -492,6 +495,7 @@ export const IntegrationsView: React.FC = () => {
                 <label htmlFor="int-sim-provider" className="block text-[11px] font-mono text-[#888888] mb-1">Provedor</label>
                 <select
                   id="int-sim-provider"
+                  name="int-sim-provider"
                   value={simProvider}
                   onChange={(e) => {
                     const prov = e.target.value as IntegrationProviderId;
@@ -523,6 +527,7 @@ export const IntegrationsView: React.FC = () => {
                 <label htmlFor="int-sim-event" className="block text-[11px] font-mono text-[#888888] mb-1">Tipo de Evento</label>
                 <input
                   id="int-sim-event"
+                  name="int-sim-event"
                   type="text"
                   value={simEventType}
                   onChange={(e) => setSimEventType(e.target.value)}
@@ -536,6 +541,7 @@ export const IntegrationsView: React.FC = () => {
               <label htmlFor="int-sim-payload" className="block text-[11px] font-mono text-[#888888] mb-1">Payload JSON (Simulado)</label>
               <textarea
                 id="int-sim-payload"
+                name="int-sim-payload"
                 rows={4}
                 value={simPayloadJson}
                 onChange={(e) => setSimPayloadJson(e.target.value)}
@@ -632,6 +638,7 @@ export const IntegrationsView: React.FC = () => {
                 <div className="relative">
                   <input 
                     id="int-connect-key"
+                    name="int-connect-key"
                     type={showKey ? 'text' : 'password'}
                     value={inputKey}
                     onChange={(e) => {
@@ -662,6 +669,7 @@ export const IntegrationsView: React.FC = () => {
                 </label>
                 <input 
                   id="int-connect-endpoint"
+                  name="int-connect-endpoint"
                   type="text"
                   value={customEndpoint}
                   onChange={(e) => setCustomEndpoint(e.target.value)}

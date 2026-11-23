@@ -603,14 +603,15 @@ export class IntegrationsVault {
   }
 
   public getRawKey(serviceId: string): string | undefined {
-    return this.rawKeys.get(serviceId);
+    const raw = this.rawKeys.get(serviceId);
+    return raw ? raw.trim().replace(/^['"]|['"]$/g, '') : undefined;
   }
 
   public getApiKeyByProvider(provider: IntegrationProviderId): string | undefined {
     for (const [serviceId, key] of this.rawKeys.entries()) {
       const svc = this.services.get(serviceId);
       if (svc && svc.provider === provider && key) {
-        return key;
+        return key.trim().replace(/^['"]|['"]$/g, '');
       }
     }
     // CORREÇÃO (reinício com .env): o backend persiste as chaves no .env e no
@@ -623,16 +624,16 @@ export class IntegrationsVault {
       // process.env quando disponível (runtime Node).
       const envKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) as string | undefined;
       if (envKey && envKey.trim().length >= 5) {
-        const clean = envKey.trim();
+        const clean = envKey.trim().replace(/^['"]|['"]$/g, '');
         this.rawKeys.set('svc-gemini', clean);
         return clean;
       }
       const direct = this.rawKeys.get('svc-gemini') || this.rawKeys.get('gemini');
-      if (direct && direct.trim().length >= 5) return direct.trim();
+      if (direct && direct.trim().length >= 5) return direct.trim().replace(/^['"]|['"]$/g, '');
       if (typeof localStorage !== 'undefined') {
         const stored = localStorage.getItem('GEMINI_API_KEY') || localStorage.getItem('liora_gemini_key');
         if (stored && stored.trim().length >= 5) {
-          const clean = stored.trim();
+          const clean = stored.trim().replace(/^['"]|['"]$/g, '');
           this.rawKeys.set('svc-gemini', clean);
           return clean;
         }
@@ -641,16 +642,16 @@ export class IntegrationsVault {
     if (provider === 'openrouter') {
       const envKey = (typeof process !== 'undefined' && process.env?.OPENROUTER_API_KEY) as string | undefined;
       if (envKey && envKey.trim().length >= 5) {
-        const clean = envKey.trim();
+        const clean = envKey.trim().replace(/^['"]|['"]$/g, '');
         this.rawKeys.set('svc-openrouter', clean);
         return clean;
       }
       const direct = this.rawKeys.get('svc-openrouter') || this.rawKeys.get('openrouter');
-      if (direct && direct.trim().length >= 5) return direct.trim();
+      if (direct && direct.trim().length >= 5) return direct.trim().replace(/^['"]|['"]$/g, '');
       if (typeof localStorage !== 'undefined') {
         const stored = localStorage.getItem('OPENROUTER_API_KEY') || localStorage.getItem('liora_openrouter_key');
         if (stored && stored.trim().length >= 5) {
-          const clean = stored.trim();
+          const clean = stored.trim().replace(/^['"]|['"]$/g, '');
           this.rawKeys.set('svc-openrouter', clean);
           return clean;
         }
@@ -1013,9 +1014,14 @@ export class IntegrationsVault {
   /**
    * Valida o timestamp do webhook contra a janela de tolerância de 5 minutos (Replay Attack Defense)
    */
+
+
   public verifyWebhookTimestamp(timestampInput?: string | number): { valid: boolean; ageMs?: number; reason?: string } {
     if (!timestampInput) {
-      return { valid: true }; // Aceita para retrocompatibilidade se não houver timestamp informado
+      // FAIL-CLOSED: sem timestamp não há como provar que o evento não é replay.
+      // Com timestamp ausente e assinatura válida, o corpo poderia ser reenviado
+      // indefinidamente — a janela de 5 minutos só funciona com o carimbo presente.
+      return { valid: false, reason: 'MISSING_TIMESTAMP' };
     }
 
     let parsedMs: number;
@@ -1058,7 +1064,11 @@ export class IntegrationsVault {
     const secret = customSecret || svc?.webhookSecret;
 
     if (!secret) {
-      return { valid: true }; // Sem segredo cadastrado, aceita
+      // FAIL-CLOSED: sem segredo cadastrado não há como provar autenticidade.
+      // Antes retornava `valid: true` e o endpoint público /api/webhooks/:provider
+      // aceitava qualquer POST (e publicava no barramento, disparando automações).
+      // Para aceitar webhooks, cadastre o `webhookSecret` do provedor na Integração.
+      return { valid: false, reason: 'SECRET_NOT_CONFIGURED' };
     }
 
     if (!signature || typeof signature !== 'string' || signature.trim().length === 0) {

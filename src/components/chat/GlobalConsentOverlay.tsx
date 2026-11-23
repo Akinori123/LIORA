@@ -23,8 +23,6 @@ export const GlobalConsentOverlay: React.FC = () => {
   const expireConsent = useLioraStore((s) => s.expireConsent);
   const setPendingConsent = useLioraStore((s) => s.setPendingConsent);
   const isVoiceActive = useLioraStore((s) => s.isVoiceActive);
-  const activeTab = useLioraStore((s) => s.activeTab);
-  const conversationSubTab = useLioraStore((s) => s.conversationSubTab);
 
   const pendingRef = useRef(pendingConsent);
   pendingRef.current = pendingConsent;
@@ -35,11 +33,10 @@ export const GlobalConsentOverlay: React.FC = () => {
   useEffect(() => {
     if (!pendingConsent || pendingConsent.status !== 'PENDING') return;
 
-    const announcement = pendingConsent.reason || `Operação ${pendingConsent.riskLevel} requer aprovação.`;
-    const spoken = `Atenção. ${announcement} Diga confirmar ou autorizar para prosseguir, ou cancelar para recusar.`;
+    const spoken = pendingConsent.spokenPrompt || `Mestre, para executar a ação de ${pendingConsent.friendlyTitle || pendingConsent.toolName}, preciso da sua autorização. Posso prosseguir? Diga autorizar ou cancelar.`;
 
     if (isVoiceActive) {
-      voiceLiveClient.extendSuppression(6000);
+      voiceLiveClient.extendSuppression(8000);
       speechService.speak(spoken, () => {}, () => {}, { isDeterministicOverride: true });
     }
 
@@ -53,11 +50,13 @@ export const GlobalConsentOverlay: React.FC = () => {
       if (decision === 'APPROVE') {
         resolvedByVoice = true;
         speechService.stopSpeaking();
+        // Executa com validação real — approveConsent fala o resultado verdadeiro (sucesso ou erro)
         void approveConsent();
       } else if (decision === 'REJECT') {
         resolvedByVoice = true;
         speechService.stopSpeaking();
         rejectConsent();
+        speechService.speak("Entendido, Mestre. Operação cancelada como você pediu.", undefined, undefined, { isDeterministicOverride: true });
       }
     });
 
@@ -68,7 +67,7 @@ export const GlobalConsentOverlay: React.FC = () => {
         speechService.stopSpeaking();
       }
     };
-  }, [pendingConsent?.auditId, pendingConsent?.status, pendingConsent?.reason, pendingConsent?.riskLevel, isVoiceActive, approveConsent, rejectConsent]);
+  }, [pendingConsent?.auditId, pendingConsent?.status, pendingConsent?.spokenPrompt, pendingConsent?.friendlyTitle, pendingConsent?.toolName, isVoiceActive, approveConsent, rejectConsent]);
 
   // Failsafe visual de auto-fechamento: garante que o banner nunca fique preso
   // quando o status mudar para APPROVED, REJECTED ou EXPIRED.
@@ -88,11 +87,12 @@ export const GlobalConsentOverlay: React.FC = () => {
 
   if (!pendingConsent) return null;
 
-  // Se o consentimento já está sendo mostrado dentro da TranscriptionView
-  // (aba conversation ativa), não duplica o overlay global.
-  if (activeTab === 'conversation' && conversationSubTab === 'transcription') {
-    return null;
-  }
+  // BUG FIX: removida a supressão por aba — o overlay de consentimento deve
+  // ser SEMPRE visível independente da aba ativa, pois o usuário pode estar em
+  // qualquer tela quando uma ferramenta R1+ é bloqueada. Suprimir o overlay
+  // causava o sintoma de "desaparecimento em 1-2s" quando a aba era 'conversation'.
+  // O ConsentCard inline na TranscriptionView permanece para conforto visual,
+  // mas o overlay global nunca é suprimido.
 
   return (
     <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[60] w-[94%] max-w-md animate-in slide-in-from-top duration-200 pointer-events-auto">

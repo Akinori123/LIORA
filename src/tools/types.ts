@@ -72,6 +72,15 @@ export interface ToolDefinition<TParams = any, TResult = any> {
    * o erro reportado. Cada tool nativa declara agora o seu limite real.
    */
   timeoutMs?: number;
+  /**
+   * Ações (parâmetro `action`) que MUTAM o sistema e, por isso, escalam o risco
+   * para o nível informado. Usado pelo backend para decidir consentimento a
+   * partir do próprio contrato da ferramenta — sem listas manuais divergentes.
+   * Ex.: pc_manage_apps.list = R0, mas .kill/.minimize/.focus = R2.
+   */
+  mutatingActions?: readonly string[];
+  /** Risco aplicado quando `action` está em `mutatingActions` (padrão R2). */
+  mutatingRiskLevel?: ToolRiskLevel;
   execute: (params: TParams, context?: ToolExecutionContext) => Promise<TResult>;
 }
 

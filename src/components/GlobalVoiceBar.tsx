@@ -27,6 +27,7 @@ import { launchGpsNavigation, launchPlacesSearch } from '../tools/navigation/nav
 import { executePcAction } from '../tools/pc/pcActionLauncher';
 import { commandDeduplicator, DEFAULT_COMMAND_DEDUPE_WINDOW_MS } from '../utils/commandDeduplicator';
 import { parseConsentVoiceDecision } from '../utils/consentVoiceParser';
+import { gestureService } from '../services/gestureService';
 
 export const GlobalVoiceBar: React.FC = () => {
   const { 
@@ -369,11 +370,13 @@ export const GlobalVoiceBar: React.FC = () => {
     }
 
     // 4. Monta resposta honesta estritamente baseada no retorno do backend
-    const appOrAction = pcMatch.type === 'app_launch' ? pcMatch.appName : pcMatch.action;
+    const appOrAction = pcMatch.type === 'app_launch' 
+      ? pcMatch.appName 
+      : (pcMatch.type === 'camera_toggle' ? 'Câmera / Visão Computacional' : pcMatch.action);
     const isSimulated = Boolean(result.simulated);
     const spokenMessage = result.success
       ? (isSimulated ? `Modo Web Preview simulado: ${pcMatch.spokenFeedback}` : pcMatch.spokenFeedback)
-      : `Mestre, não consegui executar o comando: ${result.error || result.message || 'verifique se o aplicativo está instalado'}.`;
+      : `Mestre, não consegui executar o comando: ${result.error || result.message || 'verifique as permissões de acesso'}.`;
 
     if (!result.success) {
       setErrorMessage(spokenMessage);
@@ -400,7 +403,9 @@ export const GlobalVoiceBar: React.FC = () => {
     const assistantReply = result.success
       ? (isSimulated
           ? `${spokenMessage} (Simulado no ambiente Web Preview sem desktop físico).`
-          : `${pcMatch.spokenFeedback} (Aplicativo '${appOrAction}' iniciado com confirmação real).`)
+          : (pcMatch.type === 'camera_toggle'
+              ? `${pcMatch.spokenFeedback}`
+              : `${pcMatch.spokenFeedback} (Aplicativo '${appOrAction}' iniciado com confirmação real).`))
       : spokenMessage;
 
     store.recordVoiceExchange(pcMatch.rawInput, assistantReply);
@@ -409,9 +414,13 @@ export const GlobalVoiceBar: React.FC = () => {
     // 7. Registro forense de auditoria
     store.addActivityLog({
       category: 'tool',
-      summary: pcMatch.type === 'app_launch' ? `💻 Executar App: ${pcMatch.appName}` : `💻 Ação de Sistema: ${pcMatch.action}`,
-      details: `${result.message} (Executável: ${pcMatch.type === 'app_launch' ? pcMatch.executable : pcMatch.action})`,
-      riskLevel: result.consentRiskLevel || 'R1',
+      summary: pcMatch.type === 'app_launch' 
+        ? `💻 Executar App: ${pcMatch.appName}` 
+        : (pcMatch.type === 'camera_toggle' 
+            ? `👁️ Visão Computacional (${pcMatch.enable ? 'Ativada' : 'Desativada'})` 
+            : `💻 Ação de Sistema: ${pcMatch.action}`),
+      details: `${result.message} (Executável: ${pcMatch.type === 'app_launch' ? pcMatch.executable : (pcMatch.type === 'camera_toggle' ? 'gestureService' : pcMatch.action)})`,
+      riskLevel: result.consentRiskLevel || 'R0',
       status: result.success ? 'success' : 'error',
       simulated: isSimulated
     });
@@ -496,6 +505,20 @@ export const GlobalVoiceBar: React.FC = () => {
       }
       setTranscript('');
       setErrorMessage(null);
+
+      if (decision === 'APPROVE') {
+        speechService.stopSpeaking();
+        // Dispara aprovação real — o feedback falado vem do resultado da execução em approveConsent
+        void store.approveConsent();
+        eventBus.publish('liora:voice_transcript', { text: clean, role: 'user' });
+        return true;
+      } else if (decision === 'REJECT') {
+        speechService.stopSpeaking();
+        store.rejectConsent();
+        speechService.speak("Entendido, Mestre. Ação cancelada imediatamente como você pediu.", undefined, undefined, { isDeterministicOverride: true });
+        eventBus.publish('liora:voice_transcript', { text: clean, role: 'user' });
+        return true;
+      }
     }
 
     eventBus.publish('liora:voice_transcript', { text: clean, role: 'user' });
@@ -513,7 +536,7 @@ export const GlobalVoiceBar: React.FC = () => {
     const matchedKey = navMatch
       ? `voice_dispatch:nav:${navMatch.tab}`
       : pcMatch
-        ? `voice_dispatch:pc:${pcMatch.type}:${pcMatch.type === 'app_launch' ? pcMatch.executable : pcMatch.action}`
+        ? `voice_dispatch:pc:${pcMatch.type}:${pcMatch.type === 'app_launch' ? pcMatch.executable : (pcMatch.type === 'camera_toggle' ? String(pcMatch.enable) : pcMatch.action)}`
         : timeMatch
           ? `voice_dispatch:time:${timeMatch.spokenFeedback}`
           : routeIntent
@@ -687,7 +710,36 @@ export const GlobalVoiceBar: React.FC = () => {
     try {
       speechService.unlockAudio();
       speechService.playInstantAcknowledgment();
-      await sendMessage(text, undefined, audioBlob);
+
+      // Visão Computacional: Se o comando envolver tela/câmera/ver objetos, captura snapshot automaticamente
+      let imagePayload: { data: string; mimeType: string } | undefined = undefined;
+      const isScreenRequest = /\b(tela|monitor|print|desktop|janela|screenshot)\b/i.test(text);
+      const isCameraRequest = /\b(c[aâ]mera|webcam|mostrando|este objeto|segurando|o que [ée] isso|que objeto [ée] esse|pe[çc]a|documento|foto)\b/i.test(text);
+      const isGenericVision = /\b(olh[ae]|veja|analis[ae]|leia)\b/i.test(text);
+
+      if (isScreenRequest || (isGenericVision && !isCameraRequest && !gestureService.getState().isActive)) {
+        try {
+          const { captureScreen } = await import('../tools/screenCapture');
+          const screenShot = await captureScreen();
+          if (screenShot && screenShot.base64Data) {
+            imagePayload = { data: screenShot.base64Data, mimeType: screenShot.mimeType };
+          }
+        } catch { /* fallback */ }
+      } else if (isCameraRequest || (isGenericVision && gestureService.getState().isActive)) {
+        let snap = gestureService.captureSnapshotBase64();
+        if (!snap && isCameraRequest) {
+          const started = await gestureService.start();
+          if (started) {
+            await new Promise(r => setTimeout(r, 600));
+            snap = gestureService.captureSnapshotBase64();
+          }
+        }
+        if (snap) {
+          imagePayload = { data: snap, mimeType: 'image/jpeg' };
+        }
+      }
+
+      await sendMessage(text, imagePayload, audioBlob);
     } catch (err) {
       console.error('[GlobalVoiceBar] Erro ao enviar comando de voz:', err);
       setOrbState('LISTENING');
@@ -797,6 +849,7 @@ export const GlobalVoiceBar: React.FC = () => {
       speechService.resetStreamingQueue(); // zera buffer parcial + isStreamDone
       voiceLiveClient.interrupt();       // corta áudio recebido do Gemini
       voiceLiveClient.stop();            // fecha WS duplex
+      voiceLiveClient.clearAttention();  // volta ao modo "não escuta tudo"
       setTranscript('');
       setErrorMessage(null);
       return;
@@ -816,9 +869,18 @@ export const GlobalVoiceBar: React.FC = () => {
     });
 
     // Tentar inicializar o Web Speech API para transcrição complementar
+    // Ativa a atenção: ligar o microfone é intenção explícita de falar.
+    voiceLiveClient.primeAttention();
     const started = speechService.startListening(
       (text, isFinal) => {
         setTranscript(text);
+        // Alimenta o gate de atenção do Live: só fala dirigida à LIORA
+        // (nome mencionado) libera o envio do áudio ao Gemini.
+        if (text) voiceLiveClient.feedUserTranscript(text);
+        // Turno da Web Speech encerrado (frase final): limpa a última transcrição
+        // para o gate de atenção não bloquear a PRÓXIMA fala por causa de um texto
+        // antigo (a atenção é reaberta por primeAttention/fim da resposta Live).
+        if (isFinal && text) voiceLiveClient.clearUserTranscript();
         // P1: publica também a transcrição do Web Speech API para o overlay de consentimento
         if (isFinal) {
           eventBus.publish('liora:voice_transcript', { text, role: 'user' });
@@ -853,17 +915,23 @@ export const GlobalVoiceBar: React.FC = () => {
             return;
           }
 
+          // Anti-Echo / Isolamento Acústico: se a LIORA estiver falando (Live ou TTS),
+          // qualquer fala captada pelo microfone é eco acústico vindo dos alto-falantes da máquina.
+          // Descarta completamente para evitar que a IA se auto-interrompa em loop infinito.
+          const isLioraSpeaking = voiceLiveClient.getStatus() === 'SPEAKING' || speechService.isSpeaking() || orbState === 'SPEAKING';
+          if (isLioraSpeaking) {
+            return;
+          }
+
           // Interceptação determinística unificada com deduplicação de 3000ms
           if (tryDispatchDeterministicVoiceCommand(clean, isFinal)) {
             return;
           }
 
           // Se for fala conversacional comum (não-determinística):
-          // No modo Live ativo, a fala já foi transmitida por áudio PCM ao Gemini Live duplex.
-          // Não despacha para o chat HTTP para evitar duplicar respostas e vozes.
+          // No modo Live ativo, a fala é transmitida por áudio PCM duplex ao Gemini Live.
           const liveStatusNow = voiceLiveClient.getStatus();
-          const liveIsActive = liveStatusNow === 'LISTENING' || liveStatusNow === 'SPEAKING' || liveStatusNow === 'CONNECTING';
-          if (liveIsActive) {
+          if (liveStatusNow === 'LISTENING') {
             useLioraStore.getState().addActivityLog({
               category: 'ai',
               summary: `🌐 Conversa Livre Gemini Live: "${clean.slice(0, 40)}"`,
@@ -872,6 +940,21 @@ export const GlobalVoiceBar: React.FC = () => {
               status: 'success',
               simulated: false
             });
+
+            // CRÍTICO: Quando o turno de fala é finalizado (isFinal) e a atenção está ativa
+            // (ou o usuário chamou pelo nome), envia a transcrição diretamente para a sessão
+            // Live via LIVE_MESSAGE (sendClientContent com turnComplete: true).
+            // Isso garante que a LIORA sempre responda com áudio duplex, mesmo se o ganho do
+            // microfone PCM em desktop/Tauri estiver baixo ou o VAD acústico da nuvem hesitar.
+            if (isFinal) {
+              const shouldSend = voiceLiveClient.isAttentionActive() || voiceLiveClient.isWakeWordHeard(clean);
+              if (shouldSend) {
+                voiceLiveClient.sendLiveMessage(clean);
+              }
+            }
+            return;
+          }
+          if (liveStatusNow === 'CONNECTING') {
             return;
           }
 
@@ -893,6 +976,10 @@ export const GlobalVoiceBar: React.FC = () => {
         }
       },
       (error) => {
+        // Ignora erros transitórios de rede do Web Speech API (pois o áudio real PCM e VAD continuam operando)
+        if (typeof error === 'string' && (error.includes('network') || error.includes('no-speech'))) {
+          return;
+        }
         console.warn('[GlobalVoiceBar] Erro ou aviso no microfone:', error);
         setErrorMessage(error);
       },
@@ -925,7 +1012,15 @@ export const GlobalVoiceBar: React.FC = () => {
     setOrbState('THINKING');
     speechService.unlockAudio();
     try {
-      await sendMessage(textToSend);
+      let imagePayload: { data: string; mimeType: string } | undefined = undefined;
+      const isVisionRequest = /\b(c[aâ]mera|olh[ae]|veja|mostrando|este objeto|segurando|o que [ée] isso|que objeto [ée] esse|leia|foto|imagem)\b/i.test(textToSend);
+      if (isVisionRequest) {
+        const snap = gestureService.captureSnapshotBase64();
+        if (snap) {
+          imagePayload = { data: snap, mimeType: 'image/jpeg' };
+        }
+      }
+      await sendMessage(textToSend, imagePayload);
     } catch (err) {
       console.error('[GlobalVoiceBar] Erro ao enviar transcrição manual:', err);
     }

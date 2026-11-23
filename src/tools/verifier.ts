@@ -10,13 +10,15 @@ let fsModule: any = null;
 let osModule: any = null;
 let pathModule: any = null;
 
-if (typeof window === 'undefined') {
-  try {
-    fsModule = await import('fs');
-    osModule = await import('os');
-    pathModule = await import('path');
-  } catch {
-    // Ambiente sem suporte direto a módulos Node
+async function ensureNodeModules(): Promise<void> {
+  if (typeof window === 'undefined' && !fsModule) {
+    try {
+      fsModule = await import('fs');
+      osModule = await import('os');
+      pathModule = await import('path');
+    } catch {
+      // Ambiente sem suporte direto a módulos Node
+    }
   }
 }
 
@@ -97,11 +99,12 @@ export class VerifierEngine {
     params: any,
     executionResult: any
   ): Promise<VerificationResult> {
+    await ensureNodeModules();
     const timestamp = new Date().toISOString();
 
     // 1. Verificação para workspace_write_file
     if (toolName === 'workspace_write_file') {
-      const filePath = params?.filePath?.trim().replace(/^[./\\]+/, '');
+      const filePath = String(params?.filePath ?? params?.path ?? '').trim().replace(/^[./\\]+/, '');
       const expectedContent = params?.content;
       const expectedBytes = expectedContent ? (typeof Buffer !== 'undefined' ? Buffer.byteLength(expectedContent, 'utf-8') : expectedContent.length) : 0;
 
@@ -224,14 +227,19 @@ export class VerifierEngine {
       const stdout = executionResult?.stdout || '';
       const stderr = executionResult?.stderr || '';
 
-      const passed = exitCode === 0 && !stderr;
+      // CORREÇÃO (falso negativo): muitos comandos de sucesso escrevem em stderr
+      // (git progress, npm warnings, ls em diretório inexistente parcial, versões
+      // do node/python via nvm, etc.). Exigir `!stderr` marcava execuções válidas
+      // como VERIFICATION_FAILED e a ferramenta reportava erro ao usuário/LLM.
+      // A verdade é o código de saída; stderr só é evidência.
+      const passed = exitCode === 0;
       return {
         passed,
         evidence: {
           verified: passed,
           checkName: 'VERIFY_COMMAND_EXECUTION_EXIT_CODE',
           checkDetails: passed
-            ? `Comando '${params?.command}' concluído com código de saída 0 (${stdout.length} caracteres em stdout).`
+            ? `Comando '${params?.command}' concluído com código de saída 0 (${stdout.length} caracteres em stdout${stderr ? `, ${stderr.length} em stderr` : ''}).`
             : `Comando '${params?.command}' falhou com código de saída ${exitCode}. Erro: ${stderr}`,
           timestamp,
           metrics: {

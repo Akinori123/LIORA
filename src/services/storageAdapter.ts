@@ -172,8 +172,18 @@ class StorageAdapter {
     if (isTauriEnvironment()) {
       try {
         await invokeTauri<boolean>('clear_sqlite_table', { table });
-      } catch {
-        // fallback: tenta remover individualmente se comando nativo não existir
+      } catch (err) {
+        // Fallback defensivo: tenta remover individualmente se comando nativo falhar
+        try {
+          const records = await invokeTauri<Array<{ id: string; payloadJson: string }>>('load_sqlite_records', { table });
+          if (Array.isArray(records)) {
+            for (const r of records) {
+              if (r?.id) {
+                await invokeTauri<boolean>('delete_sqlite_record', { table, id: r.id }).catch(() => {});
+              }
+            }
+          }
+        } catch {}
       }
     }
 
@@ -253,3 +263,37 @@ class StorageAdapter {
 }
 
 export const storageAdapter = new StorageAdapter();
+
+/**
+ * Lê uma lista JSON persistida no localStorage de forma tolerante a falhas.
+ * Retorna `[]` quando a chave não existe, o JSON é inválido ou não é um array —
+ * os callers nunca precisam repetir try/catch + Array.isArray.
+ */
+export function readJsonList<T = unknown>(key: string): T[] {
+  if (typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch (err) {
+    console.warn(`[StorageAdapter] Falha ao ler lista JSON '${key}':`, err);
+    return [];
+  }
+}
+
+/**
+ * Grava uma lista JSON no localStorage aplicando um limite de itens (os mais
+ * recentes ficam no início). Silencioso quando não há localStorage.
+ */
+export function writeJsonList<T = unknown>(key: string, list: T[], limit?: number): boolean {
+  if (typeof localStorage === 'undefined') return false;
+  try {
+    const payload = typeof limit === 'number' ? list.slice(0, limit) : list;
+    localStorage.setItem(key, JSON.stringify(payload));
+    return true;
+  } catch (err) {
+    console.warn(`[StorageAdapter] Falha ao gravar lista JSON '${key}':`, err);
+    return false;
+  }
+}

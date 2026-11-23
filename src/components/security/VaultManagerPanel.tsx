@@ -284,6 +284,8 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
           <span>Nova credencial</span>
         </div>
         <input
+          id="vault-new-key-name"
+          name="vault-new-key-name"
           type="text"
           value={newKeyName}
           onChange={(e) => setNewKeyName(e.target.value)}
@@ -293,6 +295,8 @@ export const VaultManagerPanel: React.FC<{ onClose?: () => void }> = ({ onClose 
         />
         <div className="relative">
           <input
+            id="vault-new-key-value"
+            name="vault-new-key-value"
             type={showValue ? 'text' : 'password'}
             value={newKeyValue}
             onChange={(e) => setNewKeyValue(e.target.value)}

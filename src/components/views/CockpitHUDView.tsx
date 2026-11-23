@@ -655,6 +655,8 @@ export const CockpitHUDView: React.FC = () => {
               {/* Input de Destino */}
               <div className="flex items-center gap-1.5">
                 <input
+                  id="cockpit-nav-destination"
+                  name="cockpit-nav-destination"
                   ref={destinationInputRef}
                   type="text"
                   value={destinationInput}
@@ -674,6 +676,8 @@ export const CockpitHUDView: React.FC = () => {
                   return isEditing ? (
                     <div key={memoryKey} className="flex items-center gap-1 flex-1 min-w-[180px]">
                       <input
+                        id={`cockpit-nav-alias-${memoryKey}`}
+                        name={`cockpit-nav-alias-${memoryKey}`}
                         autoFocus
                         type="text"
                         value={aliasDraft}
@@ -746,6 +750,8 @@ export const CockpitHUDView: React.FC = () => {
                 {isAddingNewPlace ? (
                   <div className="flex items-center gap-1 flex-1 min-w-[240px] bg-[#161616] p-1 border border-[#FF2B2B] rounded">
                     <input
+                      id="cockpit-new-place-alias"
+                      name="cockpit-new-place-alias"
                       type="text"
                       placeholder="Nome (ex: Amigo)..."
                       aria-label="Nome do novo local"
@@ -754,6 +760,8 @@ export const CockpitHUDView: React.FC = () => {
                       className="w-24 bg-[#0F0F0F] border border-[#333] rounded text-[10px] font-mono text-white px-1.5 py-0.5 focus:outline-none"
                     />
                     <input
+                      id="cockpit-new-place-address"
+                      name="cockpit-new-place-address"
                       type="text"
                       placeholder="Endereço..."
                       aria-label="Endereço do novo local"

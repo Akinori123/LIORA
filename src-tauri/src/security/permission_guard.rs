@@ -155,7 +155,7 @@ pub fn evaluate_native_tool(
     };
 
     // 2. Verificação de path traversal e diretórios proibidos nos parâmetros
-    if let Some(path_val) = parameters.get("path").and_then(|p| p.as_str()) {
+    if let Some(path_val) = parameters.get("path").or_else(|| parameters.get("filePath")).and_then(|p| p.as_str()) {
         let lower_path = path_val.to_lowercase();
         for protected in PROTECTED_SYSTEM_PATHS {
             if lower_path.contains(protected) {

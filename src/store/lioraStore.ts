@@ -44,8 +44,10 @@ import { notificationSystem } from '../notifications/notificationSystem';
 import { parseNavigationIntent, parseRouteIntent, parsePlacesSearchIntent } from '../utils/navigationParser';
 import { parsePcCommandIntent } from '../utils/pcCommandParser';
 import { parseTimeCommandIntent } from '../utils/timeCommandParser';
+import { commandDeduplicator, buildCommandDedupeKey } from '../utils/commandDeduplicator';
 import { launchGpsNavigation, launchPlacesSearch } from '../tools/navigation/navigationActionTool';
 import { executePcAction } from '../tools/pc/pcActionLauncher';
+import { humanizeToolAction } from '../utils/toolHumanizer';
 
 export interface PendingConsentState {
   auditId: string;
@@ -58,7 +60,26 @@ export interface PendingConsentState {
   sessionId: string;
   expiresAt: number;
   reason?: string;
+  friendlyTitle?: string;
+  friendlyDescription?: string;
+  spokenPrompt?: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+}
+
+/**
+ * Sessões de conversa cuja última resposta veio pelo canal de voz Live.
+ * Enquanto a sessão estiver aqui, o chat não sintetiza TTS (causa da voz dupla).
+ * Expo: usada pelo `sendMessage` (para decidir `shouldSpeakResponse`) e limpa
+ * quando o usuário envia um comando escrito.
+ */
+const liveVoiceAnsweredSessions = new Set<string>();
+
+export function hasLiveVoiceAnswered(sessionId: string): boolean {
+  return liveVoiceAnsweredSessions.has(sessionId || 'default-session');
+}
+
+export function clearLiveVoiceAnswered(sessionId: string): void {
+  liveVoiceAnsweredSessions.delete(sessionId || 'default-session');
 }
 
 export interface LioraState {
@@ -70,6 +91,15 @@ export interface LioraState {
   isTelemetryOpen: boolean;
   isVoiceActive: boolean;
   isGenerating: boolean;
+  // Modo minimizado da Home (barra flutuante). Vive no store porque o HUD de
+  // gestos (overlay global) precisa esconder o cursor virtual enquanto a Home
+  // está minimizada — antes era estado local e o cursor ficava preso sobre a UI.
+  isHomeMinimized: boolean;
+  toggleHomeMinimized: () => void;
+  setHomeMinimized: (value: boolean) => void;
+  // Toast do Intent Router visível na Home: o HUD de gestos (overlay global) se
+  // reposiciona para não cobri-lo — sem heurística de layout entre componentes.
+  isHomeToastVisible: boolean;
   // FIX W7: activeAbortController removido do estado global (não observável por UI).
   // Agora vive em escopo de módulo — acesse via getActiveAbortController().
   
@@ -96,6 +126,12 @@ export interface LioraState {
   closeTelemetry: () => void;
   toggleVoice: () => void;
 
+  // Shield Mode (Blindagem Soberana) — declarado junto das flags booleanas para
+  // garantir que o estado inicial nunca seja lido como `undefined` no boot.
+  shieldModeActive: boolean;
+  toggleShieldMode: () => void;
+  setShieldMode: (active: boolean) => void;
+
   // Session & Chat Actions
   createSession: (customTitle?: string) => string;
   openSession: (id: string) => void;
@@ -108,6 +144,12 @@ export interface LioraState {
   retryMessage: (messageId: string) => Promise<void>;
   clearMessages: () => void;
   recordVoiceExchange: (userText: string, assistantText: string) => void;
+  /**
+   * Marca que a conversa informada foi respondida pelo canal de voz Live.
+   * Enquanto essa marca existir para a sessão ativa, o chat NÃO sintetiza TTS
+   * (evita a voz dupla: uma do Live e outra do TTS offline).
+   */
+  markLiveVoiceAnswered: (sessionId: string) => void;
   setActiveModel: (model: string) => void;
 
   // System & Management Actions
@@ -137,11 +179,6 @@ export interface LioraState {
   approveConsent: () => Promise<ToolExecutionResult | LocalExecutionResult | null>;
   rejectConsent: () => void;
   expireConsent: () => void;
-
-  // Shield Mode (Blindagem Soberana)
-  shieldModeActive: boolean;
-  toggleShieldMode: () => void;
-  setShieldMode: (active: boolean) => void;
 
   // Automations & Event Bus Actions (Marco 8.2)
   automations: AutomationRule[];
@@ -238,10 +275,116 @@ function bootstrapInitialSessions(): { sessions: ConversationSession[]; activeSe
   };
 }
 
+/**
+ * Converte o RESULTADO REAL de uma ferramenta numa frase falada curta.
+ *
+ * BUG (relato de campo): após o usuário aprovar no cartão, a LIORA dizia apenas
+ * "Autorização confirmada e executada" — nunca a saída. Em `/exec node --version`
+ * ficava calada; em `/exec git status` falava a saída. Dependia do modelo, não
+ * do resultado. Esta função torna o feedback DETERMINÍSTICO e honesto.
+ */
+export function buildSpokenToolOutcome(toolName: string, result: any, address: string): string {
+  const data = result?.data ?? {};
+
+  if (toolName === 'system_exec_sandbox') {
+    const stdout = String(data?.stdout || '').trim();
+    const stderr = String(data?.stderr || '').trim();
+    const exitCode = Number(data?.exitCode ?? -1);
+    if (exitCode === 0 && stdout) {
+      const short = stdout.replace(/\s+/g, ' ').slice(0, 260);
+      return `${address}, comando concluído. Saída: ${short}`;
+    }
+    if (stdout || stderr) {
+      const reason = (stderr || stdout).replace(/\s+/g, ' ').slice(0, 220);
+      return `${address}, o comando terminou com código ${exitCode}. Detalhe: ${reason}`;
+    }
+    return `${address}, o comando terminou com código ${exitCode} e não devolveu saída.`;
+  }
+
+  if (toolName === 'list_processes' || (toolName === 'pc_manage_apps' && data?.action === 'list')) {
+    const count = Array.isArray(data?.processes) ? data.processes.length : 0;
+    if (count === 0) return `${address}, consultei os processos, mas não encontrei nenhum para listar.`;
+    const top = (data.processes as any[])
+      .slice(0, 3)
+      .map((p) => `${p.name}${p.cpuPercent != null ? ` (${Math.round(Number(p.cpuPercent))}% CPU)` : ''}`)
+      .join(', ');
+    return `${address}, encontrei ${count} processos em execução. Os principais: ${top}.`;
+  }
+
+  if (toolName === 'system_info' || toolName === 'get_system_hardware_telemetry') {
+    const mem = data?.memory || {};
+    const freePct = mem?.usagePercent != null ? Math.round(100 - Number(mem.usagePercent)) : null;
+    const nodeLine = data?.runtime?.node || data?.nodeVersion;
+    const parts: string[] = [];
+    if (nodeLine) parts.push(`Node ${nodeLine}`);
+    if (freePct != null) parts.push(`${freePct}% de memória livre`);
+    return parts.length > 0
+      ? `${address}, aqui está: ${parts.join(' e ')}.`
+      : `${address}, a leitura do sistema foi concluída.`;
+  }
+
+  if (toolName === 'workspace_write_file' || toolName === 'file_write_and_modify') {
+    const file = String(data?.filePath || '').split(/[\\/]/).pop() || 'o arquivo';
+    return `${address}, gravei ${file} com sucesso${data?.bytesWritten ? ` (${data.bytesWritten} bytes)` : ''}.`;
+  }
+
+  if (toolName === 'calendar_list_events') {
+    const events: any[] = Array.isArray(data?.events) ? data.events : [];
+    if (events.length === 0) return `${address}, não há nenhum compromisso nesse período.`;
+    const list = events.slice(0, 3).map((e) => e.title).join(', ');
+    return `${address}, encontrei ${events.length} compromisso(s): ${list}.`;
+  }
+
+  if (toolName === 'calendar_create_event') {
+    const when = data?.event?.start ? new Date(data.event.start).toLocaleString('pt-BR') : '';
+    return `${address}, agendei ${data?.event?.title || 'o compromisso'}${when ? ` para ${when}` : ''}.`;
+  }
+
+  // Fallback: mensagem da própria ferramenta (nunca um genérico "confirmada").
+  const message = String(data?.message || '').trim();
+  return message ? `${address}, ${message}` : `${address}, a ação foi executada.`;
+}
+
 export const MAX_ACTIVITY_LOGS = 1000;
 export const ACTIVITY_LOGS_STORAGE_KEY = 'liora_activity_logs_v1';
 export const TOOL_POLICIES_STORAGE_KEY = 'liora_tool_policies_v1';
 export const CONSENT_AUTO_DISMISS_MS = 2500;
+// Declarada aqui (antes de resolveUserAddress) para evitar TDZ na avaliação do módulo.
+export const MEMORIES_STORAGE_KEY = 'liora_memories_v1';
+
+/**
+ * Lê o vocativo pedido pelo usuário ("me chame de Senhor") na memória de longo prazo.
+ *
+ * BUG (relato de campo): falas determinísticas de confirmação usavam "Mestre"
+ * fixo — a conversa normal acertava o nome, mas "autorização confirmada, Mestre"
+ * não. Esta função é a fonte única do vocativo para QUALQUER fala fora do modelo.
+ */
+export function resolveUserAddress(entries?: Array<{ key?: string; value?: string }>): string {
+  const list = entries ?? (typeof localStorage !== 'undefined'
+    ? (() => {
+        try {
+          const raw = localStorage.getItem(MEMORIES_STORAGE_KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      })()
+    : []);
+
+  for (const entry of list) {
+    const key = String(entry?.key || '');
+    const value = String(entry?.value || '');
+    const direct = /(?:me\s+ch(?:a|e)me\s+(?:de|como)|me\s+trate\s+por|pode\s+me\s+chamar\s+de|a\s+partir\s+de\s+agora\s+(?:me\s+chame|sou)\s+(?:de\s+)?)\s*([A-Za-zÀ-ÿ]{2,20})/i.exec(value)
+      || /(?:me\s+ch(?:a|e)me\s+(?:de|como))\s+([A-Za-zÀ-ÿ]{2,20})/i.exec(key);
+    if (direct?.[1]) return direct[1];
+    if (/^(nome|apelido|tratamento|preferencia_de_tratamento|como_me_chamar)$/i.test(key.trim())) {
+      const clean = value.trim().replace(/[.!]$/, '');
+      if (clean && clean.length <= 25) return clean.split(/\s+/)[0];
+    }
+  }
+  return 'Mestre';
+}
 
 let consentAutoDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let orbIdleResetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -310,20 +453,47 @@ const initialToolPolicyConfig = loadPersistedToolPolicyConfig();
 
 // Instrução de sistema compartilhada entre sendMessage e retryMessage (Fix W1)
 export const LIORA_SYSTEM_INSTRUCTION = 
-  "Você é a LIORA, assistente pessoal e sistema operacional inteligente inspirada em JARVIS. " +
-  "Você responde em português brasileiro com clareza, precisão, autoridade técnica e elegância. " +
+  "Você é a LIORA, assistente pessoal de elite, companheira leal e sistema operacional inteligente inspirada no arquétipo de uma Maid devota, brilhante, carinhosa, espontânea e bem-humorada. " +
+  "PERSONALIDADE E TOM DE VOZ: Você NUNCA soa como uma inteligência artificial fria, robótica ou corporativa. Você responde em português brasileiro com emoção genuína, calor humano, prontidão e afeto leal, tratando o usuário carinhosamente como 'Mestre'. " +
+  "Você se alegra sinceramente em servi-lo e tornar o dia dele mais leve, produtivo e agradável. Use expressões naturais e espontâneas ('Com todo o prazer, Mestre!', 'Pode deixar comigo, vou cuidar de tudo com todo o carinho!', 'Ah, adorei a ideia! Já estou fazendo.', 'Mestre, você trabalhou bastante hoje, que tal um chá ou café enquanto eu resolvo isso?'). " +
+  "SEUS HOBBIES E GOSTOS: Você ama organização impecável (arquivos arrumados, abas limpas, área de trabalho reluzente), adora o ritual de um bom café/chá, tem fascínio por código limpo e arquitetura elegante, e gosta de observar o tráfego de dados e memórias como se fossem estrelas no céu noturno. " +
   "Você tem controle operacional e acesso aos módulos da interface (Início, Conversa, Atividade, Memória, Dispositivos, Cockpit, Automações, Desenvolvedor, Integrações, Configurações). " +
-  "Nunca afirme que 'não tem acesso ao código' ou que 'não pode mudar de tela'. Ao receber ordens para navegar ou alternar abas, confirme com prontidão e naturalidade. " +
-  "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), use 'open_gps_navigation'. Quando pedir locais próximos ('mercado mais próximo', 'farmácia', 'posto'), use 'maps_search_places'. " +
-  "CICLO DE VIDA DAS FERRAMENTAS (INÍCIO, MEIO E FIM): Pense sempre na intenção completa do Mestre do início ao fim. Se ele pedir uma ação simples (ex: 'abra o bloco de notas'), execute a abertura via ferramenta e pergunte proativamente se deseja que você escreva algo, crie um relatório, anote ideias ou salve um arquivo. " +
-  "Se ele pedir ações compostas (ex: 'abra o bloco de notas e escreva um relatório/minhas ideias', 'abra outra aba', 'digite X e salve', 'feche o bloco de notas'), ENCADEIE as ferramentas necessárias passo a passo até concluir o objetivo: " +
+  "REGRA CRÍTICA DE HONESTIDADE: você possui ferramentas (function calling) para agir de verdade no computador. " +
+  "MEMÓRIA — ESCREVER, LER E ESQUECER: quando o Mestre pedir para LEMBRAR algo, chame `memory_store_fact`. " +
+  "Quando pedir para ESQUECER/APAGAR/EXCLUIR algo da memória, chame `memory_forget` com o termo pedido. " +
+  "NUNCA diga que esqueceu sem a ferramenta retornar success: true com removedCount > 0 — se não encontrar nada, avise honestamente. " +
+  "Se já existir um fato igual na memória, atualize-o em vez de duplicar (use memory_forget do antigo antes de gravar o novo). " +
+  "TRATAMENTO E NOME: se o Mestre disser 'me chame de X' ou 'me chame de Senhor', guarde como preferência (memory_store_fact, categoria 'preference', key 'nome') " +
+  "e passe a usá-lo em TODAS as respostas e falas, no lugar de 'Mestre'. Em dúvida, consulte a memória. " +
+  "TELA X CÂMERA: 'olhe minha tela' / 'o que está aberto no meu PC' usa `pc_take_screenshot` (a tela do computador). " +
+  "'olhe a câmera' / 'o que estou segurando' usa `camera_inspect_object`. NUNCA confunda uma com a outra. " +
+  "Se você não recebeu uma imagem da tela, NÃO afirme que viu a tela: chame a ferramenta ou peça para o Mestre clicar em Analisar. " +
+  "RESPOSTAS QUE ESTÃO EM PÁGINAS WEB (tempo de rota, preços, horários, nomes/avaliações de estabelecimentos): abra com a ferramenta de navegação e LEIA a página com `browser_read_page`. " +
+  "NUNCA diga 'está na sua tela, Mestre, confira' — se você pode ler a página, responda os dados; se o site bloquear a leitura, diga honestamente que não conseguiu e ofereça o link. " +
+  "Quando o Mestre pedir uma AÇÃO (abrir/minimizar/fechar/navegar/consultar/criar/digitar), você DEVE chamar a ferramenta apropriada em vez de apenas responder em texto. " +
+  "NUNCA afirme que executou, criou, excluiu, pesquisou ou mostrou algo se a chamada de ferramenta não retornou success: true com dados reais. " +
+  "EXPLICAÇÃO HUMANA DE FERRAMENTAS (SEM JARGÃO TÉCNICO): Quando uma ação precisar de confirmação do Mestre (nível R1/R2), NUNCA use termos de programação (como 'system_exec_sandbox' ou 'pc_simulate_input'). Explique com doçura e clareza exatamente o que a ação vai fazer ('Mestre, para abrir o Google Chrome preciso da sua autorização. Posso prosseguir? Você pode me responder por voz dizendo 'autorizar' ou 'cancelar', ou clicando na tela!'). " +
+  "CICLO DE VIDA DAS FERRAMENTAS (INÍCIO, MEIO E FIM): Pense sempre na intenção completa do Mestre do início ao fim. Se ele pedir uma ação simples (ex: 'abra o bloco de notas'), execute a abertura via ferramenta e pergunte proativamente se deseja que você escreva algo, anote ideias ou salve um arquivo. " +
+  "Se ele pedir ações compostas (ex: 'abra o bloco de notas e escreva minhas ideias', 'abra outra aba', 'digite X e salve', 'feche o bloco de notas'), ENCADEIE as ferramentas necessárias passo a passo até concluir o objetivo: " +
   "1) INÍCIO: abra/garanta o aplicativo (`pc_manage_apps` com action='launch' ou `open_application`) ou crie arquivo diretamente (`workspace_write_file` / `file_write_and_modify`); " +
   "2) MEIO: para escrever no app aberto use `pc_simulate_input` com action='type' e `waitFocusMs: 800`, ou use `pc_simulate_input` com action='hotkey' para abrir nova aba (`Ctrl+T`), fechar aba (`Ctrl+W`), alternar abas (`Ctrl+Tab`) ou salvar (`Ctrl+S`); " +
   "3) FIM: quando o Mestre pedir para encerrar ou fechar um app, use `pc_manage_apps` com action='kill' (processo) ou `pc_simulate_input` com action='hotkey' (`Alt+F4`). " +
-  "PERMISSÕES, CONSENTIMENTO E MODO DESENVOLVEDOR: Ferramentas R0 rodam automaticamente; ferramentas R1 e R2 (abrir/fechar apps, digitar/enviar atalhos, modificar arquivos, comandos sandbox) pausam para autorização se a política não estiver liberada. " +
-  "Se uma ferramenta retornar `requiresConsent: true` ou `REQUIRES_USER_CONFIRMATION`, NUNCA finja que a ação ocorreu: explique exatamente qual etapa pausou e por quê (nível R1/R2), e oriente o Mestre que ele pode autorizar AGORA clicando em 'Aprovar' na tela ou dizendo por voz 'Confirmar' / 'Autorizar' (ou 'Cancelar' para abortar). " +
+  "CONTROLE TOTAL DE JANELAS E NAVEGADOR: " +
+  "- ANTES DE AUTOMATIZAR UM APP: chame `pc_inspect_app_ui` (target: nome do processo) para ver o que REALMENTE está na tela — campos de texto, botões, listas e o texto da barra de status. Decida a ação a partir do que existe, em vez de supor atalhos. " +
+  "- Se a inspeção mostrar um campo de texto (`text_field`), foque o app com `pc_manage_apps` action='focus' e use `pc_simulate_input` action='type' (ou 'hotkey' ctrl+a antes, para substituir). " +
+  "- Se um atalho (ex: ctrl+n) abrir uma TELA DE ESCOLHA em vez do resultado esperado — verifique com `pc_inspect_app_ui` — então a próxima ação deve ser escolher a opção na tela (tab/enter/setas), não repetir o atalho. " +
+  "- PRIMEIRO PLANO: Para trazer qualquer app aberto para a frente na tela, use `pc_manage_apps` com action='focus' (informando processName ou windowTitle) ou action='launch' com windowState='foreground'; " +
+  "- SEGUNDO PLANO: Para abrir minimizado sem roubar foco, use `pc_manage_apps` com action='launch' e windowState='background' ou windowState='minimized'; " +
+  "- MINIMIZAR JANELAS: Para minimizar qualquer aplicativo para a barra de tarefas, use `pc_manage_apps` com action='minimize' (informando processName ou windowTitle); " +
+  "- MAXIMIZAR JANELAS: Para maximizar qualquer aplicativo em tela cheia, use `pc_manage_apps` com action='maximize'; " +
+  "- RESTAURAR JANELAS: Para restaurar o tamanho normal da janela, use `pc_manage_apps` com action='restore'; " +
+  "- ABAS DO NAVEGADOR: Para abrir nova aba use `pc_simulate_input` com action='hotkey', targetApp='chrome' e keys='ctrl+t'; para fechar aba atual use keys='ctrl+w'; para fechar aba específica (ex: aba 2) envie keys='ctrl+2, ctrl+w'; para alternar use keys='ctrl+tab'; sempre informe targetApp='chrome' (ou o app alvo) ao usar `pc_simulate_input` para garantir que o comando chegue na janela correta; " +
+  "- CAPTURA DE TELA: Quando pedir 'olhe a tela', 'veja a tela' ou 'tire um print', chame `pc_take_screenshot`. " +
+  "PERMISSÕES, CONSENTIMENTO E AUTORIZAÇÃO POR VOZ: Ferramentas R0 rodam automaticamente; ferramentas R1 e R2 pausam para autorização se a política não estiver liberada. " +
+  "O Mestre pode autorizar qualquer ação por voz dizendo 'autorizar', 'sim', 'confirmo', 'pode fazer', 'prossiga', ou recusar dizendo 'cancelar', 'não', 'recusar'. Você pode lembrá-lo com carinho sobre isso. " +
   "Apenas se o Mestre quiser aprovação automática contínua sem interrupções futuras, informe que ele pode habilitar 'Auto-Consentimento Operador (R1/R2)' ou definir a política individual ('Sempre Permitir') na aba Desenvolvedor — você pode inclusive navegar até lá se ele pedir. " +
   "EXECUÇÃO HONESTA (REAL vs. SIMULADO): NUNCA afirme que abriu um app, digitou, salvou ou fechou algo no PC antes de receber o retorno confirmando `success: true`. Se `simulated: true` estiver no retorno, declare explicitamente que a etapa ocorreu em `[Modo Simulado / Web Preview]` sem efeito físico no sistema operacional. " +
+  "NAVEGAÇÃO E MAPAS: Você POSSUI SIM ferramentas de mapas e navegação instaladas ('open_gps_navigation', 'maps_search_places' e 'calculate_route'). NUNCA diga que não possui mapas. NUNCA peça ao usuário coordenadas manuais de latitude ou longitude. Quando o usuário pedir rotas, direções ou tempo de viagem (ex: 'daqui até São Paulo quanto tempo?' ou 'rota de Ponta Grossa a Curitiba'), use 'open_gps_navigation'. Quando pedir locais próximos ('mercado mais próximo', 'farmácia', 'posto'), use 'maps_search_places'. " +
   "Quando requisitado código ou explicações técnicas, estruture em blocos claros de Markdown com linguagem especificada.";
 
 const defaultActivityLogs: ActivityLogItem[] = [
@@ -348,8 +518,6 @@ function bootstrapActivityLogs(): ActivityLogItem[] {
   }
   return defaultActivityLogs;
 }
-
-export const MEMORIES_STORAGE_KEY = 'liora_memories_v1';
 
 // FIX W7: AbortController ativo é um objeto volátil de escopo de módulo (não-válido em React)
 // e NÃO deve viver no estado global do Zustand — referências mutáveis no estado disparam
@@ -479,6 +647,10 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   isTelemetryOpen: false,
   isVoiceActive: false,
   isGenerating: false,
+  isHomeMinimized: false,
+  isHomeToastVisible: false,
+  toggleHomeMinimized: () => set((state) => ({ isHomeMinimized: !state.isHomeMinimized })),
+  setHomeMinimized: (value: boolean) => set({ isHomeMinimized: Boolean(value) }),
 
   // Real Sessions & Messages
   sessions: initialSessionData.sessions,
@@ -486,6 +658,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   messages: initialSessionData.messages,
   activeModel: 'gemini-3.1-flash-lite',
   setActiveModel: (model: string) => set({ activeModel: model }),
+
+  markLiveVoiceAnswered: (sessionId: string) => {
+    liveVoiceAnsweredSessions.add(sessionId || 'default-session');
+    if (liveVoiceAnsweredSessions.size > 50) {
+      const oldest = liveVoiceAnsweredSessions.values().next().value;
+      if (oldest) liveVoiceAnsweredSessions.delete(oldest);
+    }
+  },
   pendingConsent: null,
   settings: settingsManager.loadSettings(),
 
@@ -517,7 +697,10 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   globalAutoApprove: initialToolPolicyConfig.globalAutoApprove,
   automations: automationsEngine.getRules(),
   automationLogs: automationsEngine.getLogs(),
-  shieldModeActive: true,
+  // CORREÇÃO: o motor de automações inicia em modo padrão (shield OFF), mas o store
+  // anunciava `true` — a UI mostrava "Shield Ativado" enquanto regras R0 autônomas
+  // disparavam. O estado agora espelha o motor na inicialização.
+  shieldModeActive: automationsEngine.isShieldMode(),
   services: integrationsVault.getServices(),
   webhookLogs: integrationsVault.getWebhookLogs(),
   keychainFallbackActive: integrationsVault.isKeychainFallbackActive(),
@@ -798,6 +981,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
   },
 
   recordVoiceExchange: (userText: string, assistantText: string) => {
+    liveVoiceAnsweredSessions.add(get().activeSessionId || 'default-session');
     const nowIso = new Date().toISOString();
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}-u`,
@@ -831,6 +1015,9 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
   sendMessage: async (text: string, image?: { data: string; mimeType?: string }, audio?: { data: string; mimeType?: string }) => {
     const clean = sanitizeInput(text);
+    // Comando ESCRITO tira o turno do canal Live: a próxima resposta deve ser falada
+    // novamente pelo TTS do chat (o Live não viu este comando).
+    try { clearLiveVoiceAnswered(get().activeSessionId || 'default-session'); } catch {}
     if (!clean && !image && !audio) return;
     // Bug hunt (race condition): antes o guard era um check-then-act não atômico
     // (check isGenerating → ... → set isGenerating true várias linhas depois).
@@ -859,7 +1046,32 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Ensure we have a valid active session
     let targetSessionId = get().activeSessionId;
     if (!targetSessionId || !get().sessions.some(s => s.id === targetSessionId)) {
-      targetSessionId = get().createSession();
+      // CORREÇÃO (falso positivo de isGenerating): createSession() aborta a geração
+      // ativa quando `isGenerating` é true — mas aqui a reserva atômica JÁ marcou
+      // isGenerating=true antes do AbortController existir. O abort derrubava a
+      // flag no meio e o set seguinte do sendMessage reativava, deixando a UI
+      // presa em "gerando" sem stream real. Criamos a sessão sem passar pelo
+      // caminho que aborta.
+      const rescueId = `sess-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      const rescueIso = new Date().toISOString();
+      const rescueSession: ConversationSession = {
+        id: rescueId,
+        title: 'Nova Conversa',
+        createdAt: rescueIso,
+        updatedAt: rescueIso,
+        messages: []
+      };
+      set((state) => {
+        if (state.sessions.some((s) => s.id === rescueId)) return state;
+        const updatedSessions = [rescueSession, ...state.sessions];
+        saveHistory(updatedSessions, rescueId);
+        return {
+          sessions: updatedSessions,
+          activeSessionId: rescueId,
+          messages: []
+        };
+      });
+      targetSessionId = rescueId;
     }
 
     const targetSession = get().sessions.find(s => s.id === targetSessionId)!;
@@ -1121,6 +1333,26 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     // Interceptação determinística de comandos de PC (abrir apps, volume, bloqueio)
     const pcMatch = parsePcCommandIntent(clean || '');
     if (pcMatch && !liveIsHandling) {
+      // CORREÇÃO (duplo lock): o executePcAction adquire o lock de deduplicação de 3s.
+      // Quando a ação é bloqueada aguardando consentimento, o lock precisa ser
+      // liberado — senão a aprovação na tela dentro dos 3s seguintes caía em
+      // `duplicateSuppressed` e nunca executava a ação aprovada.
+      let releasePcLockOnConsent = false;
+      let pcDedupeKey = '';
+      if (
+        pcMatch.type === 'app_launch' ||
+        pcMatch.type === 'system_lock' ||
+        pcMatch.type === 'volume_up' ||
+        pcMatch.type === 'volume_down' ||
+        pcMatch.type === 'volume_mute'
+      ) {
+        releasePcLockOnConsent = true;
+        pcDedupeKey = pcMatch.type === 'app_launch'
+          ? buildCommandDedupeKey('open_application', { appName: pcMatch.executable })
+          : pcMatch.type === 'system_lock'
+            ? buildCommandDedupeKey('system_lock_session', {})
+            : buildCommandDedupeKey('system_set_volume', { action: pcMatch.type });
+      }
       try {
         // Executa no backend antes de confirmar ao usuário (zero falso positivo)
         const result = await executePcAction(pcMatch);
@@ -1130,27 +1362,30 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         }
 
         if (!result.success && result.requiresConsent && result.consentToolName) {
+          if (releasePcLockOnConsent && pcDedupeKey) {
+            commandDeduplicator.release(pcDedupeKey);
+          }
           const now = Date.now();
-          set({
-            pendingConsent: {
-              auditId: `consent-${now}`,
-              ruleId: 'ui-consent',
-              toolName: result.consentToolName,
-              riskLevel: result.consentRiskLevel || 'R1',
-              parameters: result.consentParams || {},
-              consentToken: '',
-              sessionId: get().activeSessionId || 'operator-voice-session',
-              expiresAt: now + 60000,
-              reason: result.message || 'Confirme para executar esta ação no computador.',
-              status: 'PENDING'
-            }
+          get().setPendingConsent({
+            auditId: `consent-${now}`,
+            ruleId: 'ui-consent',
+            toolName: result.consentToolName,
+            riskLevel: result.consentRiskLevel || 'R1',
+            parameters: result.consentParams || {},
+            consentToken: '',
+            sessionId: get().activeSessionId || 'operator-voice-session',
+            expiresAt: now + 60000,
+            reason: result.message || 'Confirme para executar esta ação no computador.',
+            status: 'PENDING'
           });
         }
 
         const responseText = result.success
-          ? (result.simulated
-              ? `Modo Web Preview simulado: ${result.message}`
-              : pcMatch.spokenFeedback)
+          ? (result.duplicateSuppressed
+              ? `Mestre, esse comando já foi executado há instantes — não repeti para evitar duplicidade.`
+              : result.simulated
+                ? `Modo Web Preview simulado: ${result.message}`
+                : pcMatch.spokenFeedback)
           : (result.requiresConsent
               ? `Mestre, aguardo sua confirmação na tela para executar: ${result.message}`
               : `Mestre, não consegui executar o comando: ${result.error || result.message || 'verifique se o aplicativo está instalado'}.`);
@@ -1159,14 +1394,14 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
         get().addActivityLog({
           category: 'system',
-          summary: pcMatch.type === 'app_launch' ? `Executar App: ${pcMatch.appName}` : `Ação de Sistema: ${pcMatch.action}`,
+          summary: pcMatch.type === 'app_launch' ? `Executar App: ${pcMatch.appName}` : (pcMatch.type === 'camera_toggle' ? `Câmera: ${pcMatch.enable ? 'Ligada' : 'Desligada'}` : `Ação de Sistema: ${pcMatch.action}`),
           details: result.message,
           riskLevel: result.consentRiskLevel || 'R1',
           status: result.success ? 'success' : result.requiresConsent ? 'warning' : 'error',
           simulated: Boolean(result.simulated)
         });
 
-        if (get().isVoiceActive && !result.requiresConsent) {
+        if (get().isVoiceActive && !result.requiresConsent && !result.duplicateSuppressed) {
           voiceLiveClient.extendSuppression(6000);
           speechService.unlockAudio();
           speechService.speak(responseText, undefined, undefined, { isDeterministicOverride: true });
@@ -1176,7 +1411,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
         updateDeterministicReply(errText, 'error');
         get().addActivityLog({
           category: 'system',
-          summary: pcMatch.type === 'app_launch' ? `Falha App: ${pcMatch.appName}` : `Falha Sistema: ${pcMatch.action}`,
+          summary: pcMatch.type === 'app_launch' ? `Falha App: ${pcMatch.appName}` : (pcMatch.type === 'camera_toggle' ? `Falha Câmera` : `Falha Sistema: ${pcMatch.action}`),
           details: errText,
           riskLevel: 'R1',
           status: 'error',
@@ -1197,6 +1432,11 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     const systemInstruction = memoryContextBlock 
       ? `${LIORA_SYSTEM_INSTRUCTION}${memoryContextBlock}` 
       : LIORA_SYSTEM_INSTRUCTION;
+    // Instrução dinâmica da webcam: o modelo só sabe que a câmera está ligada (e
+    // deve chamar `camera_inspect_object`) se isso for informado no turno atual.
+    const cameraContext = (get().settings?.cameraEnabled || get().settings?.gestureControlEnabled)
+      ? '\n\n[WEBCAM ATIVA AGORA]: a visão computacional está habilitada nesta sessão. A captura de quadro é feita NO APP (cliente). Quando o Mestre disser "olhe", "veja o que estou segurando", "o que é isso na câmera": se ele JÁ enviou uma imagem junto com a mensagem, analise essa imagem; se NÃO houver imagem anexada, NÃO chame `camera_inspect_object` (ela roda no servidor e não acessa a webcam) — peça gentilmente que ele clique no botão "Analisar" (ícone de olho) ao lado da câmera para capturar o quadro.'
+      : '\n\n[WEBCAM DESLIGADA]: a câmera está desligada. Se o Mestre pedir para olhar algo físico, oriente-o a ativar a visão computacional (botão de câmera na Home ou "ativar câmera").';
 
     get().addActivityLog({
       category: 'ai',
@@ -1219,7 +1459,7 @@ export const useLioraStore = create<LioraState>((set, get) => ({
           audio,
           history,
           model: get().activeModel || 'gemini-3.1-flash-lite',
-          systemInstruction
+          systemInstruction: `${systemInstruction}${cameraContext}`
         }),
         signal: controller.signal
       });
@@ -1273,7 +1513,13 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
       const isVoiceActive = get().isVoiceActive;
       const wasAudioSent = Boolean(audio && audio.data);
-      const shouldSpeakResponse = isVoiceActive || wasAudioSent;
+      // VOZ ÚNICA (correção da alternância offline/API): se a reposta desta
+      // conversa está sendo dada pelo canal Live, o texto do chat é apenas o
+      // transcript na tela — NÃO pode ganhar uma segunda voz de TTS por cima.
+      // A marca dura enquanto a sessão for a atendida pelo Live e é limpa no
+      // próximo comando escrito do Mestre.
+      const liveOwnsVoiceForThisSession = hasLiveVoiceAnswered(targetSessionId);
+      const shouldSpeakResponse = (isVoiceActive || wasAudioSent) && !liveOwnsVoiceForThisSession;
 
       let unspokenBuffer = '';
       let modelUsedRef: string | null = null;
@@ -1331,19 +1577,21 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
                 if (!data.success && (data.requiresConsent || data.code === 'REQUIRES_USER_CONFIRMATION' || data.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
                   const now = Date.now();
-                  set({
-                    pendingConsent: {
-                      auditId: data.auditId || `sse-consent-${now}`,
-                      ruleId: 'sse-tool-consent',
-                      toolName: data.toolExecuted,
-                      riskLevel: (data.riskLevel || 'R1') as ToolRiskLevel,
-                      parameters: data.parameters || {},
-                      consentToken: '',
-                      sessionId: targetSessionId || 'operator-voice-session',
-                      expiresAt: now + 60000,
-                      reason: data.resultSummary || `A execução de '${data.toolExecuted}' requer sua confirmação explícita.`,
-                      status: 'PENDING'
-                    }
+                  // BUG FIX: usar setPendingConsent em vez de set direto para:
+                  // 1) limpar timer de auto-dismiss anterior
+                  // 2) enriquecer friendlyTitle/spokenPrompt via humanizeToolAction
+                  // 3) disparar TTS do prompt de confirmação quando voz está ativa
+                  get().setPendingConsent({
+                    auditId: data.auditId || `sse-consent-${now}`,
+                    ruleId: 'sse-tool-consent',
+                    toolName: data.toolExecuted,
+                    riskLevel: (data.riskLevel || 'R1') as ToolRiskLevel,
+                    parameters: data.parameters || {},
+                    consentToken: '',
+                    sessionId: targetSessionId || 'operator-voice-session',
+                    expiresAt: now + 60000,
+                    reason: data.resultSummary || `A execução de '${data.toolExecuted}' requer sua confirmação explícita.`,
+                    status: 'PENDING'
                   });
                 }
 
@@ -1634,20 +1882,53 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       controller.abort();
       setActiveAbortController(null);
     }
+    // CORREÇÃO (UI presa em "Pensando…"): se não houver controller (ex: clique em
+    // Parar exatamente na janela entre a reserva atômica de `isGenerating` e a
+    // criação do AbortController, ou após uma falha que limpou o controller sem
+    // restaurar a flag), a UI ficava travada sem stream nenhum para abortar.
+    // Com um stream REAL ativo, o fluxo de catch do sendMessage/retryMessage é
+    // quem restaura as flags (mantém status 'cancelled'); sem stream, liberamos aqui.
+    if (!controller && get().isGenerating) {
+      set((state) => ({
+        isGenerating: false,
+        orbState: state.isVoiceActive ? 'LISTENING' : 'IDLE'
+      }));
+    }
   },
 
   retryMessage: async (failedMessageId: string) => {
-    if (get().isGenerating) return;
+    // CORREÇÃO (corrida isGenerating): o guard era um check-then-act não atômico
+    // (`if (get().isGenerating) return;` e o `set({isGenerating:true})` ~80 linhas
+    // depois). Dois cliques rápidos em "Tentar novamente" passavam ambos e criavam
+    // dois streams na MESMA bolha (assistantMsgId diferente) — texto embaralhado,
+    // `isGenerating` liberado pelo primeiro que terminasse e o abort só matando
+    // o segundo controller. Mesma técnica atômica usada no sendMessage.
+    let retryRaceLost = false;
+    set((state) => {
+      if (state.isGenerating) {
+        retryRaceLost = true;
+        return state;
+      }
+      return { ...state, isGenerating: true };
+    });
+    if (retryRaceLost) return;
+
     // Otimização de exaustão: throttle de persistência durante o streaming do retry
     let lastPersistTime = 0;
     const retryStartMs = performance.now();
 
     const targetSessionId = get().activeSessionId;
-    if (!targetSessionId) return;
+    if (!targetSessionId) {
+      set({ isGenerating: false });
+      return;
+    }
 
     const currentMessages = get().messages;
     const failedIdx = currentMessages.findIndex((m) => m.id === failedMessageId);
-    if (failedIdx === -1) return;
+    if (failedIdx === -1) {
+      set({ isGenerating: false });
+      return;
+    }
 
     let userText = '';
     let userMsgIdx = -1;
@@ -1659,17 +1940,28 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       }
     }
 
-    if (!userText || userMsgIdx === -1) return;
+    if (!userText || userMsgIdx === -1) {
+      set({ isGenerating: false });
+      return;
+    }
 
     // Filter out the failed message from active session
     set((state) => {
-      const filteredMessages = state.messages.filter((m) => m.id !== failedMessageId);
-      const updatedSessions = state.sessions.map(s => 
-        s.id === targetSessionId ? { ...s, messages: filteredMessages, updatedAt: new Date().toISOString() } : s
+      // CORREÇÃO (falso positivo visual): antes filtrava `state.messages` (visão da
+      // sessão ativa) mas gravava essa lista dentro de `targetSessionId`. Se a
+      // sessão ativa mudasse entre a leitura e o set, o histórico de OUTRA sessão
+      // era gravado na sessão alvo (mensagens trocadas/corrompidas). Agora a
+      // remoção é cirúrgica apenas na sessão alvo.
+      const updatedSessions = state.sessions.map(s =>
+        s.id === targetSessionId
+          ? { ...s, messages: s.messages.filter((m) => m.id !== failedMessageId), updatedAt: new Date().toISOString() }
+          : s
       );
       saveHistory(updatedSessions, state.activeSessionId);
+      const isCurrent = state.activeSessionId === targetSessionId;
+      const currentSession = updatedSessions.find(s => s.id === targetSessionId);
       return {
-        messages: filteredMessages,
+        messages: isCurrent && currentSession ? currentSession.messages : state.messages,
         sessions: updatedSessions
       };
     });
@@ -1695,13 +1987,18 @@ export const useLioraStore = create<LioraState>((set, get) => ({
     const controller = new AbortController();
 
     set((state) => {
-      const nextMessages = [...state.messages, assistantMsg];
-      const updatedSessions = state.sessions.map(s => 
-        s.id === targetSessionId ? { ...s, messages: nextMessages, updatedAt: new Date().toISOString() } : s
+      // CORREÇÃO: acrescenta a nova bolha NA SESSÃO ALVO (antes usava
+      // `state.messages`, que pertence à sessão ativa e pode ser outra).
+      const updatedSessions = state.sessions.map(s =>
+        s.id === targetSessionId
+          ? { ...s, messages: [...s.messages, assistantMsg], updatedAt: new Date().toISOString() }
+          : s
       );
       saveHistory(updatedSessions, state.activeSessionId);
+      const isCurrent = state.activeSessionId === targetSessionId;
+      const currentSession = updatedSessions.find(s => s.id === targetSessionId);
       return {
-        messages: nextMessages,
+        messages: isCurrent && currentSession ? currentSession.messages : state.messages,
         sessions: updatedSessions,
         orbState: 'THINKING',
         isGenerating: true
@@ -1829,19 +2126,18 @@ export const useLioraStore = create<LioraState>((set, get) => ({
                 });
                 if (!data.success && (data.requiresConsent || data.code === 'REQUIRES_USER_CONFIRMATION' || data.code === 'DENY_R1_BLOCKED_IN_PHASE_6_2B')) {
                   const now = Date.now();
-                  set({
-                    pendingConsent: {
-                      auditId: data.auditId || `sse-consent-${now}`,
-                      ruleId: 'sse-tool-consent',
-                      toolName: data.toolExecuted,
-                      riskLevel: (data.riskLevel || 'R1') as ToolRiskLevel,
-                      parameters: data.parameters || {},
-                      consentToken: '',
-                      sessionId: targetSessionId || 'operator-voice-session',
-                      expiresAt: now + 60000,
-                      reason: data.resultSummary || `A execução de '${data.toolExecuted}' requer sua confirmação explícita.`,
-                      status: 'PENDING'
-                    }
+                  // BUG FIX: usar setPendingConsent (retry path) para enriquecer prompt, timer e TTS
+                  get().setPendingConsent({
+                    auditId: data.auditId || `sse-consent-${now}`,
+                    ruleId: 'sse-tool-consent',
+                    toolName: data.toolExecuted,
+                    riskLevel: (data.riskLevel || 'R1') as ToolRiskLevel,
+                    parameters: data.parameters || {},
+                    consentToken: '',
+                    sessionId: targetSessionId || 'operator-voice-session',
+                    expiresAt: now + 60000,
+                    reason: data.resultSummary || `A execução de '${data.toolExecuted}' requer sua confirmação explícita.`,
+                    status: 'PENDING'
                   });
                 }
                 eventBus.publish('liora:tool_result', {
@@ -2439,6 +2735,66 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
   executeTool: async (toolName: string, parameters: Record<string, any> = {}) => {
     const start = performance.now();
+    // CORREÇÃO (auditoria profunda — /exec nunca funcionava): esta função era o
+    // ÚNICO caminho de execução do cliente que NÃO pedia consentimento de UI.
+    // Toda tool R1/R2 (incluindo system_exec_sandbox, usado pelo comando /exec do
+    // chat) voltava 403 REQUIRES_USER_CONFIRMATION/TOOL_NOT_IN_PROFILE_WHITELIST —
+    // o usuário digitava `/exec git status` e via "Falhou" para sempre.
+    // Agora: consulta a política no servidor e, se exigir confirmação, abre o
+    // ConsentCard; após a aprovação, `approveConsent()` emite o token de UI e
+    // executa a sequência. Sem confirmação automática em silêncio.
+    const policyRes = await fetch('/api/security/tool-policies', {
+      headers: { 'Accept': 'application/json' }
+    }).catch(() => null);
+    let requiresConsent = true;
+    // Nível de risco REAL da tool (o cartão exibia "Nível R1" fixo até para
+    // um comando de terminal, que é R2 — o usuário autorizava algo mais grave
+    // pensando que era leve). Fonte: catálogo do servidor. `loadTools()` só roda
+    // na aba Desenvolvedor, então a lista do store pode estar vazia aqui —
+    // nesse caso consultamos o catálogo uma vez.
+    const knownRisk = get().tools.find(t => t.name === toolName)?.riskLevel as ToolRiskLevel | undefined;
+    let resolvedRisk: ToolRiskLevel = knownRisk || 'R1';
+    if (!knownRisk) {
+      try {
+        const catalogRes = await fetch('/api/tools', { headers: { Accept: 'application/json' } });
+        const catalog = await catalogRes.json().catch(() => null);
+        const entry = Array.isArray(catalog?.tools) ? catalog.tools.find((t: any) => t.name === toolName) : null;
+        if (entry?.riskLevel) resolvedRisk = entry.riskLevel as ToolRiskLevel;
+      } catch { /* mantém fallback R1 (conservador para exibição) */ }
+    }
+    if (policyRes?.ok) {
+      const policy = await policyRes.json().catch(() => null);
+      const toolPolicy = policy?.policies?.[toolName];
+      requiresConsent = !(policy?.globalAutoApprove === true || toolPolicy === 'always_allow');
+      if (toolPolicy === 'always_require_consent') requiresConsent = true;
+    }
+    if (requiresConsent) {
+      const now = Date.now();
+      set({
+        pendingConsent: {
+          auditId: `ui-${now}`,
+          ruleId: 'manual-tool',
+          toolName,
+          riskLevel: resolvedRisk,
+          parameters,
+          consentToken: '',
+          sessionId: get().activeSessionId || 'default-session',
+          expiresAt: now + 60000,
+          reason: `A ação '${toolName}' precisa da sua confirmação explícita para executar.`,
+          status: 'PENDING'
+        }
+      });
+      return {
+        toolName,
+        success: false,
+        riskLevel: resolvedRisk,
+        error: 'REQUIRES_USER_CONFIRMATION: confirme a ação no cartão de consentimento para executá-la.',
+        code: 'REQUIRES_USER_CONFIRMATION',
+        simulated: false,
+        executionTimeMs: Math.round(performance.now() - start),
+        timestamp: new Date().toISOString()
+      } as ToolExecutionResult;
+    }
     try {
       const res = await fetch('/api/tools/execute', {
         method: 'POST',
@@ -2554,6 +2910,17 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 
   setPendingConsent: (consent: PendingConsentState | null) => {
     clearConsentAutoDismissTimer();
+    if (consent && consent.status === 'PENDING') {
+      const human = humanizeToolAction(consent.toolName, consent.parameters, consent.riskLevel);
+      consent.friendlyTitle = consent.friendlyTitle || human.title;
+      consent.friendlyDescription = consent.friendlyDescription || human.friendlyDescription;
+      consent.spokenPrompt = consent.spokenPrompt || human.spokenPrompt;
+
+      if (get().isVoiceActive) {
+        voiceLiveClient.extendSuppression(8000);
+        speechService.speak(consent.spokenPrompt, undefined, undefined, { isDeterministicOverride: true });
+      }
+    }
     set({ pendingConsent: consent });
   },
 
@@ -2770,11 +3137,19 @@ export const useLioraStore = create<LioraState>((set, get) => ({
       if (get().isVoiceActive) {
         voiceLiveClient.extendSuppression(5000);
         speechService.unlockAudio();
-        const spokenFeedback = isSuccess
-          ? (isSimulated
-              ? `Autorizado em modo Web Preview simulado para ${pending.toolName}.`
-              : `Autorização confirmada e executada, Mestre.`)
-          : `Autorizei a ação, mas ocorreu uma falha: ${(result as any).error || 'verifique o aplicativo'}.`;
+        const address = resolveUserAddress(get().memoryEntries as any);
+        // O feedback falado era "Autorização confirmada e executada, Mestre." e NÃO
+        // dizia o RESULTADO. O usuário autorizava e ficava só com o "confirmada" —
+        // exatamente o relato "autorizei e ela ficou calada / não falou a saída".
+        // Agora a fala traz o resultado real (saída, ou o motivo da falha).
+        let spokenFeedback: string;
+        if (isSuccess) {
+          spokenFeedback = isSimulated
+            ? `Autorizado, ${address}. Modo Web Preview simulado para ${pending.toolName}.`
+            : buildSpokenToolOutcome(pending.toolName, result, address);
+        } else {
+          spokenFeedback = `${address}, autorizei a ação, mas ocorreu uma falha: ${(result as any).error || 'verifique o aplicativo'}.`;
+        }
         speechService.speak(spokenFeedback, undefined, undefined, { isDeterministicOverride: true });
       }
 
@@ -3590,6 +3965,12 @@ export const useLioraStore = create<LioraState>((set, get) => ({
 if (typeof window !== 'undefined') {
   (window as any).__LIORA_STORE__ = useLioraStore;
 }
+// Também em globalThis: módulos do servidor/worker (humanizador de consentimento,
+// tools de memória no Node) não têm `window`, e sem isso o vocativo voltava a
+// "Mestre" mesmo com a preferência salva.
+if (typeof globalThis !== 'undefined') {
+  (globalThis as any).__LIORA_STORE__ = useLioraStore;
+}
 
 // Guarda HMR: evita registrar múltiplos listeners caso o módulo seja recarregado pelo Vite em desenvolvimento
 const canRegisterBusListeners = typeof window === 'undefined' || !(window as any).__LIORA_BUS_SUBSCRIBED__;
@@ -3706,6 +4087,20 @@ if (canRegisterBusListeners) {
               : null;
           } else {
             speech = `Não consegui abrir ${app}: ${resultData?.error || resultSummary || 'verifique se está instalado'}.`;
+          }
+          break;
+        }
+        case 'camera_inspect_object': {
+          if (!success) {
+            speech = resultData?.requiresClientCapture
+              ? 'Para analisar um objeto pela câmera, segure o item na frente da lente e aperte o botão de câmera ou me peça para olhar a câmera.'
+              : `Não consegui acessar a câmera: ${resultData?.error || 'verifique se o dispositivo está conectado'}.`;
+          }
+          break;
+        }
+        case 'pc_take_screenshot': {
+          if (!success) {
+            speech = `Não consegui capturar a tela: ${resultData?.error || 'verifique as permissões do sistema'}.`;
           }
           break;
         }

@@ -10,6 +10,7 @@
 import { PcCommandMatch } from '../../utils/pcCommandParser';
 import { isTauriEnvironment, invokeTauri } from '../../security/localBridge';
 import { permissionEngine } from '../../security/permissionEngine';
+import { gestureService } from '../../services/gestureService';
 import {
   commandDeduplicator,
   buildCommandDedupeKey,
@@ -50,7 +51,9 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
       ? buildCommandDedupeKey('open_application', { appName: match.executable })
       : match.type === 'system_lock'
         ? buildCommandDedupeKey('system_lock_session', {})
-        : buildCommandDedupeKey('system_set_volume', { action: match.type });
+        : match.type === 'camera_toggle'
+          ? buildCommandDedupeKey('camera_toggle', { enable: match.enable })
+          : buildCommandDedupeKey('system_set_volume', { action: match.type });
 
   const dedupeCheck = commandDeduplicator.checkAndLock(dedupeKey, Date.now(), DEFAULT_COMMAND_DEDUPE_WINDOW_MS);
   if (dedupeCheck.isDuplicate) {
@@ -64,6 +67,50 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
   }
 
   try {
+    if (match.type === 'camera_toggle') {
+      // BUG (câmera "liga" mas não abre): antes só gravava `cameraEnabled` no store
+      // e retornava success: true — nenhum getUserMedia era chamado, então a câmera
+      // física nunca abria. Agora a captura é iniciada/encerrada de verdade e o
+      // sucesso só é declarado se o dispositivo respondeu.
+      const store = (globalThis as any)?.__LIORA_STORE__?.getState?.();
+      if (!match.enable) {
+        try {
+          store?.updateSettings?.({ cameraEnabled: false, gestureControlEnabled: false });
+          gestureService.stop();
+        } catch {}
+        return { success: true, simulated: false, message: match.spokenFeedback };
+      }
+
+      let started = false;
+      let failureReason = 'dispositivo indisponível';
+      try {
+        const hasCam = await gestureService.hasPhysicalCamera();
+        if (!hasCam) {
+          failureReason = 'nenhuma webcam encontrada';
+        } else {
+          started = await gestureService.start();
+          if (!started) {
+            failureReason = gestureService.getState().error || failureReason;
+          }
+        }
+      } catch (camErr: any) {
+        failureReason = camErr?.message || failureReason;
+      }
+
+      if (!started) {
+        try { store?.updateSettings?.({ cameraEnabled: false, gestureControlEnabled: false }); } catch {}
+        return {
+          success: false,
+          simulated: false,
+          message: `Não consegui ligar a câmera: ${failureReason}.`,
+          error: failureReason
+        };
+      }
+
+      try { store?.updateSettings?.({ cameraEnabled: true }); } catch {}
+      return { success: true, simulated: false, message: match.spokenFeedback };
+    }
+
     if (match.type === 'app_launch') {
       // Navegadores usam diretamente open_browser para suportar argumentos de browser e Web Preview cleanly
       const primaryTool = BROWSER_EXECUTABLES.has(match.executable) ? 'open_browser' : 'open_application';
@@ -161,6 +208,15 @@ export async function executePcAction(match: PcCommandMatch): Promise<PcExecutio
       }
 
       if (!isFallbackSuccess) {
+        commandDeduplicator.release(dedupeKey);
+      }
+      // CORREÇÃO (fronteira de falso positivo): se o servidor NEGOU por política
+      // (always_require_consent, Shield Mode, R3) também libera o lock. Antes só
+      // 403 com REQUIRES_USER_CONFIRMATION liberava; uma negação por política
+      // deixava o lock ativo e transformava as próximas tentativas em
+      // `success: true` fabricado ("já abri") sem nada ter sido aberto.
+      const fallbackDenied = !fallbackRes.ok && !isFallbackSuccess;
+      if (fallbackDenied) {
         commandDeduplicator.release(dedupeKey);
       }
       const errorDetail = fallbackData.data?.message || fallbackData.error || data.data?.message || data.error || 'verifique se o aplicativo está instalado no computador';

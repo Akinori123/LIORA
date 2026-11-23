@@ -20,10 +20,10 @@ function normalizeSpeech(raw: string): string {
 }
 
 const REJECT_REGEX =
-  /\b(nao|cancelar?|cancela|cancelo|recusar?|recusa|recuso|negar?|nega|nego|rejeitar?|rejeita|rejeito|parar?|pare|abortar?|aborta|stop|bloquear?|bloqueia)\b/;
+  /\b(nao|cancelar?|cancela|cancelo|recusar?|recusa|recuso|negar?|nega|nego|rejeitar?|rejeita|rejeito|parar?|pare|abortar?|aborta|stop|bloquear?|bloqueia|deixa\s+quieto|esquece|nao\s+quero|negativo|cancela\s+isso)\b/;
 
 const APPROVE_REGEX =
-  /\b(autoriz[aeo]r?|confirm[aeo]r?|aprov[aeo]r?|pode\s+executar|pode\s+fazer|sim|ok|liber[aeo]r?|pode|executar|manda\s+ver)\b/;
+  /\b(autoriz[aeo]r?|confirm[aeo]r?|aprov[aeo]r?|pode\s+executar|pode\s+fazer|pode\s+sim|sim|ok|liber[aeo]r?|pode|prosseguir|prossiga|permita|permitir|permitido|com\s+certeza|claro|vai\s+em\s+frente|manda\s+ver|manda\s+bala|positivo)\b/;
 
 /**
  * Analisa uma transcrição de voz durante uma janela de consentimento pendente.

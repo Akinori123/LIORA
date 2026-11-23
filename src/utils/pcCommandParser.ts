@@ -22,7 +22,14 @@ export interface PcSystemMatch {
   rawInput: string;
 }
 
-export type PcCommandMatch = PcAppMatch | PcSystemMatch;
+export interface PcCameraMatch {
+  type: 'camera_toggle';
+  enable: boolean;
+  spokenFeedback: string;
+  rawInput: string;
+}
+
+export type PcCommandMatch = PcAppMatch | PcSystemMatch | PcCameraMatch;
 
 interface AppDefinition {
   names: string[];
@@ -179,6 +186,31 @@ export function parsePcCommandIntent(input: string): PcCommandMatch | null {
   const normalized = cleanUtterance(rawClean);
   if (!normalized) return null;
 
+  // 0. Câmera, Visão Computacional e Controle por Gestos de Mão
+  if (
+    /\b(?:ativar|ligar|iniciar|abrir|habilitar)\s+(?:a\s+)?(?:camera|webcam|visao\s+computacional|controle\s+por\s+gestos|gestos?\s+de\s+mao|gestos?)\b/.test(normalized) ||
+    /^(?:camera|webcam|visao\s+computacional|gestos)\s+(?:on|ligad[oa]|ativad[oa])$/.test(normalized)
+  ) {
+    return {
+      type: 'camera_toggle',
+      enable: true,
+      spokenFeedback: 'Ativando a visão computacional e controle por gestos, Mestre.',
+      rawInput: rawClean
+    };
+  }
+
+  if (
+    /\b(?:desativar|desligar|fechar|parar|desabilitar|encerrar)\s+(?:a\s+)?(?:camera|webcam|visao\s+computacional|controle\s+por\s+gestos|gestos?\s+de\s+mao|gestos?)\b/.test(normalized) ||
+    /^(?:camera|webcam|visao\s+computacional|gestos)\s+(?:off|desligad[oa]|desativad[oa])$/.test(normalized)
+  ) {
+    return {
+      type: 'camera_toggle',
+      enable: false,
+      spokenFeedback: 'Desativando a visão computacional e câmera, Mestre.',
+      rawInput: rawClean
+    };
+  }
+
   // 1. Ações de Bloqueio de Sessão
   if (
     normalized.includes('bloquear tela') || 
@@ -232,15 +264,14 @@ export function parsePcCommandIntent(input: string): PcCommandMatch | null {
     };
   }
 
-  // 3. Guard anti-sequestro para comandos compostos, troca/criação de abas ou fechamento:
-  // Ex.: "abra o bloco de notas e escreva um relatório", "abra outra aba no navegador", "feche o bloco de notas"
-  // Esses fluxos têm início, meio e fim e devem ser orquestrados pelo LLM com encadeamento de ferramentas.
-  const hasChainedFollowUp =
-    /\b(?:e\s+(?:escrev\w*|digit\w*|anot\w*|salv\w*|fech\w*|pesquis\w*|busc\w*|envi\w*|cri\w*|ab[aeio]\w*|lei\w*|ler|coloc\w*|coloqu\w*|renome\w*|apag\w*)|depois|em\s+seguida|para\s+(?:escrev\w*|digit\w*|anot\w*|salv\w*)|(?:nova|outra|mais\s+uma)\s+aba|relatorio|ideias)\b/.test(normalized);
-  const hasCloseOrKillVerb =
-    /\b(?:fech[aeo]r?|encerr[aeo]r?|mat[aeo]r?|finaliz[aeo]r?|sair\s+d[oa])\b/.test(normalized);
+  // 3. Guard anti-sequestro para comandos inteligentes, navegação, digitação, abas ou ações complexas:
+  // Frases que contêm verbos de pesquisa, consulta, abas, digitação, tela, foco ou encadeamento
+  // NUNCA devem ser interceptadas de forma estática — devem ir para o LLM inteligente orquestrar.
+  const hasComplexOrChainedIntent =
+    /\b(?:pesquis\w*|busc\w*|procur\w*|consult\w*|digit\w*|escrev\w*|anot\w*|salv\w*|fech\w*|encerr\w*|mat\w*|finaliz\w*|aba|abas|guia|guias|link|site|pagina|frente|primeiro\s+plano|segundo\s+plano|minimizad\w*|maximizad\w*|capa|dolar|cotacao|quanto|qual|como|onde|olhe|veja|tela|print|screenshot|sair\s+d[oa])\b/.test(normalized) ||
+    /\b(?:e\s+\w+|depois|em\s+seguida|para\s+\w+|relatorio|ideias)\b/.test(normalized);
 
-  if (hasChainedFollowUp || hasCloseOrKillVerb) {
+  if (hasComplexOrChainedIntent) {
     return null;
   }
 
@@ -269,22 +300,22 @@ export function parsePcCommandIntent(input: string): PcCommandMatch | null {
   for (const { app, normName } of appCandidates) {
     if (!normName) continue;
     const escapedName = normName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const boundaryRe = new RegExp(`(?:^|\\s)${escapedName}(?:\\s|$)`);
-    const hasLaunchVerb = /\b(?:abrir|abra|abre|iniciar|inicie|executar|execute|rodar|rode)\b/.test(normalized);
+    const boundaryRe = new RegExp(`^${escapedName}$|^(?:o|a|os|as)?\\s*${escapedName}$`);
 
-    if (
+    // Só dispara se o comando for estritamente a intenção de abrir o app específico
+    const isDirectMatch =
       targetAppPhrase === normName ||
-      targetAppPhrase.startsWith(`${normName} `) ||
-      targetAppPhrase.endsWith(` ${normName}`) ||
-      (hasLaunchPrefix && boundaryRe.test(targetAppPhrase)) ||
+      boundaryRe.test(targetAppPhrase) ||
       normalized === normName ||
       normalized === `abrir ${normName}` ||
       normalized === `abra ${normName}` ||
       normalized === `abre ${normName}` ||
       normalized === `iniciar ${normName}` ||
       normalized === `inicie ${normName}` ||
-      (hasLaunchVerb && boundaryRe.test(normalized))
-    ) {
+      normalized === `executar ${normName}` ||
+      normalized === `execute ${normName}`;
+
+    if (isDirectMatch) {
       return {
         type: 'app_launch',
         appName: app.label,

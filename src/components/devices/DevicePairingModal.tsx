@@ -533,7 +533,7 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                   <div className="space-y-1">
                     <h3 className="text-sm font-bold text-white">Vincular Celular à LIORA</h3>
                     <p className="text-xs text-[#999999] leading-relaxed">
-                      Abra o aplicativo LIORA Companion no seu smartphone e aponte a câmera para o QR Code acima. A conexão será estabelecida diretamente pela sua rede Wi-Fi local sem envio de dados para servidores externos.
+                      Conecte seu celular na mesma rede Wi-Fi e abra o link de emparelhamento abaixo no navegador mobile, ou use a câmera com o aplicativo LIORA Companion. A conexão é direta e local pelo seu PC.
                     </p>
                   </div>
 
@@ -672,6 +672,8 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                       {pairingTvId === tv.id ? (
                         <div className="flex items-center gap-2">
                           <input
+                            id={`tv-pin-input-${tv.id}`}
+                            name={`tv-pin-input-${tv.id}`}
                             type="text"
                             maxLength={6}
                             value={tvPinInput}
@@ -750,10 +752,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
             <form onSubmit={handleAddManual} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-xs font-mono text-[#888888] uppercase block">
+                  <label htmlFor="device-manual-name" className="text-xs font-mono text-[#888888] uppercase block">
                     Nome do Dispositivo / Nó
                   </label>
                   <input
+                    id="device-manual-name"
+                    name="device-manual-name"
                     type="text"
                     value={manualName}
                     onChange={(e) => setManualName(e.target.value)}
@@ -763,10 +767,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-xs font-mono text-[#888888] uppercase block">
+                  <label htmlFor="device-manual-type" className="text-xs font-mono text-[#888888] uppercase block">
                     Tipo de Dispositivo
                   </label>
                   <select
+                    id="device-manual-type"
+                    name="device-manual-type"
                     value={manualType}
                     onChange={(e) => setManualType(e.target.value as DeviceType)}
                     className="w-full bg-[#161616] border border-[#2A2A2A] focus:border-[var(--accent-primary)] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none transition-colors"
@@ -783,10 +789,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="sm:col-span-2 space-y-1.5">
-                  <label className="text-xs font-mono text-[#888888] uppercase block">
+                  <label htmlFor="device-manual-ip" className="text-xs font-mono text-[#888888] uppercase block">
                     Endereço IP ou Hostname
                   </label>
                   <input
+                    id="device-manual-ip"
+                    name="device-manual-ip"
                     type="text"
                     value={manualIp}
                     onChange={(e) => setManualIp(e.target.value)}
@@ -796,10 +804,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-xs font-mono text-[#888888] uppercase block">
+                  <label htmlFor="device-manual-port" className="text-xs font-mono text-[#888888] uppercase block">
                     Porta
                   </label>
                   <input
+                    id="device-manual-port"
+                    name="device-manual-port"
                     type="text"
                     value={manualPort}
                     onChange={(e) => setManualPort(e.target.value.replace(/\D/g, ''))}
@@ -869,10 +879,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-mono text-[#888888] uppercase block">
+                <label htmlFor="device-vehicle-name" className="text-xs font-mono text-[#888888] uppercase block">
                   Identificador / Nome do Veículo
                 </label>
                 <input
+                  id="device-vehicle-name"
+                  name="device-vehicle-name"
                   type="text"
                   value={vehicleName}
                   onChange={(e) => setVehicleName(e.target.value)}
@@ -910,10 +922,12 @@ export const DevicePairingModal: React.FC<DevicePairingModalProps> = ({ isOpen, 
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-xs font-mono text-[#888888] uppercase block">
+                  <label htmlFor="device-vehicle-protocol" className="text-xs font-mono text-[#888888] uppercase block">
                     Protocolo do Barramento
                   </label>
                   <select
+                    id="device-vehicle-protocol"
+                    name="device-vehicle-protocol"
                     value={vehicleProtocol}
                     onChange={(e) => setVehicleProtocol(e.target.value)}
                     className="w-full bg-[#161616] border border-[#2A2A2A] focus:border-[var(--accent-primary)] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none transition-colors"

@@ -397,6 +397,8 @@ export const AutomationsView: React.FC = () => {
             <span>Importar</span>
             <input 
               ref={fileInputRef}
+              id="automations-import-file"
+              name="importFile"
               type="file" 
               accept=".json" 
               onChange={handleImportFile}
@@ -650,6 +652,7 @@ export const AutomationsView: React.FC = () => {
                 </label>
                 <input
                   id="auto-rule-name"
+                  name="name"
                   type="text" 
                   value={name}
                   onChange={(e) => {
@@ -667,6 +670,7 @@ export const AutomationsView: React.FC = () => {
                 </label>
                 <input
                   id="auto-rule-desc"
+                  name="description"
                   type="text" 
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -682,6 +686,7 @@ export const AutomationsView: React.FC = () => {
                   </label>
                   <select
                     id="auto-trigger-type"
+                    name="triggerType"
                     value={triggerType}
                     onChange={(e) => handleTriggerTypeChange(e.target.value as AutomationTriggerType)}
                     className="w-full bg-[#171717] border border-[#333333] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -701,6 +706,7 @@ export const AutomationsView: React.FC = () => {
                   </label>
                   <input
                     id="auto-trigger-param"
+                    name="triggerParam"
                     type="text" 
                     value={triggerConfigValue}
                     onChange={(e) => {
@@ -721,6 +727,7 @@ export const AutomationsView: React.FC = () => {
                   </label>
                   <select
                     id="auto-target-tool"
+                    name="targetTool"
                     value={selectedTool}
                     onChange={(e) => {
                       const tName = e.target.value;
@@ -762,6 +769,7 @@ export const AutomationsView: React.FC = () => {
                   </label>
                   <input
                     id="auto-env-var"
+                    name="variableName"
                     type="text"
                     value={toolParams.variableName}
                     onChange={(e) => setToolParams({ ...toolParams, variableName: e.target.value })}
@@ -779,6 +787,7 @@ export const AutomationsView: React.FC = () => {
                     </label>
                     <input
                       id="auto-file-path"
+                      name="filePath"
                       type="text"
                       value={toolParams.filePath}
                       onChange={(e) => setToolParams({ ...toolParams, filePath: e.target.value })}
@@ -793,6 +802,7 @@ export const AutomationsView: React.FC = () => {
                       </label>
                       <textarea
                         id="auto-file-content"
+                        name="fileContent"
                         rows={2}
                         value={toolParams.content}
                         onChange={(e) => setToolParams({ ...toolParams, content: e.target.value })}
@@ -811,6 +821,7 @@ export const AutomationsView: React.FC = () => {
                   </label>
                   <input
                     id="auto-sandbox-cmd"
+                    name="sandboxCommand"
                     type="text"
                     value={toolParams.command}
                     onChange={(e) => setToolParams({ ...toolParams, command: e.target.value })}

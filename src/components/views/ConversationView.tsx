@@ -751,6 +751,8 @@ export const ConversationView: React.FC = () => {
 
                       <input
                         ref={inputRef}
+                        id="conversation-input"
+                        name="conversation-input"
                         type="text"
                         value={inputText}
                         disabled={isGenerating}
@@ -897,6 +899,8 @@ export const ConversationView: React.FC = () => {
               </label>
               {availableDevices.length > 0 ? (
                 <select
+                  id="conversation-mic-select"
+                  name="conversation-mic-select"
                   aria-label="Selecionar dispositivo de microfone"
                   value={selectedDevice}
                   onChange={(e) => handleDeviceChange(e.target.value)}

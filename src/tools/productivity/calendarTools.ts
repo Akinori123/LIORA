@@ -25,7 +25,12 @@ import { ToolDefinition } from '../types';
 
 // ─── Persistência local ──────────────────────────────────────────────────────
 
-const CALENDAR_DIR = path.join(os.homedir(), '.liora', 'calendar');
+const CALENDAR_DIR = (() => {
+  // LIORA_CALENDAR_DIR permite isolamento (testes/CI e múltiplos perfis) sem
+  // nunca gravar no home do usuário durante a suíte automatizada.
+  const override = typeof process !== 'undefined' ? process.env?.LIORA_CALENDAR_DIR : undefined;
+  return override && override.trim() ? override.trim() : path.join(os.homedir(), '.liora', 'calendar');
+})();
 const EVENTS_FILE = path.join(CALENDAR_DIR, 'events.json');
 
 interface CalendarEvent {
@@ -68,7 +73,31 @@ function parseDateOrError(value: string | undefined, field: string): { ok: true;
   if (!value || typeof value !== 'string') {
     return { ok: false, error: `MISSING_DATE: informe '${field}' em formato ISO (ex: 2025-01-15T14:30:00).` };
   }
-  const d = new Date(value);
+  // CORREÇÃO (fuso horário): `new Date('2030-01-15T14:30:00')` — o formato que o
+  // próprio schema pede ao modelo — é parseado como HORA LOCAL somente quando
+  // não tem 'Z' nem offset; em versões antigas e em ambientes Node com TZ
+  // diferente da máquina isso virava UTC e o evento caía 3h fora do horário
+  // pedido. Normalizando para ISO LOCAL explicitamente o resultado é estável.
+  const normalized = value.trim().replace(' ', 'T');
+  const hasExplicitZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(normalized);
+  const hasTime = normalized.includes('T');
+  // Data pura (YYYY-MM-DD) → meia-noite LOCAL (não UTC).
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const [y, m, d] = normalized.split('-').map(Number);
+    const local = new Date(y, m - 1, d, 0, 0, 0, 0);
+    if (isNaN(local.getTime())) {
+      return { ok: false, error: `INVALID_DATE: '${value}' não é uma data ISO válida para '${field}'.` };
+    }
+    return { ok: true, date: local };
+  }
+  // Data+hora sem zona → interpretada como hora LOCAL, sem depender do parser.
+  const localMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(normalized);
+  if (localMatch && !hasExplicitZone && hasTime) {
+    const [, y, m, d, hh, mm, ss] = localMatch;
+    const local = new Date(Number(y), Number(m) - 1, Number(d), Number(hh), Number(mm), Number(ss || 0), 0);
+    if (!isNaN(local.getTime())) return { ok: true, date: local };
+  }
+  const d = new Date(normalized);
   if (isNaN(d.getTime())) {
     return { ok: false, error: `INVALID_DATE: '${value}' não é uma data ISO válida para '${field}'.` };
   }
@@ -145,7 +174,17 @@ export const calendarListEventsTool: ToolDefinition<{
         if (!s1.ok) return { success: false, error: s1.error, events: [], simulated: false, timestamp: new Date().toISOString() };
         const s2 = parseDateOrError(params.endDate, 'endDate');
         if (!s2.ok) return { success: false, error: s2.error, events: [], simulated: false, timestamp: new Date().toISOString() };
-        const start = s1.date, end = s2.date;
+        // CORREÇÃO (intervalo exclusivo): "de 10 a 12" com endDate=2031-06-12
+        // retornava só até a MEIA-NOITE do dia 12 — um evento do dia 12 às 14h
+        // simplesmente não aparecia. Datas puras agora cobrem o dia INTEIRO.
+        const start = s1.date;
+        const endIsDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(params.endDate || '').trim());
+        const end = endIsDateOnly
+          ? new Date(s2.date.getFullYear(), s2.date.getMonth(), s2.date.getDate(), 23, 59, 59, 999)
+          : s2.date;
+        if (end < start) {
+          return { success: false, error: 'INVALID_RANGE: endDate deve ser após startDate.', events: [], simulated: false, timestamp: new Date().toISOString() };
+        }
         filtered = events.filter(e => {
           const s = new Date(e.start);
           return s >= start && s <= end;

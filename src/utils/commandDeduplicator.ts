@@ -117,10 +117,20 @@ export function buildCommandDedupeKey(toolName: string, params: Record<string, a
     return `pc_launch:${canonicalizeAppTarget(rawTarget)}`;
   }
 
+  // CORREÇÃO (duplo lock): `open_browser` com um navegador declarado (chrome, edge,
+  // opera, firefox) é a mesma intenção física que abrir esse app pelo launcher de PC
+  // (`openApplication`). Antes as chaves divergiam (`pc_launch:chrome` vs
+  // `open_browser:chrome:https://www.google.com`) e o comando de voz "abra o chrome"
+  // vazava pelo lock de 3s do pcActionLauncher e era executado duas vezes.
+  // `default` (navegador padrão, desconhecido) mantém chave própria.
   if (cleanTool === 'open_browser') {
-    const browser = canonicalizeAppTarget(params?.browser || 'default');
-    const url = normalizeDedupeText(params?.url || 'https://www.google.com');
-    return `open_browser:${browser}:${url}`;
+    const rawBrowser = params?.browser;
+    const browser = canonicalizeAppTarget(rawBrowser === undefined || rawBrowser === null || rawBrowser === '' ? 'default' : rawBrowser);
+    const normUrl = normalizeDedupeText(params?.url || 'https://www.google.com');
+    if (browser && browser !== 'default' && (!params?.url || normUrl === 'https://www.google.com')) {
+      return `pc_launch:${browser}`;
+    }
+    return `open_browser:${browser}:${normUrl}`;
   }
 
   return `${cleanTool}:${JSON.stringify(stableNormalizeValue(params || {}))}`;

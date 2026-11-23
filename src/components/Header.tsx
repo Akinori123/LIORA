@@ -7,6 +7,23 @@ import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useLioraStore } from '../store/lioraStore';
 import { Mic, MicOff, Shield, Server, Sparkles, Menu } from 'lucide-react';
+import { invokeTauri, isTauriEnvironment } from '../security/localBridge';
+
+/**
+ * Arraste nativo da janela pelo cabeçalho.
+ * Causa raiz tratada: o WebView2 (Windows/Tauri) NÃO suporta `-webkit-app-region:
+ * drag` — sem isso a janela não podia ser movida (especialmente quando a barra
+ * de título nativa fica coberta pelo conteúdo). `data-tauri-drag-region` só
+ * funciona com o script do core injetado; aqui usamos o comando IPC `start_drag`,
+ * que é determinístico. No navegador comum o handler simplesmente não faz nada.
+ */
+const handleHeaderPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+  if (!isTauriEnvironment() || e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  // Não arrastar quando o clique veio de um controle interativo
+  if (target?.closest('button, a, input, select, textarea, [role="button"], [data-no-drag]')) return;
+  void invokeTauri('start_drag').catch(() => {});
+};
 
 export const Header: React.FC = () => {
   const { activeTab, isVoiceActive, toggleVoice, setActiveTab, toggleMobileDrawer } = useLioraStore(
@@ -36,7 +53,10 @@ export const Header: React.FC = () => {
   };
 
   return (
-    <header className="flex items-center justify-between gap-3 sm:gap-6 md:gap-8 px-3.5 sm:px-6 md:px-8 py-3 md:py-4 border-b border-[#222222] bg-[#0A0A0A] shrink-0 z-10 min-w-0">
+    <header
+      onPointerDown={handleHeaderPointerDown}
+      className="flex items-center justify-between gap-3 sm:gap-6 md:gap-8 px-3.5 sm:px-6 md:px-8 py-3 md:py-4 border-b border-[#222222] bg-[#0A0A0A] shrink-0 z-10 min-w-0 select-none"
+    >
       {/* Zone 1: Mobile Hamburger & Page Title */}
       <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
         <button

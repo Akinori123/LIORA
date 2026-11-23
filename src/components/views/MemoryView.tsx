@@ -314,6 +314,8 @@ export const MemoryView: React.FC = () => {
     <div className="flex-1 flex flex-col overflow-y-auto p-4 sm:p-6 md:p-8 space-y-6 max-w-6xl mx-auto w-full">
       {/* Hidden file input for import */}
       <input 
+        id="memory-import-file"
+        name="memory-import-file"
         type="file" 
         ref={fileInputRef} 
         onChange={handleFileChange} 
@@ -376,6 +378,8 @@ export const MemoryView: React.FC = () => {
           <div className="relative flex-1">
             <Search className="absolute left-3.5 top-3 w-4 h-4 text-[#777777]" />
             <input
+              id="memory-search"
+              name="memory-search"
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -440,6 +444,8 @@ export const MemoryView: React.FC = () => {
             </div>
             <div className="flex items-center gap-3">
               <input
+                id="memory-similarity-threshold"
+                name="memory-similarity-threshold"
                 type="range"
                 aria-label="Limiar mínimo de similaridade cosseno"
                 min="0.10"
@@ -522,6 +528,8 @@ export const MemoryView: React.FC = () => {
         </h3>
         <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <select
+            id="memory-new-category"
+            name="memory-new-category"
             aria-label="Categoria da nova memória"
             value={newCategory}
             onChange={(e) => setNewCategory(e.target.value as any)}
@@ -533,6 +541,8 @@ export const MemoryView: React.FC = () => {
             <option value="routine">Rotina (1.1x)</option>
           </select>
           <input
+            id="memory-new-key"
+            name="memory-new-key"
             type="text"
             aria-label="Chave da memória"
             value={newKey}
@@ -544,6 +554,8 @@ export const MemoryView: React.FC = () => {
             className="bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white placeholder-[#777777] focus:outline-none focus:border-[var(--accent-primary)] transition-colors"
           />
           <input
+            id="memory-new-value"
+            name="memory-new-value"
             type="text"
             aria-label="Valor da memória"
             value={newValue}
@@ -819,6 +831,7 @@ export const MemoryView: React.FC = () => {
                 <label htmlFor="edit-memory-category" className="text-[11px] font-mono text-[#888888] block mb-1">Categoria</label>
                 <select
                   id="edit-memory-category"
+                  name="edit-memory-category"
                   value={editingMemory.category}
                   onChange={(e) => setEditingMemory({ ...editingMemory, category: e.target.value as any })}
                   className="w-full bg-[#171717] border border-[#333333] rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -834,6 +847,7 @@ export const MemoryView: React.FC = () => {
                 <label htmlFor="edit-memory-key" className="text-[11px] font-mono text-[#888888] block mb-1">Chave</label>
                 <input
                   id="edit-memory-key"
+                  name="edit-memory-key"
                   type="text"
                   value={editingMemory.key}
                   onChange={(e) => {
@@ -848,6 +862,7 @@ export const MemoryView: React.FC = () => {
                 <label htmlFor="edit-memory-value" className="text-[11px] font-mono text-[#888888] block mb-1">Valor</label>
                 <textarea
                   id="edit-memory-value"
+                  name="edit-memory-value"
                   rows={3}
                   value={editingMemory.value}
                   onChange={(e) => {

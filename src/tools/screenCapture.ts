@@ -20,22 +20,80 @@ export interface ScreenCaptureResult {
 export async function captureScreen(): Promise<ScreenCaptureResult> {
   const timestamp = new Date().toISOString();
 
-  // 1. Caminho NATIVO: Tauri Desktop IPC
+  // 1. Caminho NATIVO: Tauri Desktop IPC (se implementado)
   if (isTauriEnvironment()) {
     try {
-      const nativeResult = await invokeTauri<{ base64_image: string; width: number; height: number }>('capture_screen');
-      if (nativeResult && nativeResult.base64_image) {
+      const nativeResult = await invokeTauri<any>('capture_screen');
+      const base64Data = typeof nativeResult === 'string'
+        ? nativeResult
+        : (nativeResult?.base64_image || nativeResult?.base64);
+      if (base64Data && typeof base64Data === 'string' && base64Data.length > 100) {
         return {
-          base64Data: nativeResult.base64_image,
+          base64Data,
           mimeType: 'image/png',
           timestamp,
-          width: nativeResult.width || 1920,
-          height: nativeResult.height || 1080,
+          width: nativeResult?.width || 1920,
+          height: nativeResult?.height || 1080,
           isRealScreen: true
         };
       }
-    } catch (err) {
-      console.warn('[ScreenCapture] Erro no comando nativo do Tauri, recorrendo a Web API:', err);
+    } catch {
+      // comando não implementado ou erro — tenta via backend local abaixo
+    }
+  }
+
+  // 1.5. Caminho BACKEND LOCAL: Executa a ferramenta nativa real pc_take_screenshot no host
+  try {
+    const baseUrl = typeof window !== 'undefined' && window.location?.origin?.startsWith('http')
+      ? (window.location.port === '3000' ? '' : 'http://localhost:3000')
+      : 'http://localhost:3000';
+    const res = await fetch(`${baseUrl}/api/tools/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-liora-ui-consent': 'operator-direct-voice'
+      },
+      body: JSON.stringify({
+        toolName: 'pc_take_screenshot',
+        parameters: { format: 'jpeg' }
+      })
+    });
+    if (res.ok) {
+      const body = await res.json().catch(() => null);
+      const data = body?.data ?? body;
+      const b64 = data?.base64 || data?.base64Data;
+      if (b64 && typeof b64 === 'string' && b64.length > 100) {
+        return {
+          base64Data: b64,
+          mimeType: data?.mimeType || 'image/jpeg',
+          timestamp,
+          width: data?.width || 1920,
+          height: data?.height || 1080,
+          isRealScreen: !data?.simulated
+        };
+      }
+    }
+  } catch {
+    // Servidor inacessível ou falha na ferramenta, prossegue para os fallbacks
+  }
+
+  // 1.6. Caminho NODE/HOST DIRETO: Se executando no Node/testes ou sem servidor HTTP ativo
+  if (typeof window === 'undefined') {
+    try {
+      const { pcTakeScreenshotTool } = await import('./pcControlTools');
+      const r = await pcTakeScreenshotTool.execute({ format: 'jpeg' });
+      if (r && r.success && r.base64) {
+        return {
+          base64Data: r.base64,
+          mimeType: r.mimeType || 'image/jpeg',
+          timestamp,
+          width: 1920,
+          height: 1080,
+          isRealScreen: !r.simulated
+        };
+      }
+    } catch {
+      // prossegue para os fallbacks
     }
   }
 

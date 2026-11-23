@@ -96,6 +96,25 @@ const CONCEPT_ANCHORS: Record<string, { cluster: string; keywords: string[]; dim
 
 const VECTOR_DIMENSIONS = 32;
 
+const ANCORAS = Object.values(CONCEPT_ANCHORS);
+
+/**
+ * Regexes de fronteira de palavra por palavra-chave, compiladas UMA vez.
+ * Antes eram recriadas (~100 RegExp) a cada `generateEmbedding` não cacheado,
+ * ou seja, uma vez por entrada de memória em cada busca.
+ */
+const ANCHOR_REGEX_CACHE = new Map<string, RegExp>();
+
+function getAnchorRegex(keyword: string): RegExp {
+  let re = ANCHOR_REGEX_CACHE.get(keyword);
+  if (!re) {
+    const escapedKw = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|[^a-z0-9_])${escapedKw}(?:$|[^a-z0-9_])`);
+    ANCHOR_REGEX_CACHE.set(keyword, re);
+  }
+  return re;
+}
+
 /**
  * Motor de Busca Semântica e Embeddings Locais da LIORA
  * Permite encontrar memórias por afinidade conceitual mesmo que os termos exatos não coincidam.
@@ -140,12 +159,10 @@ class SemanticMemoryEngine {
     }
 
     // 2. Ativação de âncoras conceituais (Semantic Anchors com fronteira de palavra)
-    for (const anchor of Object.values(CONCEPT_ANCHORS)) {
+    for (const anchor of ANCORAS) {
       let anchorHits = 0;
       for (const kw of anchor.keywords) {
-        const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const re = new RegExp(`(?:^|[^a-z0-9_])${escapedKw}(?:$|[^a-z0-9_])`);
-        if (re.test(normalized)) {
+        if (getAnchorRegex(kw).test(normalized)) {
           anchorHits += 1.5;
         }
       }
@@ -202,7 +219,7 @@ class SemanticMemoryEngine {
     let bestCluster = 'Geral';
     let maxHits = 0;
 
-    for (const anchor of Object.values(CONCEPT_ANCHORS)) {
+    for (const anchor of ANCORAS) {
       let hits = 0;
       for (const kw of anchor.keywords) {
         if (text.includes(kw)) hits++;

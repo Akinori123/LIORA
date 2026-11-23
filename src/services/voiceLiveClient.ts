@@ -9,8 +9,21 @@ import { speechService } from './speechService';
 import { audioGate } from './audioGate';
 import { eventBus } from '../utils/eventBus';
 import { rankMemories, formatMemoryContextBlock } from '../utils/memoryRanker';
+import { auditLogger } from '../security/auditLogger';
+import { createAudioChunkProcessor, AudioChunkProcessor } from '../utils/audioProcessor';
 import type { MemoryEntry } from '../types';
 import { useLioraStore, LIORA_SYSTEM_INSTRUCTION } from '../store/lioraStore';
+
+/**
+ * Marca (por sessão de chat) se a última resposta foi dada pelo canal Gemini Live.
+ * O `lioraStore` usa isto para NÃO sintetizar outra voz por cima do áudio Live —
+ * era a causa da "voz dupla" (offline + API) alternando a cada frase.
+ */
+export function markLiveVoiceAnsweredForChat(sessionId: string): void {
+  try {
+    useLioraStore.getState().markLiveVoiceAnswered(sessionId || 'default-session');
+  } catch {}
+}
 
 export type VoiceLiveStatus = 'IDLE' | 'CONNECTING' | 'LISTENING' | 'SPEAKING' | 'ERROR';
 
@@ -57,6 +70,15 @@ export function pcmBase64ToFloat32(base64: string): Float32Array {
 }
 
 /**
+ * Janela de atenção após ser chamada pelo nome: enquanto durar, a LIORA escuta
+ * comandos normalmente. Expira para não voltar ao modo "escuta tudo".
+ */
+const ATTENTION_WINDOW_MS = 25_000;
+
+/** Nomes/pronomes que fazem a LIORA acordar no modo mãos-livres. */
+const WAKE_WORD_REGEX = /\b(l+i+o+r+a+|li\s*ora|l[e3]\s*ora|l[i1]\s*[e3]ora|leora|lyora|oi\s+l[i1e3]\w*|ei\s+l[i1e3]\w*|ol[aá]\s+l[i1e3]\w*|fala\s+l[i1e3]\w*)\b/i;
+
+/**
  * Cliente WebSocket multimodal nativo para voz em tempo real (Gemini Live API).
  * Compatível com o runtime do desktop Tauri e navegadores modernos.
  */
@@ -66,6 +88,8 @@ export class VoiceLiveClient {
   private outputAudioCtx: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private scriptProcessor: ScriptProcessorNode | null = null;
+  // Processador moderno (AudioWorklet) ou fallback legado — ver utils/audioProcessor
+  private micChunkProcessor: AudioChunkProcessor | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
   private zeroGain: GainNode | null = null; // BUG FIX: nó de grafo rastreado para disconnect
 
@@ -75,9 +99,81 @@ export class VoiceLiveClient {
   private config: VoiceLiveConfig = {};
   private nextStartTime = 0;
   private activeSources: AudioBufferSourceNode[] = [];
-  private lastUserTranscript = '';
   private isSimulatedMode = false;
   private lastLogTime = 0;
+  /**
+   * Ativa o modo atenção manualmente (botão do mic). Ao ligar a voz, o usuário
+   * espera que a próxima fala seja atendida — sem precisar dizer "LIORA".
+   */
+  public primeAttention(): void {
+    this.attentionActive = true;
+    this.attentionActivatedAt = Date.now();
+  }
+
+  /** Desliga a atenção (ex: usuário desativou a voz ou trocou de app/aba). */
+  public clearAttention(): void {
+    this.attentionActive = false;
+    this.lastUserTranscript = '';
+  }
+
+  public isAttentionActive(): boolean {
+    return this.attentionActive && Date.now() - this.attentionActivatedAt <= ATTENTION_WINDOW_MS;
+  }
+
+  /**
+   * Recebe a transcrição local (Web Speech) para decidir se a fala era dirigida
+   * à LIORA. Só isso decide se o áudio do microfone segue para o Gemini Live.
+   */
+  public feedUserTranscript(text: string): void {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    this.lastUserTranscript = clean;
+    if (WAKE_WORD_REGEX.test(clean)) {
+      this.attentionActive = true;
+      this.attentionActivatedAt = Date.now();
+    }
+  }
+
+  /** Verdadeiro quando a fala transcrita chama a LIORA pelo nome. */
+  public isWakeWordHeard(text: string): boolean {
+    return WAKE_WORD_REGEX.test(String(text || ''));
+  }
+
+  /**
+   * Fim de uma frase ditada pelo Mestre (Web Speech `isFinal`). Limpa a última
+   * transcrição usada pelo gate de atenção para que o PRÓXIMO áudio não seja
+   * bloqueado por um texto antigo que já foi atendido.
+   */
+  public clearUserTranscript(): void {
+    this.lastUserTranscript = '';
+  }
+
+  /**
+   * Diagnóstico do canal de voz (usado pelo painel/DevTools): mostra sem ambiguidade
+   * por que o áudio está sendo enviado ou bloqueado.
+   */
+  public getAttentionDiagnostics() {
+    return {
+      status: this.status,
+      attentionActive: this.isAttentionActive(),
+      attentionRaw: this.attentionActive,
+      lastHeard: this.lastUserTranscript,
+      suppressionRemainingMs: Math.max(0, this.suppressAudioUntil - Date.now()),
+      wsOpen: this.ws ? this.ws.readyState === WebSocket.OPEN : false,
+      simulated: this.isSimulatedMode
+    };
+  }
+
+  private speakingStartedAt = 0;
+  /** Evita spammar audioStreamEnd no mesmo turno da LIORA (reset em cada SPEAKING). */
+  private streamEndSentForCurrentTurn = false;
+  private consecutiveBargeInFrames = 0;
+  // ── Gate de atenção (wake word) ───────────────────────────────────────────
+  // Impede que a LIORA responda a TV/vídeos/outras pessoas. Fica ativo após o
+  // usuário ser chamado pelo nome OU ativar a voz manualmente; expira sozinho.
+  private attentionActive = false;
+  private attentionActivatedAt = 0;
+  private lastUserTranscript = '';
   // Flag: quando um comando determinístico é interceptado no onTranscription,
   // suprime o áudio do modelo que chega em seguida (evita voz dupla).
   private suppressAudioUntil = 0;
@@ -135,32 +231,38 @@ export class VoiceLiveClient {
     };
   }
 
+  /**
+   * Despacha um callback para o listener principal e para todos os assinantes,
+   * isolando exceções de cada consumidor (um erro não derruba os demais).
+   */
+  private emit<K extends 'onStatusChange' | 'onAudioLevel' | 'onTranscription' | 'onError'>(
+    key: K,
+    ...args: Parameters<NonNullable<VoiceLiveCallbacks[K]>>
+  ) {
+    const call = (cb?: VoiceLiveCallbacks[K]) => {
+      if (!cb) return;
+      try {
+        (cb as (...a: Parameters<NonNullable<VoiceLiveCallbacks[K]>>) => void)(...args);
+      } catch {}
+    };
+    call(this.callbacks[key]);
+    this.subscribers.forEach((sub) => call(sub[key]));
+  }
+
   private emitStatusChange(status: VoiceLiveStatus) {
-    try { this.callbacks.onStatusChange?.(status); } catch {}
-    this.subscribers.forEach((sub) => {
-      try { sub.onStatusChange?.(status); } catch {}
-    });
+    this.emit('onStatusChange', status);
   }
 
   private emitAudioLevel(level: number) {
-    try { this.callbacks.onAudioLevel?.(level); } catch {}
-    this.subscribers.forEach((sub) => {
-      try { sub.onAudioLevel?.(level); } catch {}
-    });
+    this.emit('onAudioLevel', level);
   }
 
   private emitTranscription(text: string, role: 'user' | 'model') {
-    try { this.callbacks.onTranscription?.(text, role); } catch {}
-    this.subscribers.forEach((sub) => {
-      try { sub.onTranscription?.(text, role); } catch {}
-    });
+    this.emit('onTranscription', text, role);
   }
 
   private emitError(errMsg: string) {
-    try { this.callbacks.onError?.(errMsg); } catch {}
-    this.subscribers.forEach((sub) => {
-      try { sub.onError?.(errMsg); } catch {}
-    });
+    this.emit('onError', errMsg);
   }
 
   public setVoice(voice: 'Aoede' | 'Puck' | 'Charon' | 'Kore' | 'Fenrir') {
@@ -201,6 +303,13 @@ export class VoiceLiveClient {
 
   private setStatus(newStatus: VoiceLiveStatus) {
     this.status = newStatus;
+    if (newStatus === 'SPEAKING') {
+      this.speakingStartedAt = Date.now();
+      this.streamEndSentForCurrentTurn = false;
+      this.consecutiveBargeInFrames = 0;
+    } else {
+      this.consecutiveBargeInFrames = 0;
+    }
     if (newStatus === 'CONNECTING' || newStatus === 'LISTENING' || newStatus === 'SPEAKING') {
       audioGate.setLiveSessionActive(true);
     } else {
@@ -273,7 +382,14 @@ export class VoiceLiveClient {
           if (settled) return;
           settled = true;
           cleanupListeners();
-          try { this.ws?.close(); } catch {}
+          try {
+            if (this.ws?.readyState === WebSocket.OPEN) {
+              this.ws.close();
+            } else if (this.ws?.readyState === WebSocket.CONNECTING) {
+              const pendingWs = this.ws;
+              pendingWs.onopen = () => { try { pendingWs.close(); } catch {} };
+            }
+          } catch {}
           reject(new Error('Tempo limite de conexão ao canal de voz excedido.'));
         }, 10000);
 
@@ -306,9 +422,36 @@ export class VoiceLiveClient {
 
       this.setupWebSocketListeners();
 
-      // 2. Enviar solicitação START_LIVE (payload higienizado montado por método
-      // dedicado — reutilizado na reconexão automática R3)
+      // 2. Enviar solicitação START_LIVE e aguardar confirmação GEMINI_LIVE_READY do backend
+      const liveReadyPromise = new Promise<void>((resolve, reject) => {
+        const readyTimeout = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, 10000);
+
+        const onMsg = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'GEMINI_LIVE_READY') {
+              cleanup();
+              resolve();
+            } else if (data.type === 'GEMINI_LIVE_ERROR') {
+              cleanup();
+              reject(new Error(data.message || 'Falha ao conectar à sessão Gemini Live.'));
+            }
+          } catch {}
+        };
+
+        const cleanup = () => {
+          clearTimeout(readyTimeout);
+          this.ws?.removeEventListener('message', onMsg);
+        };
+
+        this.ws?.addEventListener('message', onMsg);
+      });
+
       this.sendStartLive();
+      await liveReadyPromise;
 
       // 3. Inicializar saída de áudio (AudioContext 24kHz)
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -367,7 +510,8 @@ export class VoiceLiveClient {
 
     // R3: chave SEMPRE re-resolvida do cofre (nunca cacheada entre sessões —
     // o usuário pode ter rotacionado a chave enquanto a sessão estava aberta)
-    const geminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
+    const rawGeminiKey = integrationsVault.getApiKeyByProvider('gemini') || integrationsVault.getRawKey('svc-gemini');
+    const geminiKey = rawGeminiKey ? String(rawGeminiKey).trim().replace(/^['"]|['"]$/g, '') : undefined;
 
     // Injeção de Memória de Curto Prazo (Histórico de Diálogos e Comandos Recentes)
     const storeState = useLioraStore.getState();
@@ -394,9 +538,40 @@ export class VoiceLiveClient {
       model: this.config.model || 'gemini-3.8-live',
       voice: this.config.voice || 'Aoede',
       apiKey: geminiKey || undefined,
+      // Gemini Live aceita estritamente ['AUDIO'] em responseModalities.
+      // A combinação ['TEXT', 'AUDIO'] encerra a conexão no Google com código 1007.
+      responseModalities: ['AUDIO'],
       systemInstruction: enrichedInstruction,
-      tools: toolRegistry.listTools()
+      // CORREÇÃO (payload inútil): o servidor ignora `tools` e sempre registra o
+      // ToolRegistry REAL (`toGeminiDeclarations`, com schemas válidos para o Gemini).
+      // Antes enviávamos `toolRegistry.listTools()` — todo o catálogo com schemas
+      // internos — em cada START_LIVE/reconexão, gastando banda e enganando quem
+      // lesse o protocolo achando que a lista do cliente era a usada.
     }));
+  }
+
+  /**
+   * Envia uma mensagem de texto (transcrição do Web Speech ou prompt do usuário)
+   * diretamente para a sessão Gemini Live ativa. Garante resposta mesmo quando
+   * o microfone PCM estiver em volume baixo ou o VAD acústico da nuvem hesitar.
+   */
+  public sendLiveMessage(text: string): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    const clean = String(text || '').trim();
+    if (!clean) return false;
+    try {
+      this.ws.send(JSON.stringify({
+        type: 'LIVE_MESSAGE',
+        text: clean,
+        timestamp: new Date().toISOString()
+      }));
+      this.attentionActive = true;
+      this.attentionActivatedAt = Date.now();
+      return true;
+    } catch (err) {
+      console.warn('[VoiceLiveClient] Falha ao enviar LIVE_MESSAGE:', err);
+      return false;
+    }
   }
 
   /**
@@ -584,15 +759,21 @@ export class VoiceLiveClient {
       if (activeStream && activeStream.active && activeStream.getAudioTracks().some(t => t.readyState === 'live')) {
         this.mediaStream = activeStream;
       } else {
-        this.mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 16000,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
-        });
+        try {
+          this.mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 16000,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+        } catch (mediaErr: any) {
+          console.info('[VoiceLiveClient] Microfone físico não disponível ou ocupado. Operando em modo de espera.');
+          this.isSimulatedMode = true;
+          return;
+        }
       }
 
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -606,17 +787,14 @@ export class VoiceLiveClient {
       }
 
       this.micSource = this.inputAudioCtx.createMediaStreamSource(this.mediaStream);
-      // FIX W3 (preparação para AudioWorklet): buffer de 2048 amostras ~ 128ms por chunk em 16kHz.
-      // O AudioWorklet migraria o processamento para um thread de áudio dedicado, eliminando o jank
-      // da thread principal. Manteremos a estrutura do onaudioprocess intocada até uma migração
-      // segura (precisa de public/wasm/worklet module e refatoração de pipeline de envio).
-      this.scriptProcessor = this.inputAudioCtx.createScriptProcessor(2048, 1, 1);
 
-      this.scriptProcessor.onaudioprocess = (e) => {
+      // CORREÇÃO (depreciação): AudioWorklet (thread de áudio dedicada) com
+      // fallback automático para ScriptProcessor em WebViews antigos. O callback
+      // recebe blocos de 2048 amostras exatamente como antes — o pipeline de envio
+      // para o Gemini Live permanece idêntico.
+      const handleMicChunk = (channelData: Float32Array) => {
         if (this.status !== 'LISTENING' && this.status !== 'SPEAKING') return;
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-        const channelData = e.inputBuffer.getChannelData(0);
 
         // Calcular volume médio (RMS) para indicador visual
         let sumSquares = 0;
@@ -627,26 +805,76 @@ export class VoiceLiveClient {
         const volumeLevel = Math.min(1, rms * 5);
         this.emitAudioLevel(volumeLevel);
 
-        // Detecção de Barge-In Acústico Local (Interrupção Instantânea em 0ms)
-        if (this.status === 'SPEAKING' && (volumeLevel >= 0.15 || rms >= 0.028)) {
-          console.log('[VoiceLiveClient Barge-In] Voz do usuário detectada durante fala da LIORA. Interrompendo reprodução imediatamente.');
-          this.stopAudioPlayback();
-          this.setStatus('LISTENING');
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            try {
-              this.ws.send(JSON.stringify({ type: 'CLIENT_INTERRUPTED', timestamp: new Date().toISOString() }));
-            } catch {}
+        /**
+         * GATE DE ATENÇÃO (relato de campo): "ela escutou o streamer do vídeo e
+         * falou com ele". O microfone é um loop aberto — TODO som ambiente ia para
+         * o Gemini Live, que respondia a qualquer voz (TV, YouTube, outra pessoa).
+         *
+         * Regra: a LIORA só fica "atenta" depois de:
+         *  - o usuário ativar a voz manualmente (ativação = resposta ao próximo fala), ou
+         *  - ser chamada pelo nome ("LIORA", "Liora", "Oi Liora").
+         * Depois de responder, volta a dormir até ser chamada novamente.
+         * A checagem usa o Web Speech (transcrição local) — sem custo de API.
+         */
+        if (!this.attentionActive) {
+          // ATENÇÃO GRANT/DENY (bug de campo: "ouve o primeiro comando e depois para").
+          // O gate usava `lastUserTranscript`, que só é preenchido por TRANSCRIPTION do
+          // servidor. Quando a transcrição não chega (ou a Web Speech API não existe no
+          // WebView2), a atenção expira e NADA mais é enviado ao Gemini para sempre.
+          // Agora:
+          //  - fala reconhecida pelo Web Speech sem o nome = ruído de ambiente → bloqueia;
+          //  - qualquer outro caso (sem transcrição confiável, ou com o nome) libera;
+          //  - o fim da fala da LIORA reabre a janela (ver source.onended), então o
+          //    operador pode continuar a conversa sem repetir o wake word.
+          // Alias de pronúncia: o Web Speech grava "leora"/"Leora" para o nome
+          // falado — a comparação é feita também pelo texto falado literalmente.
+          const heard = String(this.lastUserTranscript || '').trim();
+          if (heard && !this.isWakeWordHeard(heard)) return;
+          this.attentionActive = true;
+          this.attentionActivatedAt = Date.now();
+        }
+        // Janela de atenção expira (sem fala dirigida a ela) → volta a dormir.
+        if (this.attentionActive && Date.now() - this.attentionActivatedAt > ATTENTION_WINDOW_MS) {
+          this.attentionActive = false;
+          return;
+        }
+
+        // Anti-Echo / Duplex Shield & Barge-In Acústico Calibrado:
+        // Enquanto a LIORA fala, o som sai pelos alto-falantes e é captado pelo microfone.
+        if (this.status === 'SPEAKING') {
+          // Grace period inicial de 1200ms para evitar que o início da fala seja cortado pelo eco do alto-falante.
+          // Após 1200ms, exige intensidade proposital (volumeLevel >= 0.50 e RMS >= 0.085) por ao menos 3 frames consecutivos (~380ms).
+          const timeSinceStart = Date.now() - this.speakingStartedAt;
+          if (timeSinceStart > 1200 && (volumeLevel >= 0.50 || rms >= 0.085)) {
+            this.consecutiveBargeInFrames += 1;
+            if (this.consecutiveBargeInFrames >= 3) {
+              console.log('[VoiceLiveClient Barge-In] Interrupção deliberada do usuário detectada. Interrompendo reprodução.');
+              this.stopAudioPlayback();
+              this.setStatus('LISTENING');
+              this.consecutiveBargeInFrames = 0;
+              if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try {
+                  this.ws.send(JSON.stringify({ type: 'CLIENT_INTERRUPTED', timestamp: new Date().toISOString() }));
+                } catch {}
+              }
+            }
+          } else {
+            this.consecutiveBargeInFrames = 0;
           }
+
+          // REGRA DE OURO: enquanto a LIORA fala, NÃO enviamos áudio do microfone para o Gemini Live.
+          // Isso impede que a IA escute a si mesma pelo alto-falante e se auto-interrompa.
+          return;
         }
 
         // Converter para 16-bit PCM little-endian
         const pcm16 = floatTo16BitPCM(channelData);
         const binaryChunk = new Uint8Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength);
 
-        // Log detalhado de intensidade de áudio (throttled a cada ~1 segundo)
-        if (!this.lastLogTime || Date.now() - this.lastLogTime > 1000) {
+        // Log de intensidade de áudio (silenciado em produção para não poluir o console)
+        if (typeof window !== 'undefined' && (window as any).__LIORA_DEBUG_AUDIO__ && (!this.lastLogTime || Date.now() - this.lastLogTime > 5000)) {
           this.lastLogTime = Date.now();
-          console.log(`[VoiceLiveClient] 🎤 [LIVE MODE] Microfone Ativo | RMS: ${rms.toFixed(5)} | Intensidade: ${Math.round(volumeLevel * 100)}% | Chunks enviados: ${binaryChunk.byteLength} bytes | Status WS: ${this.ws?.readyState === WebSocket.OPEN ? 'CONECTADO' : 'DESCONECTADO'}`);
+          console.debug(`[VoiceLiveClient] 🎤 Microfone Ativo | RMS: ${rms.toFixed(5)} | Status WS: ${this.ws?.readyState === WebSocket.OPEN ? 'CONECTADO' : 'DESCONECTADO'}`);
         }
 
         // Despachar chunk de áudio binário respeitando o limite seguro (< 64KB)
@@ -663,21 +891,24 @@ export class VoiceLiveClient {
         }
       };
 
-      this.micSource.connect(this.scriptProcessor);
-      // Blindagem absoluta contra microfonia e loop de áudio: nó de ganho zerado.
-      // BUG FIX (leak de grafo): guardamos o zeroGain para disconnect no cleanup —
-      // sem isso o nó permanecia conectado ao destination a cada sessão,
-      // acumulando nós no grafo de áudio do WebView (degradação progressiva).
-      this.zeroGain = this.inputAudioCtx.createGain();
-      this.zeroGain.gain.value = 0;
-      this.scriptProcessor.connect(this.zeroGain);
-      this.zeroGain.connect(this.inputAudioCtx.destination);
+      this.micChunkProcessor = await createAudioChunkProcessor(this.inputAudioCtx, 2048, handleMicChunk);
+      this.micChunkProcessor.connect(this.micSource);
 
     } catch (micErr: any) {
       console.warn('[VoiceLiveClient] Permissão de microfone negada ou indisponível:', micErr);
       this.isSimulatedMode = true;
       this.emitError('Microfone inacessível. Verifique as permissões de gravação de áudio do sistema.');
     }
+  }
+
+  /**
+   * Registra no store que a conversa atual foi atendida pelo canal Live (voz única).
+   */
+  private markCurrentChatAnsweredByLive(): void {
+    try {
+      const sessionId = useLioraStore.getState().activeSessionId;
+      useLioraStore.getState().markLiveVoiceAnswered(sessionId || 'default-session');
+    } catch {}
   }
 
   /**
@@ -694,6 +925,9 @@ export class VoiceLiveClient {
       const float32 = pcmBase64ToFloat32(base64Pcm);
       if (!float32 || float32.length === 0) return;
       this.setStatus('SPEAKING');
+      // Marca a conversa como respondida pelo Live: o chat (HTTP/TTS) não deve
+      // sintetizar outra voz para a mesma fala — fim da alternância offline/API.
+      this.markCurrentChatAnsweredByLive();
       const audioBuffer = this.outputAudioCtx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
 
@@ -713,15 +947,33 @@ export class VoiceLiveClient {
           this.activeSources.splice(index, 1);
         }
         if (this.activeSources.length === 0) {
-          audioGate.releaseChannel('live_ws');
-          if (this.status === 'SPEAKING') {
-            this.setStatus('LISTENING');
-          }
+          // Pequena margem (150ms) para acomodar chunks de áudio recebidos em fluxo contínuo
+          setTimeout(() => {
+            if (this.activeSources.length === 0 && this.status === 'SPEAKING') {
+              audioGate.releaseChannel('live_ws');
+              this.setStatus('LISTENING');
+              // Fim do turno da LIORA: reabre a janela de atenção para que o Mestre
+              // continue falando sem precisar repetir o nome a cada resposta.
+              this.attentionActive = true;
+              this.attentionActivatedAt = Date.now();
+            }
+          }, 150);
         }
       };
     } catch (e) {
       console.error('[VoiceLiveClient] Erro ao reproduzir áudio do modelo:', e);
     }
+  }
+
+  /**
+   * Sinaliza ao servidor que a fala do Mestre terminou (audioStreamEnd), para o
+   * Gemini processar o áudio já enviado em vez de esperar indefinidamente.
+   */
+  public sendAudioStreamEnd(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      this.ws.send(JSON.stringify({ type: 'CLIENT_INTERRUPTED', timestamp: new Date().toISOString() }));
+    } catch {}
   }
 
   /**
@@ -773,6 +1025,15 @@ export class VoiceLiveClient {
         // ignore
       }
       this.scriptProcessor = null;
+    }
+
+    if (this.micChunkProcessor) {
+      try {
+        this.micChunkProcessor.dispose();
+      } catch (e) {
+        // ignore
+      }
+      this.micChunkProcessor = null;
     }
 
     if (this.micSource) {
@@ -843,7 +1104,10 @@ export class VoiceLiveClient {
           this.ws.send(JSON.stringify({ type: 'STOP_LIVE' }));
           this.ws.close();
         } else if (this.ws.readyState === WebSocket.CONNECTING) {
-          this.ws.close();
+          const connectingWs = this.ws;
+          connectingWs.onopen = () => {
+            try { connectingWs.close(); } catch {}
+          };
         }
       } catch (e) {
         // ignore

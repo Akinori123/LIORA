@@ -21,6 +21,7 @@ import { CockpitHUDView } from './components/views/CockpitHUDView';
 import { QuickOverlay } from './components/QuickOverlay';
 import { GlobalVoiceBar } from './components/GlobalVoiceBar';
 import { GlobalConsentOverlay } from './components/chat/GlobalConsentOverlay';
+import { GestureHUDMount } from './components/gesture/GestureHUDMount';
 import { automationsEngine } from './services/automationsEngine';
 
 interface ErrorBoundaryProps {
@@ -72,14 +73,15 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 }
 
 export default function App() {
-  const { activeTab, loadSettings, loadServices, syncToolPolicies, setActiveTab, sendMessage } = useLioraStore(
+  const { activeTab, loadSettings, loadServices, syncToolPolicies, setActiveTab, sendMessage, settings } = useLioraStore(
     useShallow((s) => ({
       activeTab: s.activeTab,
       loadSettings: s.loadSettings,
       loadServices: s.loadServices,
       syncToolPolicies: s.syncToolPolicies,
       setActiveTab: s.setActiveTab,
-      sendMessage: s.sendMessage
+      sendMessage: s.sendMessage,
+      settings: s.settings
     }))
   );
   const [isQuickOverlayOpen, setIsQuickOverlayOpen] = React.useState(false);
@@ -183,6 +185,10 @@ export default function App() {
       {/* P1: overlay global de consentimento R1+ — visível em qualquer aba e
           aceitável por voz ("confirmar"/"cancelar") quando o mic está ativo */}
       <GlobalConsentOverlay />
+      {/* Visão Computacional: HUD + prévia da câmera, ISOLADOS em boundary
+          (uma exceção no loop de vídeo não pode derrubar a árvore React inteira).
+          A prévia continua só na aba Início — indispensável para calibrar. */}
+      <GestureHUDMount />
     </div>
   );
 }

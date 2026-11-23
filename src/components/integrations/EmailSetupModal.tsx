@@ -173,11 +173,13 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
         <form onSubmit={handleSubmit} className="p-4 space-y-4">
           {/* Preset de provedor */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+            <label htmlFor="email-setup-provider" className="block text-[11px] font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
               Provedor
             </label>
             <div className="relative">
               <select
+                id="email-setup-provider"
+                name="email-setup-provider"
                 value={presetId}
                 onChange={(e) => applyPreset(e.target.value)}
                 className="w-full appearance-none bg-[#171717] border border-[#333333] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[var(--accent-primary)] pr-9"
@@ -195,10 +197,12 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
 
           {/* E-mail */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+            <label htmlFor="email-setup-address" className="block text-[11px] font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
               Endereço de E-mail
             </label>
             <input
+              id="email-setup-address"
+              name="email-setup-address"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -210,11 +214,13 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
 
           {/* Senha */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
+            <label htmlFor="email-setup-password" className="block text-[11px] font-semibold uppercase tracking-wider text-[#A8A8A8] mb-1.5">
               Senha / Senha de Aplicativo
             </label>
             <div className="relative">
               <input
+                id="email-setup-password"
+                name="email-setup-password"
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -247,8 +253,10 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
             </summary>
             <div className="grid grid-cols-2 gap-2 mt-2">
               <div>
-                <label className="block text-[10px] text-[#888888] mb-1">Servidor IMAP</label>
+                <label htmlFor="email-setup-imap-host" className="block text-[10px] text-[#888888] mb-1">Servidor IMAP</label>
                 <input
+                  id="email-setup-imap-host"
+                  name="email-setup-imap-host"
                   type="text"
                   value={imapHost}
                   onChange={(e) => setImapHost(e.target.value)}
@@ -257,8 +265,10 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-[#888888] mb-1">Porta IMAP</label>
+                <label htmlFor="email-setup-imap-port" className="block text-[10px] text-[#888888] mb-1">Porta IMAP</label>
                 <input
+                  id="email-setup-imap-port"
+                  name="email-setup-imap-port"
                   type="number"
                   value={imapPort}
                   onChange={(e) => setImapPort(e.target.value)}
@@ -267,8 +277,10 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-[#888888] mb-1">Servidor SMTP</label>
+                <label htmlFor="email-setup-smtp-host" className="block text-[10px] text-[#888888] mb-1">Servidor SMTP</label>
                 <input
+                  id="email-setup-smtp-host"
+                  name="email-setup-smtp-host"
                   type="text"
                   value={smtpHost}
                   onChange={(e) => setSmtpHost(e.target.value)}
@@ -277,8 +289,10 @@ export const EmailSetupModal: React.FC<EmailSetupModalProps> = ({ isOpen, onClos
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-[#888888] mb-1">Porta SMTP</label>
+                <label htmlFor="email-setup-smtp-port" className="block text-[10px] text-[#888888] mb-1">Porta SMTP</label>
                 <input
+                  id="email-setup-smtp-port"
+                  name="email-setup-smtp-port"
                   type="number"
                   value={smtpPort}
                   onChange={(e) => setSmtpPort(e.target.value)}

@@ -27,8 +27,13 @@ import {
   X,
   Lock,
   Terminal,
-  Maximize2
+  Maximize2,
+  Camera,
+  Hand,
+  ScanEye
 } from 'lucide-react';
+import { gestureService } from '../../services/gestureService';
+import { invokeTauri, isTauriEnvironment } from '../../security/localBridge';
 
 export const HomeView: React.FC = () => {
   const { 
@@ -48,7 +53,13 @@ export const HomeView: React.FC = () => {
     executeTool,
     addActivityLog,
     services,
-    syncServicesFromEnv
+    syncServicesFromEnv,
+    settings,
+    updateSettings,
+    isHomeMinimized,
+    setHomeMinimized,
+    toggleHomeMinimized,
+    toggleShieldMode
   } = useLioraStore(
     useShallow((s) => ({
       orbState: s.orbState,
@@ -67,13 +78,23 @@ export const HomeView: React.FC = () => {
       executeTool: s.executeTool,
       addActivityLog: s.addActivityLog,
       services: s.services,
-      syncServicesFromEnv: s.syncServicesFromEnv
+      syncServicesFromEnv: s.syncServicesFromEnv,
+      settings: s.settings,
+      updateSettings: s.updateSettings,
+      isHomeMinimized: s.isHomeMinimized,
+      setHomeMinimized: s.setHomeMinimized,
+      toggleHomeMinimized: s.toggleHomeMinimized,
+      toggleShieldMode: s.toggleShieldMode
     }))
   );
 
+  // O badge de gestos precisa saber se o toast do Intent Router está visível
+  // para não cobri-lo (ele fica logo acima da barra de chat).
+  const [isHomeToastVisible, setIsHomeToastVisible] = useState(false);
+
+  const isMinimized = isHomeMinimized;
   const [promptInput, setPromptInput] = useState('');
   const [audioGain, setAudioGain] = useState(0);
-  const [isMinimized, setIsMinimized] = useState(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [openRouterKeyInput, setOpenRouterKeyInput] = useState('');
@@ -95,6 +116,15 @@ export const HomeView: React.FC = () => {
   const [ramUsage, setRamUsage] = useState<number>(35.0);
   const [activeIntegrationsCount, setActiveIntegrationsCount] = useState<number>(0);
   const [intentNotification, setIntentNotification] = useState<string | null>(null);
+
+  // O HUD de gestos (overlay global) precisa saber se o toast está visível para
+  // se reposicionar acima dele em vez de cobri-lo.
+  useEffect(() => {
+    useLioraStore.setState({ isHomeToastVisible: Boolean(intentNotification) });
+    return () => {
+      useLioraStore.setState({ isHomeToastVisible: false });
+    };
+  }, [intentNotification]);
   // Auditoria de mapeamento: estado do teste REAL do canal WebSocket /ws/voice
   // (antes o card "Live WS" exibia 'Pronto' fixo com setTimeout fake — botão morto)
   const [wsTestResult, setWsTestResult] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
@@ -412,18 +442,44 @@ export const HomeView: React.FC = () => {
         showIntentNotice('Uso: /exec <comando>. Ex: /exec git status', 3500);
         return;
       }
+      const friendlyToolName = 'executar este comando no computador';
       setOrbState('EXECUTING');
       setIntentNotification(`Executando comando real: "${cmd}"`);
       try {
         const result = await executeTool('system_exec_sandbox', { command: cmd });
         if (!isMountedRef.current) return;
+
+        // CORREÇÃO (linguagem humana — AGENTS.md): o toast exibia o código cru
+        // "REQUIRES_USER_CONFIRMATION: confirme a ação no cartão…". Erros de
+        // consentimento/segurança são traduzidos; o resto é a mensagem real.
+        const rawError = String(result.error || '');
+        const needsConsent = (result as any).code === 'REQUIRES_USER_CONFIRMATION' || /REQUIRES_USER_CONFIRMATION/i.test(rawError);
+        if (needsConsent) {
+          setOrbState('IDLE');
+          // O ConsentCard JÁ está aberto na tela (é ele que pede a autorização);
+          // antes o toast dizia "abri o cartão de consentimento", confundindo o
+          // usuário — parecia que outro cartão ia aparecer.
+          showIntentNotice(
+            `Mestre, para ${friendlyToolName}, é só confirmar no cartão acima: diga "autorizar" ou clique em Autorizar.`,
+            7000
+          );
+          return;
+        }
+
         setOrbState(result.success ? 'IDLE' : 'ERROR');
+        const output = String(result.data?.stdout || '').trim();
         showIntentNotice(
           result.success
-            ? `Saída:\n${String((result.data as any)?.stdout || '(sem saída)').slice(0, 400)}`
-            : `Falhou: ${result.error || 'erro desconhecido'}`,
+            ? `Saída:\n${(output || '(sem saída)').slice(0, 400)}`
+            : `Falhou: ${rawError || 'erro desconhecido'}`,
           6000
         );
+
+        // Registra o resultado REAL no histórico (o comando foi digitado na Home,
+        // então sem isso nada ficava registrado — e a LIORA não "via" a saída).
+        if (output) {
+          await sendMessage(`Resultado do comando \`${cmd}\`:\n\n\`\`\`\n${output.slice(0, 2000)}\n\`\`\``);
+        }
       } catch (err: any) {
         if (!isMountedRef.current) return;
         setOrbState('ERROR');
@@ -489,6 +545,96 @@ export const HomeView: React.FC = () => {
     }
   };
 
+  /**
+   * LIGA/DESLIGA a câmera (Visão Computacional da LIORA).
+   * Desacoplado do cursor de gestos: ligar a câmera não faz o mouse sair clicando.
+   */
+  const isCameraActive = Boolean(settings?.cameraEnabled || settings?.gestureControlEnabled);
+  const [isCameraBusy, setIsCameraBusy] = useState(false);
+
+  const handleToggleCamera = async () => {
+    const nextState = !isCameraActive;
+    // O botão fica desabilitado durante a abertura (o getUserMedia pode levar
+    // segundos com câmera de celular). Sem esta trava, o usuário clicava
+    // novamente e, com a câmera já aberta, ela era FECHADA — parecia que o
+    // botão "não funcionava".
+    if (isCameraBusy) return;
+    setIsCameraBusy(true);
+    try {
+      if (nextState) {
+        const hasCam = await gestureService.hasPhysicalCamera();
+        if (!hasCam) {
+          showIntentNotice('Nenhuma webcam encontrada. Conecte a câmera (ou o celular via DroidCam/Iriun) e tente de novo.');
+          return;
+        }
+        // Liga a Câmera para Visão da LIORA (sem forçar o controle por gestos)
+        updateSettings({ cameraEnabled: true });
+        const ok = await gestureService.start();
+        const st = gestureService.getState();
+        if (!ok) {
+          // Não deixar a UI "acesa" se o dispositivo não abriu.
+          updateSettings({ cameraEnabled: false, gestureControlEnabled: false });
+          showIntentNotice(`Câmera não abriu: ${st.error || 'dispositivo indisponível'}`);
+        } else {
+          showIntentNotice('Câmera ativa para visão. Use o botão 🖐️ se quiser mover o mouse com a mão.');
+        }
+        return;
+      }
+      updateSettings({ cameraEnabled: false, gestureControlEnabled: false });
+      gestureService.stop();
+      showIntentNotice('Câmera desligada.');
+    } finally {
+      if (isMountedRef.current) setIsCameraBusy(false);
+    }
+  };
+
+  const handleToggleGestureCursor = async () => {
+    const nextCursor = !settings?.gestureControlEnabled;
+    updateSettings({ gestureControlEnabled: nextCursor });
+    gestureService.setCursorControlEnabled(nextCursor);
+    if (nextCursor && !gestureService.getState().isActive) {
+      // Cursor ligado com a câmera ainda fechada: abre agora (antes o cursor
+      // ficava ligado sem nenhuma captura e a mão nunca era vista).
+      const ok = await gestureService.start();
+      const st = gestureService.getState();
+      if (!ok) {
+        showIntentNotice(`Cursor por gestos ligado, mas a câmera não abriu: ${st.error || 'dispositivo indisponível'}`);
+        return;
+      }
+    }
+    showIntentNotice(nextCursor ? 'Controle por gestos ATIVADO: mova a mão para guiar o cursor.' : 'Controle por gestos DESATIVADO: a câmera apenas observa.');
+  };
+
+  const handleCameraInspect = async () => {
+    if (isGenerating) {
+      showIntentNotice('Aguarde a resposta atual antes de nova captura.');
+      return;
+    }
+    showIntentNotice('Capturando quadro da câmera para inspeção...');
+    try {
+      let snap = gestureService.captureSnapshotBase64();
+      if (!snap) {
+        const started = await gestureService.start();
+        if (!started) {
+          showIntentNotice('Webcam não detectada no PC ou indisponível.');
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 700));
+        snap = gestureService.captureSnapshotBase64();
+      }
+      if (snap) {
+        const text = promptInput.trim() || 'Identifique e descreva com detalhes o que estou mostrando na câmera:';
+        setPromptInput('');
+        await sendMessage(text, { data: snap, mimeType: 'image/jpeg' });
+        showIntentNotice('Imagem enviada para análise visual da LIORA!');
+      } else {
+        showIntentNotice('Não foi possível capturar o quadro da câmera.');
+      }
+    } catch (err: any) {
+      showIntentNotice(`Erro na visão computacional: ${err?.message || err}`);
+    }
+  };
+
   // State-based border and glow classes for the central frame
   const getStateVisualClasses = () => {
     switch (orbState) {
@@ -533,7 +679,7 @@ export const HomeView: React.FC = () => {
           <button
             type="button"
             onClick={() => setIsApiKeyModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#111111]/85 hover:bg-[#1A1A1A] border border-[#222222] text-xs text-[#A8A8A8] hover:text-white transition-all shadow-xl backdrop-blur-md"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#111111]/85 hover:bg-[#1A1A1A] border border-[#222222] text-xs text-[#A8A8A8] hover:text-white transition-all shadow-xl backdrop-blur-md cursor-pointer"
             title="Cofre rápido de chaves de API (.env)"
             aria-label="Abrir cofre rápido de chaves de API"
           >
@@ -543,6 +689,7 @@ export const HomeView: React.FC = () => {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block ml-0.5" />
             )}
           </button>
+
 
           {/* Context & Telemetry Drawer Toggle */}
           <button
@@ -577,9 +724,9 @@ export const HomeView: React.FC = () => {
               size="100%" 
               audioGain={audioGain}
               isMinimized={isMinimized}
-              onSwipeDown={() => setIsMinimized(prev => !prev)}
+              onSwipeDown={() => toggleHomeMinimized()}
               onClick={() => {
-                if (isMinimized) setIsMinimized(false);
+                if (isMinimized) setHomeMinimized(false);
               }}
             />
           </OrbErrorBoundary>
@@ -593,11 +740,18 @@ export const HomeView: React.FC = () => {
             {/* Intent Router Notification Toast */}
             {intentNotification && (
               <div 
-                className="px-3 py-1 rounded-full bg-[#1A1A1A] border text-[11px] font-mono text-white flex items-center gap-2 shadow-2xl animate-in fade-in mb-2"
+                /* Contraste: antes era uma pílula `rounded-full` com texto de 11px
+                   em fonte mono que quebrava em 3 linhas e "vazava" para fora do
+                   fundo arredondado (captura mostrou texto cortado). Agora: bloco
+                   compacto, largura limitada, texto que quebra dentro da caixa e
+                   cores legíveis sobre o fundo escuro. */
+                className="max-w-[92vw] sm:max-w-[560px] px-3 py-2 rounded-xl bg-[#141414]/97 border text-[11.5px] leading-snug font-mono text-[#F2F2F2] flex items-start gap-2 shadow-2xl animate-in fade-in mb-2 whitespace-pre-wrap break-words"
                 style={{ borderColor: 'var(--accent-border)' }}
+                role="status"
+                aria-live="polite"
               >
-                <Terminal className="w-3 h-3" style={{ color: 'var(--accent-primary)' }} />
-                <span>{intentNotification}</span>
+                <Terminal className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
+                <span className="min-w-0">{intentNotification}</span>
               </div>
             )}
 
@@ -608,6 +762,8 @@ export const HomeView: React.FC = () => {
               <div className={`flex items-center gap-2 bg-[#121212]/85 backdrop-blur-2xl rounded-2xl p-2.5 transition-all shadow-2xl ${getStateVisualClasses()}`}>
                 <input
                   ref={inputRef}
+                  id="home-prompt-input"
+                  name="prompt"
                   type="text"
                   value={promptInput}
                   onChange={handleInputChange}
@@ -632,6 +788,60 @@ export const HomeView: React.FC = () => {
                 >
                   <Mic className="w-4 h-4" />
                 </button>
+
+                {/* ── BOTÃO DE CÂMERA (Visão Computacional da LIORA) ── */}
+                <button
+                  type="button"
+                  onClick={() => void handleToggleCamera()}
+                  disabled={isCameraBusy}
+                  aria-pressed={isCameraActive}
+                  className={`p-2.5 rounded-xl transition-all shrink-0 border cursor-pointer ${
+                    isCameraActive
+                      ? 'bg-emerald-950/70 text-emerald-300 border-emerald-600/70'
+                      : 'bg-black/40 hover:bg-black/70 text-[#A8A8A8] hover:text-white border-white/5'
+                  }`}
+                  aria-label={isCameraActive ? 'Desligar câmera' : 'Ligar câmera'}
+                  title={isCameraActive
+                    ? 'Câmera LIGADA — clique para desligar'
+                    : 'Ligar a câmera (Visão Computacional)'}
+                >
+                  <Camera className="w-4 h-4" />
+                </button>
+
+                {/* Botão de Controle do Mouse por Gestos (aparece quando a câmera está ligada) */}
+                {isCameraActive && (
+                  <button
+                    type="button"
+                    onClick={handleToggleGestureCursor}
+                    className={`p-2.5 rounded-xl transition-all shrink-0 border cursor-pointer ${
+                      settings?.gestureControlEnabled
+                        ? 'bg-amber-950/70 text-amber-300 border-amber-600/70 shadow-sm shadow-amber-500/20'
+                        : 'bg-black/50 text-zinc-400 border-zinc-700/60 hover:text-white'
+                    }`}
+                    aria-label="Alternar controle do mouse por gestos"
+                    title={
+                      settings?.gestureControlEnabled
+                        ? 'Cursor de Gestos ATIVADO: sua mão move o mouse e clica. Clique para desligar o cursor.'
+                        : 'Cursor de Gestos DESLIGADO: clique para ativar o cursor do mouse guiado por gestos.'
+                    }
+                  >
+                    <Hand className="w-4 h-4" />
+                  </button>
+                )}
+
+                {/* Análise da câmera — só existe quando a câmera está ligada */}
+                {isCameraActive && (
+                  <button
+                    type="button"
+                    onClick={() => void handleCameraInspect()}
+                    disabled={isGenerating}
+                    className="p-2.5 rounded-xl transition-all shrink-0 border bg-sky-950/50 text-sky-300 border-sky-700/60 hover:bg-sky-900/60 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    aria-label="Analisar o que a câmera está vendo"
+                    title="Analisar: enviar um quadro da câmera para a LIORA descrever"
+                  >
+                    <ScanEye className="w-4 h-4" />
+                  </button>
+                )}
 
                 {/* Send Button */}
                 <button
@@ -730,7 +940,7 @@ export const HomeView: React.FC = () => {
             <span className="text-xs font-mono font-medium text-white">{getStateCopy()}</span>
             <button
               type="button"
-              onClick={() => setIsMinimized(false)}
+              onClick={() => setHomeMinimized(false)}
               aria-label="Expandir interface"
               className="p-1 rounded-full hover:bg-white/10 text-[#A8A8A8] hover:text-white transition-colors"
               title="Expandir interface"
@@ -786,6 +996,8 @@ export const HomeView: React.FC = () => {
                 </div>
                 <div className="flex gap-2">
                   <input
+                    id="home-gemini-key"
+                    name="gemini_api_key"
                     type="password"
                     aria-label="Chave GEMINI_API_KEY"
                     value={geminiKeyInput}
@@ -814,6 +1026,8 @@ export const HomeView: React.FC = () => {
                 </div>
                 <div className="flex gap-2">
                   <input
+                    id="home-openrouter-key"
+                    name="openrouter_api_key"
                     type="password"
                     aria-label="Chave OPENROUTER_API_KEY"
                     value={openRouterKeyInput}
@@ -850,7 +1064,16 @@ export const HomeView: React.FC = () => {
       {/* Right Context & Telemetry Sidebar */}
       {isTelemetryOpen && (
         <aside className="w-full xl:w-96 border-t xl:border-t-0 xl:border-l border-[#222222] bg-[#0A0A0A]/95 backdrop-blur-xl p-4 md:p-6 flex flex-col gap-5 xl:overflow-y-auto shrink-0 z-35 animate-in slide-in-from-right duration-200 no-scrollbar h-full">
-          <div className="flex items-center justify-between pb-4 border-b border-[#222222]">
+          <div
+            onPointerDown={(e) => {
+              if (!isTauriEnvironment() || e.button !== 0) return;
+              const t = e.target as HTMLElement | null;
+              if (t?.closest('button, a, input, [role="button"], [data-no-drag]')) return;
+              void invokeTauri('start_drag').catch(() => {});
+            }}
+            title={isTauriEnvironment() ? 'Arraste para mover a janela' : undefined}
+            className="flex items-center justify-between pb-4 border-b border-[#222222] select-none"
+          >
             <h3 className="text-xs font-semibold uppercase tracking-wider text-[#A8A8A8] flex items-center gap-2">
               <Activity className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
               <span>Contexto & Telemetria</span>

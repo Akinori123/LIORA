@@ -286,6 +286,17 @@ pub async fn system_exec_sandbox(command_str: String, args: Vec<String>, payload
     if command_str == "git" && args.iter().any(|a| a.contains("--upload-pack") || a.contains("--config") || a == "-c" || a.starts_with("-c=")) {
         return Err(format!("ARGUMENT_INJECTION_BLOCKED: argumento de execução de código bloqueado (hash: {}).", param_hash));
     }
+    // 2b. Os argumentos NÃO podem carregar metacaracteres de shell (injeção via arg)
+    if args.iter().any(|a| a.chars().any(|c| injection_charset.contains(c))) {
+        return Err(format!("COMMAND_INJECTION_BLOCKED: caracteres perigosos em argumento (hash: {}).", param_hash));
+    }
+    // 2c. Flags não são esperadas em binários utilitários (echo/ls/cat): rejeita argumentos
+    // iniciados por '-' para que não virem opções privilegiadas de binários whitelisted.
+    if matches!(command_str.as_str(), "echo" | "ls" | "cat")
+        && args.iter().any(|a| a.starts_with('-') && a.len() > 1)
+    {
+        return Err(format!("ARGUMENT_INJECTION_BLOCKED: flag não permitida para '{}' (hash: {}).", command_str, param_hash));
+    }
     if args.len() > 32 {
         return Err(format!("LIMIT_EXCEEDED: número máximo de 32 argumentos excedido (hash: {}).", param_hash));
     }
@@ -293,7 +304,7 @@ pub async fn system_exec_sandbox(command_str: String, args: Vec<String>, payload
         return Err(format!("LIMIT_EXCEEDED: argumento maior que 4096 bytes bloqueado (hash: {}).", param_hash));
     }
 
-    // 3. Confinamento de diretório: impede execução a partir de diretórios sensíveis do sistema
+    // 2d. Confinamento de diretório: impede execução a partir de diretórios sensíveis do sistema
     let forbidden_dirs = [
         "C:\\Windows\\System32",
         "C:\\Windows\\SysWOW64",
@@ -373,7 +384,11 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
 
     let result = match tool_name {
         "workspace_read_file" => {
-            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let path = params.get("path")
+                .or_else(|| params.get("filePath"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let root = params.get("workspaceRoot").and_then(|v| v.as_str()).map(|s| s.to_string());
             match workspace_read_file(path, root).await {
                 Ok(content) => (true, Some(serde_json::json!({ "content": content })), None, "R0"),
@@ -381,7 +396,11 @@ pub async fn execute_local_tool(payload: LocalExecutionRequest) -> Result<LocalE
             }
         }
         "workspace_write_file" => {
-            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let path = params.get("path")
+                .or_else(|| params.get("filePath"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let root = params.get("workspaceRoot").and_then(|v| v.as_str()).map(|s| s.to_string());
             match workspace_write_file(path, content, root).await {
@@ -678,12 +697,61 @@ pub async fn read_obd2_diagnostics() -> Result<Vec<VehicleDtcCode>, String> {
     Err("NOT_IMPLEMENTED: Adaptador OBD-II real (ELM327/CAN bus) não está implementado nesta fase. Nenhum dado real de diagnóstico disponível.".to_string())
 }
 
-/// Captura a tela atual de forma nativa na máquina.
-/// FIX C3: honestidade de dados — sem implementação nativa de captura, o comando
-/// reporta explicitamente NOT_IMPLEMENTED em vez de retornar string vazia simulada.
+/// Captura a tela atual de forma nativa na máquina via PowerShell GDI (Windows).
+/// Retorna a imagem em Base64 PNG/JPEG diretamente.
 #[command]
 pub async fn capture_screen() -> Result<String, String> {
-    Err("NOT_IMPLEMENTED: Captura de tela nativa não está implementada nesta fase. Nenhum dado real disponível.".to_string())
+    #[cfg(windows)]
+    {
+        tokio::task::spawn_blocking(|| {
+            let tmp_path = std::env::temp_dir().join(format!("liora-scr-{}.jpg", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+            let script = format!(
+                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size); $g.Dispose(); $bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Jpeg); $bmp.Dispose();",
+                tmp_path.display().to_string().replace('\\', "/")
+            );
+            let mut cmd = std::process::Command::new("powershell");
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            let out = cmd.output().map_err(|e| format!("Falha ao invocar PowerShell: {e}"))?;
+
+            if !tmp_path.exists() {
+                return Err(format!("Falha na captura: {}", String::from_utf8_lossy(&out.stderr)));
+            }
+            let bytes = std::fs::read(&tmp_path).map_err(|e| format!("Falha ao ler screenshot: {e}"))?;
+            let _ = std::fs::remove_file(&tmp_path);
+
+            const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut b64 = String::with_capacity((bytes.len() * 4) / 3 + 4);
+            for chunk in bytes.chunks(3) {
+                let b0 = chunk[0];
+                let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+                let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+                b64.push(CHARS[(b0 >> 2) as usize] as char);
+                b64.push(CHARS[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+                if chunk.len() > 1 {
+                    b64.push(CHARS[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
+                } else {
+                    b64.push('=');
+                }
+                if chunk.len() > 2 {
+                    b64.push(CHARS[(b2 & 63) as usize] as char);
+                } else {
+                    b64.push('=');
+                }
+            }
+
+            Ok(b64)
+        })
+        .await
+        .map_err(|e| format!("Task de captura falhou: {e}"))?
+    }
+    #[cfg(not(windows))]
+    {
+        Err("NOT_IMPLEMENTED: Captura nativa suportada apenas no Windows nesta fase.".to_string())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -785,6 +853,22 @@ pub async fn delete_sqlite_record(table: String, id: String) -> Result<bool, Str
         .map_err(|e| e.to_string())?;
 
     fs::rename(&temp_file, &table_file).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Remove todos os registros de uma tabela persistente (limpa o arquivo da tabela)
+#[command]
+pub async fn clear_sqlite_table(table: String) -> Result<bool, String> {
+    validate_table_name(&table)?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    let db_dir = PathBuf::from(home).join(".liora").join("db");
+    let table_file = db_dir.join(format!("{}.json", table));
+
+    if table_file.exists() {
+        fs::remove_file(&table_file).map_err(|e| e.to_string())?;
+    }
     Ok(true)
 }
 
@@ -990,9 +1074,7 @@ pub async fn set_volume(level: u8) -> Result<serde_json::Value, String> {
 
     #[cfg(target_os = "windows")]
     {
-        // Tenta via PowerShell + WScript (sem dependências externas)
-        let script = r"$wsh = New-Object -ComObject WScript.Shell; 1..50 | ForEach-Object { $wsh.SendKeys([char]174) }; Start-Sleep -Milliseconds 50".to_string();
-        // Abordagem real: usa nircmd se disponível, senão informa limitação
+        // 1. Tenta via nircmd se disponível
         let nircmd = std::process::Command::new("nircmd")
             .args(["setsysvolume", &format!("{}", (level as u32 * 655))])
             .output();
@@ -1008,14 +1090,31 @@ pub async fn set_volume(level: u8) -> Result<serde_json::Value, String> {
             }
         }
 
-        // Fallback PowerShell via COM (ajusta keystrokes — impreciso mas funciona)
-        let _ = script;
-        Ok(serde_json::json!({
-            "success": false,
-            "level": level,
-            "simulated": false,
-            "note": "NOT_FULLY_IMPLEMENTED: nircmd não encontrado. Instale nircmd.exe no PATH para controle preciso de volume."
-        }))
+        // 2. Fallback universal nativo Windows via PowerShell COM WScript.Shell (sem dependências externas).
+        // Reseta o volume para 0 via 50 toques de Volume Down ([char]174) e sobe até o nível desejado
+        // com (level / 2) toques de Volume Up ([char]175), cobrindo o intervalo 0..100% de 2 em 2%.
+        let steps_up = (level as f32 / 2.0).round() as u32;
+        let script = format!(
+            "$w = New-Object -ComObject WScript.Shell; 1..50 | ForEach-Object {{ $w.SendKeys([char]174) }}; if ({steps_up} -gt 0) {{ 1..{steps_up} | ForEach-Object {{ $w.SendKeys([char]175) }} }}"
+        );
+        let ps_res = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output();
+
+        match ps_res {
+            Ok(out) if out.status.success() => Ok(serde_json::json!({
+                "success": true,
+                "level": level,
+                "simulated": false,
+                "method": "powershell_wscript"
+            })),
+            _ => Ok(serde_json::json!({
+                "success": false,
+                "level": level,
+                "simulated": false,
+                "note": "Falha ao ajustar volume via PowerShell nativo. Instale nircmd.exe no PATH para controle direto alternativo."
+            }))
+        }
     }
 
     #[cfg(target_os = "linux")]

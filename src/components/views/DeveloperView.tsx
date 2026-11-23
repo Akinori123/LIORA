@@ -617,10 +617,12 @@ export const DeveloperView: React.FC = () => {
           
           <div className="flex items-center gap-3 flex-wrap">
             {/* Switch Global Persistente (Modo Operador Direto R1/R2) */}
-            <label className="flex items-center gap-2 px-3 py-1.5 bg-[#171717] border border-[#2E2E2E] rounded-lg text-xs font-mono text-[#CCCCCC] cursor-pointer hover:border-[#444444] transition-colors">
+            <label htmlFor="dev-auto-approve-checkbox" className="flex items-center gap-2 px-3 py-1.5 bg-[#171717] border border-[#2E2E2E] rounded-lg text-xs font-mono text-[#CCCCCC] cursor-pointer hover:border-[#444444] transition-colors">
               <KeyRound className={`w-3.5 h-3.5 ${globalAutoApprove ? 'text-emerald-400' : 'text-[#888888]'}`} />
               <span>Auto-Consentimento Operador (R1/R2)</span>
               <input 
+                id="dev-auto-approve-checkbox"
+                name="dev-auto-approve-checkbox"
                 type="checkbox"
                 checked={globalAutoApprove}
                 onChange={(e) => { void setGlobalAutoApprove(e.target.checked); }}
@@ -726,6 +728,8 @@ export const DeveloperView: React.FC = () => {
                 {/* Seletor Granular de Política Individual (3 Estados) */}
                 <div className="pt-2 border-t border-[#222222]/80">
                   <select
+                    id={`dev-tool-policy-${tool.name}`}
+                    name={`dev-tool-policy-${tool.name}`}
                     aria-label={`Política de permissão para ${tool.name}`}
                     disabled={isR3}
                     value={currentPolicy}
@@ -799,6 +803,7 @@ export const DeveloperView: React.FC = () => {
                       {Array.isArray(prop.enum) && prop.enum.length > 0 ? (
                         <select
                           id={inputId}
+                          name={inputId}
                           value={val ?? ''}
                           onChange={(e) => setToolParamValue(activeToolDef.name, key, e.target.value)}
                           className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -811,6 +816,7 @@ export const DeveloperView: React.FC = () => {
                       ) : prop.type === 'boolean' ? (
                         <select
                           id={inputId}
+                          name={inputId}
                           value={val === undefined ? '' : String(Boolean(val))}
                           onChange={(e) => setToolParamValue(activeToolDef.name, key, e.target.value === '' ? '' : e.target.value === 'true')}
                           className="w-full bg-[#0E0E0E] border border-[#262626] rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[var(--accent-primary)]"
@@ -822,6 +828,7 @@ export const DeveloperView: React.FC = () => {
                       ) : prop.type === 'number' ? (
                         <input
                           id={inputId}
+                          name={inputId}
                           type="number"
                           value={val ?? ''}
                           min={prop.minimum}
@@ -833,6 +840,7 @@ export const DeveloperView: React.FC = () => {
                       ) : (
                         <input
                           id={inputId}
+                          name={inputId}
                           type="text"
                           value={
                             Array.isArray(val)
@@ -943,6 +951,8 @@ export const DeveloperView: React.FC = () => {
               <ListFilter className="w-3.5 h-3.5" /> Filtros:
             </div>
             <select
+              id="dev-audit-decision-filter"
+              name="dev-audit-decision-filter"
               aria-label="Filtrar trilha de auditoria por decisão"
               value={decisionFilter}
               onChange={(e) => setDecisionFilter(e.target.value)}
@@ -954,6 +964,8 @@ export const DeveloperView: React.FC = () => {
             </select>
 
             <select
+              id="dev-audit-tool-filter"
+              name="dev-audit-tool-filter"
               aria-label="Filtrar trilha de auditoria por ferramenta"
               value={toolNameFilter}
               onChange={(e) => setToolNameFilter(e.target.value)}

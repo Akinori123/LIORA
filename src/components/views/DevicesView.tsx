@@ -49,7 +49,8 @@ export const DevicesView: React.FC = () => {
     refreshDeviceTelemetry, 
     sendDeviceCommand,
     pingDevicesHealth,
-    setActiveTab
+    setActiveTab,
+    loadDevices
   } = useLioraStore(
     useShallow((s) => ({
       devices: s.devices,
@@ -59,7 +60,8 @@ export const DevicesView: React.FC = () => {
       refreshDeviceTelemetry: s.refreshDeviceTelemetry,
       sendDeviceCommand: s.sendDeviceCommand,
       pingDevicesHealth: s.pingDevicesHealth,
-      setActiveTab: s.setActiveTab
+      setActiveTab: s.setActiveTab,
+      loadDevices: s.loadDevices
     }))
   );
 
@@ -82,6 +84,46 @@ export const DevicesView: React.FC = () => {
   const isMountedRef = React.useRef<boolean>(true);
   const feedbackTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Canal de eventos em tempo real do PC (SSE): quando o servidor registra um
+  // aparelho pareado/removido ou despacha um comando, o painel reflete na hora
+  // sem precisar de reload completo. Reconecta sozinho; ignora heartbeats.
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return;
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      try {
+        es = new EventSource('/api/devices/events');
+        es.onmessage = (ev) => {
+          let payload: any = null;
+          try { payload = JSON.parse(ev.data); } catch { return; }
+          if (!payload || payload.type === 'CONNECTED') return;
+          loadDevices();
+        };
+        es.onerror = () => {
+          try { es?.close(); } catch {}
+          es = null;
+          if (closed) return;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, 5000);
+          if (typeof (reconnectTimer as any)?.unref === 'function') (reconnectTimer as any).unref();
+        };
+      } catch {
+        // Ambiente sem SSE (test runner) — o polling de 4s continua sendo a rede de segurança
+      }
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      try { es?.close(); } catch {}
+    };
+  }, [loadDevices]);
 
   const runBridgeTest = async () => {
     if (isMountedRef.current) setIsTestingBridge(true);

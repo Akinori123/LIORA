@@ -27,12 +27,19 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
     'open_application',
     'open_browser',
     'workspace_search_files',
+    // LEITURA REAL de páginas (R1): responder com dados em vez de "está na tela".
+    'browser_read_page',
     'browser_extract_text',
     'browser_screenshot',
     'browser_close_session',
     'getSystemStatus',
     'memory_semantic_search',
     'memory_list_context',
+    // MEMÓRIA — escrita/exclusão (R1): o modelo PRECISA poder esquecer.
+    // Antes só havia leitura: "esqueça o projeto Aurora" não tinha ferramenta e
+    // a LIORA inventava uma exclusão que nunca acontecia.
+    'memory_store_fact',
+    'memory_forget',
     'code_search_symbols',
     'code_grep',
     'code_read_file',
@@ -45,6 +52,10 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
     'resolve_place_alias',
     // NÚCLEO DE CONTROLE TOTAL DO PC (leitura real)
     'pc_take_screenshot',
+    // INSPEÇÃO DE UI (R0): o modelo precisa ver a janela para decidir a ação.
+    // Sem isso ele supõe atalhos ("Ctrl+N") que abrem telas de escolha em apps
+    // como o Word/Notepad novo — o sintoma relatado pelo usuário.
+    'pc_inspect_app_ui',
     'file_search_and_read',
     // FASE 2: PRODUTIVIDADE — leitura (R1)
     'email_fetch_and_read',
@@ -66,7 +77,17 @@ export const STRICT_PROFILE: Readonly<SecurityProfileConfig> = Object.freeze({
     'vault_get_credential',
     'vault_delete_credential',
     // AGENTE WEB AUTÔNOMO (R2 — executa apenas com consentimento HMAC)
-    'web_browser_agent'
+    'web_browser_agent',
+    // VISÃO COMPUTACIONAL (R0 — apenas captura frame local da webcam + análise).
+    // Sem entrada nesta lista branca o PermissionEngine negava com
+    // TOOL_NOT_IN_PROFILE_WHITELIST e o recurso de câmera/objetos nunca funcionava
+    // ("BLOQUEADO_PELO_PERMISSION_ENGINE" no log de atividade).
+    'camera_inspect_object',
+    // CONTROLE DE INTERFACE (R0 — navegação entre abas, zero efeito no SO).
+    // Faltavam aqui: o modelo chamava navigateToTab/openSettings para atender
+    // "abre as configurações" e a resposta era BLOQUEADO_PELO_PERMISSION_ENGINE.
+    'navigateToTab',
+    'openSettings'
   ]),
   deniedTools: Object.freeze(['workspace_read_file']),
   requireConfirmationForR1: true,

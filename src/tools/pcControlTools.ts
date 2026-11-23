@@ -2,18 +2,18 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * LIORA — NÚCLEO DE CONTROLE TOTAL DO PC (Visão Computacional + Apps/Inputs + Arquivos)
+ * LIORA â€” NÃšCLEO DE CONTROLE TOTAL DO PC (VisÃ£o Computacional + Apps/Inputs + Arquivos)
  *
  * Ferramentas NATIVAS REAIS executadas no servidor Express local (Node.js na
- * máquina do usuário). Cada ação destrutiva ou de input de sistema é classificada
- * como R2 e exige consentimento HMAC explícito via PermissionEngine.
+ * mÃ¡quina do usuÃ¡rio). Cada aÃ§Ã£o destrutiva ou de input de sistema Ã© classificada
+ * como R2 e exige consentimento HMAC explÃ­cito via PermissionEngine.
  *
- * Módulos:
- *  1. pc_take_screenshot   — captura real da tela ativa (R1)
- *  2. pc_manage_apps       — listar/abrir/fechar/focar processos e janelas (R0/R2)
- *  3. pc_simulate_input    — mouse (clique em x,y), teclado (digitar/atalhos) (R2)
- *  4. file_search_and_read — busca recursiva com filtros + leitura (R0)
- *  5. file_write_and_modify— criar/escrever/renomear/zipar/excluir (R2)
+ * MÃ³dulos:
+ *  1. pc_take_screenshot   â€” captura real da tela ativa (R1)
+ *  2. pc_manage_apps       â€” listar/abrir/fechar/focar processos e janelas (R0/R2)
+ *  3. pc_simulate_input    â€” mouse (clique em x,y), teclado (digitar/atalhos) (R2)
+ *  4. file_search_and_read â€” busca recursiva com filtros + leitura (R0)
+ *  5. file_write_and_modifyâ€” criar/escrever/renomear/zipar/excluir (R2)
  */
 
 import { exec, execFile, spawn } from 'child_process';
@@ -26,10 +26,10 @@ import { shouldUseWebPreviewDesktopFallback } from '../utils/runtimeEnvironment'
 
 /**
  * GUARDA ANTI-EFEITOS-COLATERAIS (Etapa E da auditoria UI/testes):
- * quando LIORA_NO_BROWSER=1 (suíte de testes), os comandos reais de SO são PULADOS.
+ * quando LIORA_NO_BROWSER=1 (suÃ­te de testes), os comandos reais de SO sÃ£o PULADOS.
  * As ferramentas de controle do PC (launch/kill/focus/simulate_input/screenshot)
- * retornam sucesso simulado com dryRun: true — testam TODA a lógica de
- * validação/formatação sem tocar o sistema real do usuário.
+ * retornam sucesso simulado com dryRun: true â€” testam TODA a lÃ³gica de
+ * validaÃ§Ã£o/formataÃ§Ã£o sem tocar o sistema real do usuÃ¡rio.
  */
 export function isOsDryRun(): boolean {
   return typeof process !== 'undefined' && process.env?.LIORA_NO_BROWSER === '1';
@@ -48,7 +48,7 @@ function runReal(cmd: string, timeoutMs = 15000): Promise<{ stdout: string; stde
   });
 }
 
-/** Executa arquivo binário com argumentos estruturados (sem shell — anti-injeção) */
+/** Executa arquivo binÃ¡rio com argumentos estruturados (sem shell â€” anti-injeÃ§Ã£o) */
 function runFile(file: string, args: readonly string[], timeoutMs = 15000): Promise<{ stdout: string; stderr: string; code: number }> {
   if (isOsDryRun()) {
     return Promise.resolve({ stdout: '', stderr: '', code: 0 });
@@ -62,27 +62,27 @@ function runFile(file: string, args: readonly string[], timeoutMs = 15000): Prom
 }
 
 // ============================================================================
-// MÓDULO 1 — VISÃO COMPUTACIONAL: CAPTURA DE TELA
+// MÃ“DULO 1 â€” VISÃƒO COMPUTACIONAL: CAPTURA DE TELA
 // ============================================================================
 
 /**
- * pc_take_screenshot (R1) — captura real da tela ativa.
- * Windows: PowerShell System.Drawing (CopyFromScreen) — sem dependências externas.
+ * pc_take_screenshot (R1) â€” captura real da tela ativa.
+ * Windows: PowerShell System.Drawing (CopyFromScreen) â€” sem dependÃªncias externas.
  * Linux: gnome-screenshot/scrot import; macOS: screencapture nativo.
- * Retorna base64 PNG/JPEG + dimensões, pronto para análise visual pelo modelo.
+ * Retorna base64 PNG/JPEG + dimensÃµes, pronto para anÃ¡lise visual pelo modelo.
  */
 export const pcTakeScreenshotTool: ToolDefinition<{ format?: 'png' | 'jpeg'; monitor?: 'primary' | 'all' }, any> = {
   name: 'pc_take_screenshot',
-  description: 'Captura a tela ativa do PC em tempo real e retorna a imagem em base64 para análise visual. Use quando o usuário pedir "olhe a minha tela", "veja o que está na tela", "analise a janela atual" ou para identificar elementos de interface visualmente.',
+  description: 'Captura a tela ativa do PC em tempo real e retorna a imagem em base64 para anÃ¡lise visual. Use quando o usuÃ¡rio pedir "olhe a minha tela", "veja o que estÃ¡ na tela", "analise a janela atual" ou para identificar elementos de interface visualmente.',
   category: 'system',
   riskLevel: 'R1',
   isSimulated: false,
-  timeoutMs: 25000, // captura PowerShell usa até 20s internamente
+  timeoutMs: 25000, // captura PowerShell usa atÃ© 20s internamente
   parameters: {
     type: 'object',
     properties: {
-      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Formato de saída da imagem (padrão jpeg, mais leve para o modelo).', default: 'jpeg' },
-      monitor: { type: 'string', enum: ['primary', 'all'], description: 'Capturar o monitor primário ou todos (padrão primary).', default: 'primary' }
+      format: { type: 'string', enum: ['png', 'jpeg'], description: 'Formato de saÃ­da da imagem (padrÃ£o jpeg, mais leve para o modelo).', default: 'jpeg' },
+      monitor: { type: 'string', enum: ['primary', 'all'], description: 'Capturar o monitor primÃ¡rio ou todos (padrÃ£o primary).', default: 'primary' }
     },
     additionalProperties: false
   },
@@ -92,9 +92,9 @@ export const pcTakeScreenshotTool: ToolDefinition<{ format?: 'png' | 'jpeg'; mon
     const platform = os.platform();
     const tmpBase = path.join(os.tmpdir(), `liora-shot-${Date.now()}`);
 
-    // CORREÇÃO (Etapa E — GC de órfãos): screenshots de falhas anteriores podiam
+    // CORREÃ‡ÃƒO (Etapa E â€” GC de Ã³rfÃ£os): screenshots de falhas anteriores podiam
     // acumular no tmpdir por uso prolongado (dias com o app aberto). Limpa
-    // resquícios com mais de 1 hora (não afeta capturas em andamento de outro
+    // resquÃ­cios com mais de 1 hora (nÃ£o afeta capturas em andamento de outro
     // processo, pois usa timestamp no nome).
     try {
       const tmpDir = os.tmpdir();
@@ -107,10 +107,10 @@ export const pcTakeScreenshotTool: ToolDefinition<{ format?: 'png' | 'jpeg'; mon
           await fsp.unlink(path.join(tmpDir, f)).catch(() => {});
         }
       }
-    } catch { /* GC best-effort — nunca bloqueia a captura */ }
+    } catch { /* GC best-effort â€” nunca bloqueia a captura */ }
 
     if (platform === 'win32') {
-      // PowerShell puro: CopyFromScreen do monitor primário, sem dependências
+      // PowerShell puro: CopyFromScreen do monitor primÃ¡rio, sem dependÃªncias
       const ext = format === 'png' ? 'png' : 'jpg';
       const imgType = format === 'png' ? 'Png' : 'Jpeg';
       const ps = `
@@ -125,12 +125,12 @@ $bmp.Dispose()
 Write-Output "${tmpBase}.${ext}"`;
       const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 20000);
       if (res.code !== 0 || !fs.existsSync(`${tmpBase}.${ext}`)) {
-        // CORREÇÃO (Etapa E — temp leak): falha parcial do PowerShell podia deixar
-        // arquivo parcial no disco. Limpa qualquer resquício antes de falhar.
+        // CORREÃ‡ÃƒO (Etapa E â€” temp leak): falha parcial do PowerShell podia deixar
+        // arquivo parcial no disco. Limpa qualquer resquÃ­cio antes de falhar.
         await fsp.unlink(`${tmpBase}.${ext}`).catch(() => {});
         await fsp.unlink(`${tmpBase}.png`).catch(() => {});
         await fsp.unlink(`${tmpBase}.jpg`).catch(() => {});
-        return { success: false, error: `SCREENSHOT_FAILED: ${res.stderr.slice(0, 200) || 'PowerShell não capturou a tela'}`, simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: `SCREENSHOT_FAILED: ${res.stderr.slice(0, 200) || 'PowerShell nÃ£o capturou a tela'}`, simulated: false, timestamp: new Date().toISOString() };
       }
       const buf = await fsp.readFile(`${tmpBase}.${ext}`);
       await fsp.unlink(`${tmpBase}.${ext}`).catch(() => {});
@@ -149,14 +149,14 @@ Write-Output "${tmpBase}.${ext}"`;
       const ext = format === 'png' ? 'png' : 'jpg';
       const res = await runFile('screencapture', ['-x', `${tmpBase}.${ext}`], 10000);
       if (res.code !== 0 || !fs.existsSync(`${tmpBase}.${ext}`)) {
-        return { success: false, error: 'SCREENSHOT_FAILED: screencapture falhou (permissão de Gravação de Tela necessária).', simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: 'SCREENSHOT_FAILED: screencapture falhou (permissÃ£o de GravaÃ§Ã£o de Tela necessÃ¡ria).', simulated: false, timestamp: new Date().toISOString() };
       }
       const buf = await fsp.readFile(`${tmpBase}.${ext}`);
       await fsp.unlink(`${tmpBase}.${ext}`).catch(() => {});
       return { success: true, base64: buf.toString('base64'), mimeType: format === 'png' ? 'image/png' : 'image/jpeg', simulated: false, timestamp: new Date().toISOString() };
     }
 
-    // Linux: tenta várias ferramentas disponíveis
+    // Linux: tenta vÃ¡rias ferramentas disponÃ­veis
     const linuxTools: Array<[string, string[]]> = [
       ['gnome-screenshot', ['-f', `${tmpBase}.png`]],
       ['scrot', [`${tmpBase}.png`]],
@@ -175,7 +175,7 @@ Write-Output "${tmpBase}.${ext}"`;
 };
 
 // ============================================================================
-// MÓDULO 2 — CONTROLE DE APLICATIVOS E INPUTS
+// MÃ“DULO 2 â€” CONTROLE DE APLICATIVOS E INPUTS
 // ============================================================================
 
 const WINDOWS_APP_MAP: Record<string, string> = {
@@ -193,9 +193,9 @@ const WINDOWS_APP_MAP: Record<string, string> = {
   'control panel': 'control',
   'control': 'control',
   'configuracoes': 'ms-settings:',
-  'configurações': 'ms-settings:',
+  'configuraÃ§Ãµes': 'ms-settings:',
   'configuracoes do windows': 'ms-settings:',
-  'configurações do windows': 'ms-settings:',
+  'configuraÃ§Ãµes do windows': 'ms-settings:',
   'ajustes': 'ms-settings:',
   'settings': 'ms-settings:',
   'google': 'chrome',
@@ -289,30 +289,41 @@ function resolveWindowsAppExecutable(appName: string): string {
 }
 
 /**
- * pc_manage_apps (R0 listar / R2 kill) — gerenciamento real de processos.
+ * pc_manage_apps (R0 listar / R2 kill) â€” gerenciamento real de processos.
  * actions: list (R0), launch (R2), kill (R2), focus (R1)
  */
 export const pcManageAppsTool: ToolDefinition<{
-  action: 'list' | 'launch' | 'kill' | 'focus';
+  action: 'list' | 'launch' | 'kill' | 'focus' | 'minimize' | 'maximize' | 'restore';
   processName?: string;
   pid?: number;
   appPath?: string;
   windowTitle?: string;
+  windowState?: 'foreground' | 'background' | 'minimized' | 'maximized' | 'normal';
 }, any> = {
   name: 'pc_manage_apps',
-  description: 'Gerencia aplicativos e janelas do PC em tempo real: lista processos rodando, abre aplicativos, fecha processos por nome ou PID e foca janelas. Matar processos e lançar apps exigem confirmação (R2).',
+  description: 'Gerencia aplicativos e janelas do PC em tempo real: lista processos, abre aplicativos (em primeiro plano ou segundo plano), encerra processos, foca janelas trazendo-as para a frente na tela, minimiza janelas para a barra de tarefas ou maximiza em tela cheia.',
   category: 'system',
   riskLevel: 'R0', // list é R0; kill/launch escalam para R2 via requiredConfirmation
   isSimulated: false,
   timeoutMs: 15000,
+  /**
+   * Ações que MUTAM o sistema/janelas (não são leitura). Usado pelo backend
+   * para escalar o risco para R2 e exigir consentimento. Antes só `action !== 'list'`
+   * virava R2 — e `minimize`/`maximize`/`restore`/`focus` nem existiam no enum,
+   * apesar de a instrução do modelo e a descrição da tool as anunciarem
+   * (o modelo chamava `action: 'minimize'` e o validator rejeitava com
+   *  "deve ser um dos valores" → pedido do operador nunca executado).
+   */
+  mutatingActions: ['launch', 'kill', 'close', 'focus', 'minimize', 'maximize', 'restore'],
   parameters: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['list', 'launch', 'kill', 'focus'], description: 'Ação a executar.' },
-      processName: { type: 'string', description: 'Nome do processo (ex: "chrome", "notepad") para kill/focus.' },
-      pid: { type: 'number', description: 'PID do processo para kill (mais preciso que nome).' },
-      appPath: { type: 'string', description: 'Nome do executável ou caminho do app para launch (ex: "notepad", "calc").' },
-      windowTitle: { type: 'string', description: 'Título da janela para focus (parcial, ex: "Documentos").' }
+      action: { type: 'string', enum: ['list', 'launch', 'kill', 'close', 'focus', 'minimize', 'maximize', 'restore'], description: 'Ação a executar: "list" (listar), "launch" (abrir), "kill"/"close" (encerrar), "focus" (trazer para a frente), "minimize" (minimizar janela), "maximize" (tela cheia), "restore" (restaurar tamanho).' },
+      processName: { type: 'string', description: 'Nome do processo (ex: "chrome", "notepad") para kill/focus/minimize/maximize.' },
+      pid: { type: 'number', description: 'PID do processo para kill/focus/minimize.' },
+      appPath: { type: 'string', description: 'Nome do executável ou caminho do app para launch/focus/minimize (ex: "notepad", "chrome", "calc").' },
+      windowTitle: { type: 'string', description: 'Título da janela para focus/minimize/maximize (parcial, ex: "Documentos", "Chrome", "Bloco de Notas").' },
+      windowState: { type: 'string', enum: ['foreground', 'background', 'minimized', 'maximized', 'normal'], description: 'Controle de janela no launch: "foreground" (abrir/focar na frente do usuário), "background" ou "minimized" (abrir ou manter em segundo plano sem roubar o foco), "maximized" (abrir maximizado).' }
     },
     required: ['action'],
     additionalProperties: false
@@ -343,15 +354,15 @@ export const pcManageAppsTool: ToolDefinition<{
       return { success: true, action: 'list', processes: procs, count: procs.length, simulated: false, timestamp: new Date().toISOString() };
     }
 
-    // ---- kill (R2 — destrutivo, exige consentimento no frontend) ----
+    // ---- kill (R2 â€” destrutivo, exige consentimento no frontend) ----
     if (params.action === 'kill') {
       const isWindows = platform === 'win32';
       const target = params.pid ? String(params.pid) : (params.processName || '');
       if (!target) return { success: false, error: 'MISSING_TARGET: informe pid ou processName para encerrar.', simulated: false, timestamp: new Date().toISOString() };
 
-      // BUG CRÍTICO CORRIGIDO (bypass por PID): a proteção de processos críticos
-      // só checava processName — com PID, qualquer um podia matar csrss/system!
-      // Agora: quando só há PID, consulta o NOME do processo antes de autorizar.
+      // BUG CRÃTICO CORRIGIDO (bypass por PID): a proteÃ§Ã£o de processos crÃ­ticos
+      // sÃ³ checava processName â€” com PID, qualquer um podia matar csrss/system!
+      // Agora: quando sÃ³ hÃ¡ PID, consulta o NOME do processo antes de autorizar.
       let processNameForCheck = params.processName || '';
       if (params.pid && !processNameForCheck) {
         if (isWindows) {
@@ -363,20 +374,20 @@ export const pcManageAppsTool: ToolDefinition<{
           processNameForCheck = lookup.stdout.trim();
         }
         if (!processNameForCheck) {
-          return { success: false, error: `PID_NOT_FOUND: nenhum processo com PID ${params.pid} está em execução.`, simulated: false, timestamp: new Date().toISOString() };
+          return { success: false, error: `PID_NOT_FOUND: nenhum processo com PID ${params.pid} estÃ¡ em execuÃ§Ã£o.`, simulated: false, timestamp: new Date().toISOString() };
         }
       }
 
-      // Proteções: nunca mata processos críticos (por nome OU PID resolvido).
+      // ProteÃ§Ãµes: nunca mata processos crÃ­ticos (por nome OU PID resolvido).
       // BUG CORRIGIDO: antes a regex 'system' casava com QUALQUER nome contendo
-      // 'system' (ex: 'mysystemapp.exe') — agora só casama exato ou sufixo .exe.
+      // 'system' (ex: 'mysystemapp.exe') â€” agora sÃ³ casama exato ou sufixo .exe.
       const PROTECTED_EXACT = /^(system|registry|lsass|csrss|wininit|services|smss|winlogon|kernel|memcompression)(\.exe)?$/i;
       const PROTECTED_SESSION = /^(explorer|svchost)(\.exe)?$/i;
       if (PROTECTED_EXACT.test(processNameForCheck) || PROTECTED_SESSION.test(processNameForCheck)) {
-        return { success: false, error: `PROTECTED_PROCESS: encerrar '${processNameForCheck}' (PID ${params.pid || '—'}) é bloqueado — processo crítico do sistema.`, simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: `PROTECTED_PROCESS: encerrar '${processNameForCheck}' (PID ${params.pid || 'â€”'}) Ã© bloqueado â€” processo crÃ­tico do sistema.`, simulated: false, timestamp: new Date().toISOString() };
       }
 
-      // Adaptabilidade Cloud Web Preview (Linux headless sem interface gráfica de desktop)
+      // Adaptabilidade Cloud Web Preview (Linux headless sem interface grÃ¡fica de desktop)
       if (!isOsDryRun() && shouldUseWebPreviewDesktopFallback()) {
         const displayName = processNameForCheck || target;
         return {
@@ -386,13 +397,13 @@ export const pcManageAppsTool: ToolDefinition<{
           resolvedProcessName: displayName,
           simulated: true,
           runtimeMode: 'web-preview-simulated',
-          message: `[MODO WEB PREVIEW - SIMULADO] Encerramento do processo '${displayName}' simulado (ambiente em nuvem sem interface gráfica de desktop).`,
+          message: `[MODO WEB PREVIEW - SIMULADO] Encerramento do processo '${displayName}' simulado (ambiente em nuvem sem interface grÃ¡fica de desktop).`,
           timestamp: new Date().toISOString()
         };
       }
 
-      // BUG CORRIGIDO (dupla extensão): antes gerava taskkill /IM "chrome.exe.exe"
-      // quando o nome já vinha com extensão — agora só adiciona .exe se faltar.
+      // BUG CORRIGIDO (dupla extensÃ£o): antes gerava taskkill /IM "chrome.exe.exe"
+      // quando o nome jÃ¡ vinha com extensÃ£o â€” agora sÃ³ adiciona .exe se faltar.
       let killCmd: string;
       if (isWindows) {
         if (params.pid) {
@@ -411,21 +422,21 @@ export const pcManageAppsTool: ToolDefinition<{
         action: 'kill',
         target,
         resolvedProcessName: processNameForCheck,
-        message: success ? `Processo '${processNameForCheck}' encerrado com sucesso.` : `Falha ao encerrar '${processNameForCheck}': ${res.stderr.slice(0, 150) || 'processo não encontrado'}`,
+        message: success ? `Processo '${processNameForCheck}' encerrado com sucesso.` : `Falha ao encerrar '${processNameForCheck}': ${res.stderr.slice(0, 150) || 'processo nÃ£o encontrado'}`,
         simulated: false,
         timestamp: new Date().toISOString()
       };
     }
 
-    // ---- launch (R2 — executa app no SO) ----
+    // ---- launch (R2 â€” executa app no SO) ----
     if (params.action === 'launch') {
       const rawApp = (params.appPath || '').trim();
       if (!rawApp) return { success: false, error: 'MISSING_APP: informe appPath para abrir o aplicativo.', simulated: false, timestamp: new Date().toISOString() };
-      // Bloqueio de injeção: sem metacaracteres de shell
+      // Bloqueio de injeÃ§Ã£o: sem metacaracteres de shell
       if (/[;&|`$<>]/.test(rawApp)) return { success: false, error: 'COMMAND_INJECTION_BLOCKED: caracteres perigosos no appPath.', simulated: false, timestamp: new Date().toISOString() };
       const app = platform === 'win32' ? resolveWindowsAppExecutable(rawApp) : rawApp;
 
-      // Adaptabilidade Cloud Web Preview (Linux headless sem display gráfico)
+      // Adaptabilidade Cloud Web Preview (Linux headless sem display grÃ¡fico)
       if (!isOsDryRun() && shouldUseWebPreviewDesktopFallback()) {
         return {
           success: true,
@@ -433,21 +444,83 @@ export const pcManageAppsTool: ToolDefinition<{
           app,
           simulated: true,
           runtimeMode: 'web-preview-simulated',
-          message: `[MODO WEB PREVIEW - SIMULADO] Abertura de '${app}' simulada (ambiente em nuvem sem interface gráfica de desktop).`,
+          message: `[MODO WEB PREVIEW - SIMULADO] Abertura de '${app}' simulada (ambiente em nuvem sem interface grÃ¡fica de desktop).`,
           timestamp: new Date().toISOString()
         };
       }
 
       if (platform === 'win32') {
-        const res = await runFile('cmd.exe', ['/C', 'start', '', app], 8000);
+        if (isOsDryRun()) {
+          return { success: true, action: 'launch', app, simulated: true, message: `[DRY-RUN] Abertura de '${app}' simulada (LIORA_NO_BROWSER=1).`, timestamp: new Date().toISOString() };
+        }
+        
+        const wState = params.windowState || 'foreground';
+        const winStyleParam = (wState === 'background' || wState === 'minimized')
+          ? " -WindowStyle Minimized"
+          : (wState === 'maximized' ? " -WindowStyle Maximized" : "");
+
+        const appExeClean = app.replace(/\.exe$/i, '').replace(/["']/g, '');
+
+        // Se o usuário pediu em primeiro plano / na frente e o app já estiver aberto, foca a janela existente!
+        // Se pediu em segundo plano e já estiver aberto, mantém em segundo plano sem roubar o foco.
+        const ps = `
+$target = '${app.replace(/'/g, "''")}';
+$clean = '${appExeClean.replace(/'/g, "''")}';
+$wState = '${wState}';
+$wsh = New-Object -ComObject WScript.Shell;
+$existing = Get-Process -Name $clean -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+
+if ($existing) {
+  if ($wState -eq 'background' -or $wState -eq 'minimized') {
+    Write-Output 'OK_BACKGROUND';
+  } else {
+    $wsh.AppActivate($existing.Id) | Out-Null;
+    Write-Output 'OK_FOCUSED';
+  }
+} else {
+  # Resolve o executavel pelo nome (notepad vira o caminho absoluto no PATH).
+  # BUG CORRIGIDO: Start-Process -FilePath com nome sem extensao NAO resolve
+  # quando o diretorio atual nao esta no PATH; o catch engolia a falha e
+  # respondia FAIL sem motivo. Get-Command replica a resolucao do shell.
+  # ATENCAO: nenhum "$NT/TEMP" ou caminho com cifrao aqui — o PowerShell
+  # expande dentro de comentario e quebra o bloco.
+  $resolved = $target;
+  if (-not (Test-Path -LiteralPath $target)) {
+    $app = Get-Command -Name $target -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;
+    if ($app) { $resolved = $app.Source; }
+  }
+  try {
+    Start-Process -FilePath $resolved${winStyleParam} -ErrorAction Stop;
+    if ($wState -eq 'foreground') {
+      Start-Sleep -Milliseconds 600;
+      $p2 = Get-Process -Name $clean -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+      if ($p2) { $wsh.AppActivate($p2.Id) | Out-Null; }
+    }
+    Write-Output 'OK';
+  } catch {
+    Write-Output ('FAIL: ' + $_.Exception.Message);
+  }
+}`;
+        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 15000);
+        const ok = res.code === 0 && (res.stdout.includes('OK') || res.stdout.includes('OK_FOCUSED') || res.stdout.includes('OK_BACKGROUND'));
+        const isFocused = res.stdout.includes('OK_FOCUSED');
+        const isAlreadyBackground = res.stdout.includes('OK_BACKGROUND');
+        // Propaga o motivo REAL da falha (antes só aparecia "código 0" ou stderr vazio).
+        const failMatch = /FAIL:\s*(.+)/.exec(res.stdout);
+        const failReason = failMatch?.[1]?.trim() || res.stderr.slice(0, 200).trim();
         return {
-          success: res.code === 0,
+          success: ok,
           action: 'launch',
           app,
-          message: res.code === 0
-            ? `Aplicativo '${app}' iniciado.`
-            : `Falha ao iniciar '${app}': ${res.stderr.slice(0, 150) || 'executável não encontrado'}`,
-          error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || `Falha ao iniciar '${app}' (código ${res.code}).`),
+          windowState: wState,
+          message: ok
+            ? (isFocused
+                ? `Aplicativo '${app}' já estava aberto e foi trazido para o primeiro plano na sua tela, Mestre.`
+                : isAlreadyBackground
+                  ? `Aplicativo '${app}' já está em execução no computador em segundo plano.`
+                  : `Aplicativo '${app}' iniciado com sucesso (${wState === 'background' ? 'em segundo plano' : 'em primeiro plano'}).`)
+            : `Falha ao iniciar '${app}': ${failReason || `código ${res.code}`}.`,
+          error: ok ? undefined : (failReason || `Falha ao iniciar '${app}' (código ${res.code}).`),
           simulated: false,
           timestamp: new Date().toISOString()
         };
@@ -468,40 +541,173 @@ export const pcManageAppsTool: ToolDefinition<{
 
     // ---- focus (R1 — traz janela para frente via AppleScript/powershell) ----
     if (params.action === 'focus') {
-      const title = (params.windowTitle || '').trim();
-      if (!title) return { success: false, error: 'MISSING_TITLE: informe windowTitle para focar a janela.', simulated: false, timestamp: new Date().toISOString() };
+      const rawTarget = (params.windowTitle || params.processName || params.appPath || (params.pid ? String(params.pid) : '')).trim();
+      if (!rawTarget) return { success: false, error: 'MISSING_TARGET: informe windowTitle, processName ou appPath para focar a janela.', simulated: false, timestamp: new Date().toISOString() };
+      
+      const resolvedApp = platform === 'win32' ? resolveWindowsAppExecutable(rawTarget) : rawTarget;
+      const cleanTarget = resolvedApp.replace(/\.exe$/i, '').trim();
+
       if (!isOsDryRun() && shouldUseWebPreviewDesktopFallback()) {
         return {
           success: true,
           action: 'focus',
-          windowTitle: title,
+          target: rawTarget,
           simulated: true,
           runtimeMode: 'web-preview-simulated',
-          message: `[MODO WEB PREVIEW - SIMULADO] Foco na janela '${title}' simulado em ambiente sem desktop.`,
+          message: `[MODO WEB PREVIEW - SIMULADO] Foco na janela '${rawTarget}' simulado em ambiente sem desktop.`,
           timestamp: new Date().toISOString()
         };
       }
       if (platform === 'win32') {
-        // BOM UTF-8 (ver PCVIEW nota acima): preserva acentos em títulos de janela
-        const ps = `\ufeff(New-Object -ComObject WScript.Shell).AppActivate('${title.replace(/'/g, "''")}')`;
+        const ps = `
+$target = '${rawTarget.replace(/'/g, "''")}';
+$clean = '${cleanTarget.replace(/'/g, "''")}';
+$wsh = New-Object -ComObject WScript.Shell;
+$act = $false;
+
+if ($target -match '^\\d+$') {
+  $act = $wsh.AppActivate([int]$target);
+} else {
+  $proc = Get-Process -Name $clean -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+  if ($proc) {
+    $act = $wsh.AppActivate($proc.Id);
+  }
+  if (-not $act) {
+    $procByTitle = Get-Process -ErrorAction SilentlyContinue | Where-Object { ($_.MainWindowTitle -like "*$target*" -or $_.MainWindowTitle -like "*$clean*") -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+    if ($procByTitle) {
+      $act = $wsh.AppActivate($procByTitle.Id);
+    }
+  }
+  if (-not $act) {
+    $act = $wsh.AppActivate($target);
+  }
+  if (-not $act) {
+    $act = $wsh.AppActivate($clean);
+  }
+}
+if ($act) { Write-Output 'OK' } else { Write-Output 'FAIL' }`;
         const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 8000);
-        return { success: res.stdout.trim() === 'True', action: 'focus', windowTitle: title, message: res.stdout.trim() === 'True' ? `Janela '${title}' focada.` : `Janela '${title}' não encontrada.`, simulated: false, timestamp: new Date().toISOString() };
+        const ok = res.stdout.includes('OK');
+        return {
+          success: ok,
+          action: 'focus',
+          target: rawTarget,
+          message: ok ? `Janela de '${rawTarget}' focada e trazida para primeiro plano na sua tela, Mestre.` : `Janela de '${rawTarget}' não encontrada aberta para focar.`,
+          simulated: false,
+          timestamp: new Date().toISOString()
+        };
       }
       if (platform === 'darwin') {
-        const res = await runReal(`osascript -e 'tell application "System Events" to set frontmost of first process whose name contains "${title.replace(/"/g, '')}" to true'`, 8000);
-        return { success: res.code === 0, action: 'focus', windowTitle: title, simulated: false, timestamp: new Date().toISOString() };
+        const res = await runReal(`osascript -e 'tell application "System Events" to set frontmost of first process whose name contains "${rawTarget.replace(/"/g, '')}" to true'`, 8000);
+        return { success: res.code === 0, action: 'focus', target: rawTarget, simulated: false, timestamp: new Date().toISOString() };
       }
-      const res = await runReal(`wmctrl -a ${JSON.stringify(title)} 2>/dev/null || xdotool search --name ${JSON.stringify(title)} windowactivate 2>/dev/null`, 8000);
-      return { success: res.code === 0, action: 'focus', windowTitle: title, simulated: false, timestamp: new Date().toISOString() };
+      const res = await runReal(`wmctrl -a ${JSON.stringify(rawTarget)} 2>/dev/null || xdotool search --name ${JSON.stringify(rawTarget)} windowactivate 2>/dev/null`, 8000);
+      return { success: res.code === 0, action: 'focus', target: rawTarget, simulated: false, timestamp: new Date().toISOString() };
     }
 
-    return { success: false, error: `UNKNOWN_ACTION: '${params.action}' não suportada.`, simulated: false, timestamp: new Date().toISOString() };
+    // ---- minimize / maximize / restore (R1) ----
+    if (params.action === 'minimize' || params.action === 'maximize' || params.action === 'restore') {
+      const rawTarget = (params.windowTitle || params.processName || params.appPath || (params.pid ? String(params.pid) : '')).trim();
+      const resolvedApp = platform === 'win32' && rawTarget ? resolveWindowsAppExecutable(rawTarget) : rawTarget;
+      const cleanTarget = resolvedApp ? resolvedApp.replace(/\.exe$/i, '').trim() : '';
+
+      if (isOsDryRun() || shouldUseWebPreviewDesktopFallback()) {
+        return {
+          success: true,
+          action: params.action,
+          target: rawTarget || 'janela ativa',
+          simulated: true,
+          runtimeMode: 'web-preview-simulated',
+          message: `[MODO WEB PREVIEW - SIMULADO] Ação '${params.action}' simulada na janela '${rawTarget || 'ativa'}'.`,
+          timestamp: new Date().toISOString()
+        };
+      }
+
+      if (platform === 'win32') {
+        // nCmdShow: 2 = SW_SHOWMINIMIZED, 3 = SW_SHOWMAXIMIZED, 9 = SW_RESTORE
+        const nCmd = params.action === 'minimize' ? 2 : (params.action === 'maximize' ? 3 : 9);
+        const ps = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinShowHelper {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+"@ -ErrorAction SilentlyContinue
+
+$target = '${rawTarget.replace(/'/g, "''")}';
+$clean = '${cleanTarget.replace(/'/g, "''")}';
+$nCmd = ${nCmd};
+$done = $false;
+
+if ($target -and $target -match '^\\d+$') {
+  $p = Get-Process -Id ([int]$target) -ErrorAction SilentlyContinue;
+  if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) {
+    [WinShowHelper]::ShowWindowAsync($p.MainWindowHandle, $nCmd) | Out-Null;
+    $done = $true;
+  }
+}
+
+if (-not $done -and $clean) {
+  $proc = Get-Process -Name $clean -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1;
+  if ($proc) {
+    [WinShowHelper]::ShowWindowAsync($proc.MainWindowHandle, $nCmd) | Out-Null;
+    $done = $true;
+  }
+}
+
+if (-not $done -and $target) {
+  $procByTitle = Get-Process -ErrorAction SilentlyContinue | Where-Object { ($_.MainWindowTitle -like "*$target*" -or $_.MainWindowTitle -like "*$clean*") -and $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1;
+  if ($procByTitle) {
+    [WinShowHelper]::ShowWindowAsync($procByTitle.MainWindowHandle, $nCmd) | Out-Null;
+    $done = $true;
+  }
+}
+
+if (-not $done -and -not $target) {
+  $fg = [WinShowHelper]::GetForegroundWindow();
+  if ($fg -ne [IntPtr]::Zero) {
+    [WinShowHelper]::ShowWindowAsync($fg, $nCmd) | Out-Null;
+    $done = $true;
+  }
+}
+
+if ($done) { Write-Output "OK" } else { Write-Output "FAIL" }
+`;
+        const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 8000);
+        const ok = res.code === 0 && res.stdout.includes('OK');
+        const verbMap: Record<string, string> = { minimize: 'minimizada', maximize: 'maximizada', restore: 'restaurada' };
+        return {
+          success: ok,
+          action: params.action,
+          target: rawTarget || 'janela ativa',
+          message: ok
+            ? `Janela de '${rawTarget || 'ativa'}' ${verbMap[params.action] || params.action} com sucesso, Mestre.`
+            : `Não foi possível localizar a janela de '${rawTarget || 'ativa'}' aberta para ${params.action}.`,
+          simulated: false,
+          timestamp: new Date().toISOString()
+        };
+      }
+
+      if (platform === 'darwin') {
+        const script = params.action === 'minimize'
+          ? `osascript -e 'tell application "System Events" to set miniaturized of window 1 of (first process whose name contains "${cleanTarget}") to true'`
+          : `osascript -e 'tell application "System Events" to set frontmost of (first process whose name contains "${cleanTarget}") to true'`;
+        const res = await runReal(script, 8000);
+        return { success: res.code === 0, action: params.action, target: rawTarget, simulated: false, timestamp: new Date().toISOString() };
+      }
+
+      return { success: true, action: params.action, target: rawTarget, simulated: true, timestamp: new Date().toISOString() };
+    }
+
+    return { success: false, error: `UNKNOWN_ACTION: '${params.action}' nÃ£o suportada.`, simulated: false, timestamp: new Date().toISOString() };
   }
 };
 
 /**
- * pc_simulate_input (R2) — automação real de mouse e teclado.
- * actions: click (x,y), type (texto), hotkey (combinação de teclas)
+ * pc_simulate_input (R2) â€” automaÃ§Ã£o real de mouse e teclado.
+ * actions: click (x,y), type (texto), hotkey (combinaÃ§Ã£o de teclas)
  * Windows: PowerShell SendKeys + user32.dll para mouse via Add-Type.
  */
 export const pcSimulateInputTool: ToolDefinition<{
@@ -510,11 +716,12 @@ export const pcSimulateInputTool: ToolDefinition<{
   y?: number;
   text?: string;
   keys?: string;
+  targetApp?: string;
   doubleClick?: boolean;
   waitFocusMs?: number;
 }, any> = {
   name: 'pc_simulate_input',
-  description: 'Automatiza entrada do usuário no PC: move o mouse e clica em coordenadas (x,y) da tela, digita texto no app focado, ou envia combinações de teclas (ex: "ctrl+s", "alt+tab", "enter"). Ações de alto impacto (R2) exigem confirmação do operador.',
+  description: 'Automatiza entrada do usuário no PC: move o mouse e clica em coordenadas (x,y) da tela, digita texto no app focado, ou envia combinações de teclas (ex: "ctrl+s", "ctrl+w", "ctrl+t", "ctrl+2, ctrl+w", "alt+tab", "enter"). Permite informar targetApp (ex: "chrome", "notepad") para garantir foco no app correto antes de enviar teclas.',
   category: 'system',
   riskLevel: 'R2', // todo input simulado é R2 — pode agir em qualquer app do usuário
   isSimulated: false,
@@ -527,8 +734,9 @@ export const pcSimulateInputTool: ToolDefinition<{
       y: { type: 'number', description: 'Coordenada Y na tela para clique (obrigatório para click).' },
       doubleClick: { type: 'boolean', description: 'Se true, executa duplo clique no ponto.' },
       text: { type: 'string', description: 'Texto a digitar (máx 1000 caracteres) para action=type.' },
-      keys: { type: 'string', description: 'Combinação de teclas para action=hotkey, ex: "ctrl+s", "alt+tab", "enter", "win+r".' },
-      waitFocusMs: { type: 'number', description: 'Ms de espera pela estabilização do foco da janela antes de digitar (0-5000, padrão 1200). Use após abrir um app na mesma sequência.' }
+      keys: { type: 'string', description: 'Combinação de teclas para action=hotkey, ex: "ctrl+s", "ctrl+w", "ctrl+t", "ctrl+2, ctrl+w", "alt+tab", "enter". Aceita sequências separadas por vírgula.' },
+      targetApp: { type: 'string', description: 'Nome do app ou processo (ex: "chrome", "notepad") para focar ANTES de simular a entrada, garantindo que o comando seja recebido pelo aplicativo correto.' },
+      waitFocusMs: { type: 'number', description: 'Ms de espera pela estabilização do foco da janela antes de digitar (0-5000, padrão 400). Use após abrir um app na mesma sequência.' }
     },
     required: ['action'],
     additionalProperties: false
@@ -556,18 +764,18 @@ export const pcSimulateInputTool: ToolDefinition<{
           doubleClick: Boolean(params.doubleClick),
           simulated: true,
           runtimeMode: 'web-preview-simulated',
-          message: `[MODO WEB PREVIEW - SIMULADO] Clique em (${x}, ${y}) simulado (ambiente em nuvem sem interface gráfica de desktop).`,
+          message: `[MODO WEB PREVIEW - SIMULADO] Clique em (${x}, ${y}) simulado (ambiente em nuvem sem interface grÃ¡fica de desktop).`,
           timestamp: new Date().toISOString()
         };
       }
       if (platform !== 'win32' && platform !== 'darwin') {
-        return { success: false, error: 'INPUT_UNSUPPORTED: automação de clique nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: 'INPUT_UNSUPPORTED: automaÃ§Ã£o de clique nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
       }
       if (platform === 'win32') {
-        // BOM UTF-8 + SetCursorPos funciona com coordenadas inteiras — sem problema
+        // BOM UTF-8 + SetCursorPos funciona com coordenadas inteiras â€” sem problema
         const clicks = params.doubleClick ? 2 : 1;
         const ps = `
-\ufeffAdd-Type @"
+Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Mouse {
@@ -609,18 +817,18 @@ Write-Output "OK"`;
           length: text.length,
           simulated: true,
           runtimeMode: 'web-preview-simulated',
-          message: `[MODO WEB PREVIEW - SIMULADO] Digitação de ${text.length} caractere(s) simulada (ambiente em nuvem sem interface gráfica de desktop).`,
+          message: `[MODO WEB PREVIEW - SIMULADO] DigitaÃ§Ã£o de ${text.length} caractere(s) simulada (ambiente em nuvem sem interface grÃ¡fica de desktop).`,
           timestamp: new Date().toISOString()
         };
       }
       if (platform !== 'win32' && platform !== 'darwin') {
-        return { success: false, error: 'INPUT_UNSUPPORTED: digitação nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
+        return { success: false, error: 'INPUT_UNSUPPORTED: digitaÃ§Ã£o nativa suportada apenas no Windows e macOS nesta fase (Linux requer xdotool instalado).', simulated: false, timestamp: new Date().toISOString() };
       }
 
-      // CORREÇÃO (timeout 5000ms em pc_simulate_input): antes, abriam-se DOIS processos
-      // PowerShell separados (1º compilando C# WinFocus + polling loop de 250ms, 2º WScript.Shell
-      // SendKeys), ultrapassando facilmente 5s em cold start. Agora consolidamos numa ÚNICA
-      // invocação PowerShell leve com timeout de 15000ms e resolução imediata após SendKeys.
+      // CORREÃ‡ÃƒO (timeout 5000ms em pc_simulate_input): antes, abriam-se DOIS processos
+      // PowerShell separados (1Âº compilando C# WinFocus + polling loop de 250ms, 2Âº WScript.Shell
+      // SendKeys), ultrapassando facilmente 5s em cold start. Agora consolidamos numa ÃšNICA
+      // invocaÃ§Ã£o PowerShell leve com timeout de 15000ms e resoluÃ§Ã£o imediata apÃ³s SendKeys.
       const waitBeforeType = Math.max(0, Math.min(5000, params.waitFocusMs ?? 400));
 
       if (platform === 'win32') {
@@ -632,7 +840,27 @@ Write-Output "OK"`;
           .replace(/\n/g, '{ENTER}')
           .replace(/\t/g, '{TAB}');
         const sleepStep = waitBeforeType > 0 ? `Start-Sleep -Milliseconds ${waitBeforeType}; ` : '';
-        const ps = `\ufeff${sleepStep}$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${escaped}'); Write-Output "OK"`;
+        
+        let focusStep = '';
+        if (params.targetApp) {
+          const resolved = resolveWindowsAppExecutable(params.targetApp);
+          const clean = resolved.replace(/\.exe$/i, '').trim();
+          const rawClean = params.targetApp.replace(/\.exe$/i, '').trim();
+          focusStep = `
+$targetClean = '${clean.replace(/'/g, "''")}';
+$targetRaw = '${rawClean.replace(/'/g, "''")}';
+$proc = Get-Process -Name $targetClean -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+if (-not $proc) {
+  $proc = Get-Process -Name $targetRaw -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+}
+if (-not $proc) {
+  $proc = Get-Process -ErrorAction SilentlyContinue | Where-Object { ($_.MainWindowTitle -like "*$targetRaw*" -or $_.MainWindowTitle -like "*$targetClean*") -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+}
+if ($proc) { $w.AppActivate($proc.Id) | Out-Null; Start-Sleep -Milliseconds 250; } else { $w.AppActivate($targetRaw) | Out-Null; Start-Sleep -Milliseconds 200; }
+`;
+        }
+
+        const ps = `$w = New-Object -ComObject WScript.Shell; ${focusStep}${sleepStep}$w.SendKeys('${escaped}'); Write-Output "OK"`;
         const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 15000);
         const ok = res.code === 0 || res.stdout.includes('OK');
         return { success: ok, action: 'type', length: text.length, message: ok ? `Texto digitado (${text.length} caracteres) no app focado.` : `Falha ao digitar: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
@@ -648,8 +876,8 @@ Write-Output "OK"`;
 
     // ---- hotkey (combinação) ----
     if (params.action === 'hotkey') {
-      const combo = (params.keys || '').trim().toLowerCase();
-      if (!combo) return { success: false, error: 'MISSING_KEYS: informe a combinação (ex: "ctrl+s").', simulated: false, timestamp: new Date().toISOString() };
+      const rawInput = (params.keys || '').trim();
+      if (!rawInput) return { success: false, error: 'MISSING_KEYS: informe a combinação (ex: "ctrl+s", "ctrl+w", "ctrl+t", "ctrl+2, ctrl+w").', simulated: false, timestamp: new Date().toISOString() };
       
       const MODIFIER_MAP: Record<string, string> = {
         'ctrl': '^', 'control': '^', 'alt': '%', 'shift': '+', 'win': '^%'
@@ -665,89 +893,135 @@ Write-Output "OK"`;
         'f11': '{F11}', 'f12': '{F12}'
       };
 
-      const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
-      let modifiers = '';
-      let key = '';
-      let valid = true;
+      // Suporta sequências de teclas separadas por vírgula ou ponto-e-vírgula (ex: "ctrl+2, ctrl+w")
+      const comboList = rawInput.split(/[,;]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+      const parsedSendKeysList: string[] = [];
 
-      for (const p of parts) {
-        if (MODIFIER_MAP[p]) {
-          modifiers += MODIFIER_MAP[p];
-        } else if (SPECIAL_KEY_MAP[p]) {
-          key += SPECIAL_KEY_MAP[p];
-        } else if (/^[a-z0-9]$/i.test(p)) {
-          key += p.toLowerCase();
-        } else if (/^f([1-9]|1[0-2])$/i.test(p)) {
-          key += `{${p.toUpperCase()}}`;
-        } else {
-          valid = false;
-          break;
+      for (const combo of comboList) {
+        const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
+        let modifiers = '';
+        let key = '';
+        let valid = true;
+
+        for (const p of parts) {
+          if (MODIFIER_MAP[p]) {
+            modifiers += MODIFIER_MAP[p];
+          } else if (SPECIAL_KEY_MAP[p]) {
+            key += SPECIAL_KEY_MAP[p];
+          } else if (/^[a-z0-9]$/i.test(p)) {
+            key += p.toLowerCase();
+          } else if (/^f([1-9]|1[0-2])$/i.test(p)) {
+            key += `{${p.toUpperCase()}}`;
+          } else {
+            valid = false;
+            break;
+          }
         }
-      }
 
-      const sendKeys = modifiers + key;
-      if (!valid || !sendKeys) {
-        return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f12.`, simulated: false, timestamp: new Date().toISOString() };
+        const sendKeys = modifiers + key;
+        if (!valid || !sendKeys) {
+          return { success: false, error: `UNSUPPORTED_KEYS: combinação '${combo}' não suportada. Use ctrl/alt/shift/win + letras/números, ou enter/tab/esc/setas/f1-f12.`, simulated: false, timestamp: new Date().toISOString() };
+        }
+        parsedSendKeysList.push(sendKeys);
       }
 
       if (isDryRun) {
-        return { success: true, action: 'hotkey', keys: combo, dryRun: true, simulated: true, timestamp: new Date().toISOString() };
+        return { success: true, action: 'hotkey', keys: rawInput, dryRun: true, simulated: true, timestamp: new Date().toISOString() };
       }
 
       if (isWebPreviewSimulated) {
         return {
           success: true,
           action: 'hotkey',
-          keys: combo,
+          keys: rawInput,
           simulated: true,
           runtimeMode: 'web-preview-simulated',
-          message: `[MODO WEB PREVIEW - SIMULADO] Atalho '${combo}' simulado (ambiente em nuvem sem interface gráfica de desktop).`,
+          message: `[MODO WEB PREVIEW - SIMULADO] Atalho '${rawInput}' simulado (ambiente em nuvem sem interface gráfica de desktop).`,
           timestamp: new Date().toISOString()
         };
       }
 
       if (platform === 'win32') {
-        const ps = `$w = New-Object -ComObject WScript.Shell; $w.SendKeys('${sendKeys.replace(/'/g, "''")}')`;
+        let focusStep = '';
+        if (params.targetApp) {
+          const resolved = resolveWindowsAppExecutable(params.targetApp);
+          const clean = resolved.replace(/\.exe$/i, '').trim();
+          const rawClean = params.targetApp.replace(/\.exe$/i, '').trim();
+          focusStep = `
+$targetClean = '${clean.replace(/'/g, "''")}';
+$targetRaw = '${rawClean.replace(/'/g, "''")}';
+$proc = Get-Process -Name $targetClean -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+if (-not $proc) {
+  $proc = Get-Process -Name $targetRaw -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+}
+if (-not $proc) {
+  $proc = Get-Process -ErrorAction SilentlyContinue | Where-Object { ($_.MainWindowTitle -like "*$targetRaw*" -or $_.MainWindowTitle -like "*$targetClean*") -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+}
+if ($proc) { $w.AppActivate($proc.Id) | Out-Null; Start-Sleep -Milliseconds 250; } else { $w.AppActivate($targetRaw) | Out-Null; Start-Sleep -Milliseconds 200; }
+`;
+        }
+
+        const sendSteps = parsedSendKeysList
+          .map(k => `$w.SendKeys('${k.replace(/'/g, "''")}'); Start-Sleep -Milliseconds 180;`)
+          .join(' ');
+
+        const ps = `$w = New-Object -ComObject WScript.Shell; ${focusStep}${sendSteps} Write-Output "OK"`;
         const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 15000);
-        return { success: res.code === 0, action: 'hotkey', keys: combo, message: res.code === 0 ? `Atalho '${combo}' enviado ao app focado.` : `Falha no atalho: ${res.stderr.slice(0, 150)}`, simulated: false, timestamp: new Date().toISOString() };
+        return {
+          success: res.code === 0,
+          action: 'hotkey',
+          keys: rawInput,
+          targetApp: params.targetApp,
+          message: res.code === 0
+            ? (params.targetApp ? `Atalho '${rawInput}' enviado com sucesso para '${params.targetApp}'.` : `Atalho '${rawInput}' enviado ao app focado.`)
+            : `Falha no atalho: ${res.stderr.slice(0, 150)}`,
+          simulated: false,
+          timestamp: new Date().toISOString()
+        };
       }
 
       if (platform === 'darwin') {
-        const macModifiers: string[] = [];
-        if (combo.includes('ctrl') || combo.includes('control')) macModifiers.push('control down');
-        if (combo.includes('alt') || combo.includes('option')) macModifiers.push('option down');
-        if (combo.includes('shift')) macModifiers.push('shift down');
-        if (combo.includes('win') || combo.includes('cmd') || combo.includes('command')) macModifiers.push('command down');
-        
-        let script: string;
-        if (key && /^[a-z0-9]$/i.test(key)) {
-          const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
-          script = `osascript -e 'tell application "System Events" to keystroke "${key}"${modStr}'`;
-        } else if (key === '{ENTER}') {
-          const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
-          script = `osascript -e 'tell application "System Events" to key code 36${modStr}'`;
-        } else {
-          script = `osascript -e 'tell application "System Events" to keystroke "${key}"'`;
+        for (const combo of comboList) {
+          const macModifiers: string[] = [];
+          if (combo.includes('ctrl') || combo.includes('control')) macModifiers.push('control down');
+          if (combo.includes('alt') || combo.includes('option')) macModifiers.push('option down');
+          if (combo.includes('shift')) macModifiers.push('shift down');
+          if (combo.includes('win') || combo.includes('cmd') || combo.includes('command')) macModifiers.push('command down');
+          
+          const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
+          const lastKey = parts[parts.length - 1] || '';
+          let script: string;
+          if (lastKey && /^[a-z0-9]$/i.test(lastKey)) {
+            const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
+            script = `osascript -e 'tell application "System Events" to keystroke "${lastKey}"${modStr}'`;
+          } else if (lastKey === 'enter') {
+            const modStr = macModifiers.length > 0 ? ` using {${macModifiers.join(', ')}}` : '';
+            script = `osascript -e 'tell application "System Events" to key code 36${modStr}'`;
+          } else {
+            script = `osascript -e 'tell application "System Events" to keystroke "${lastKey}"'`;
+          }
+          await runReal(script, 8000);
         }
-        const res = await runReal(script, 15000);
-        return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+        return { success: true, action: 'hotkey', keys: rawInput, simulated: false, timestamp: new Date().toISOString() };
       }
 
       if (platform === 'linux') {
-        const linuxKey = combo.replace('ctrl', 'ctrl').replace('win', 'super');
-        const res = await runReal(`xdotool key ${JSON.stringify(linuxKey)} 2>/dev/null`, 15000);
-        return { success: res.code === 0, action: 'hotkey', keys: combo, simulated: false, timestamp: new Date().toISOString() };
+        for (const combo of comboList) {
+          const linuxKey = combo.replace('ctrl', 'ctrl').replace('win', 'super');
+          await runReal(`xdotool key ${JSON.stringify(linuxKey)} 2>/dev/null`, 8000);
+        }
+        return { success: true, action: 'hotkey', keys: rawInput, simulated: false, timestamp: new Date().toISOString() };
       }
 
-      return { success: true, action: 'hotkey', keys: combo, simulated: true, timestamp: new Date().toISOString() };
+      return { success: true, action: 'hotkey', keys: rawInput, simulated: true, timestamp: new Date().toISOString() };
     }
 
-    return { success: false, error: `UNKNOWN_ACTION: '${params.action}' não suportada.`, simulated: false, timestamp: new Date().toISOString() };
+    return { success: false, error: `UNKNOWN_ACTION: '${params.action}' nÃ£o suportada.`, simulated: false, timestamp: new Date().toISOString() };
   }
 };
 
 // ============================================================================
-// MÓDULO 3 — GERENCIAMENTO UNIVERSAL DE ARQUIVOS
+// MÃ“DULO 3 â€” GERENCIAMENTO UNIVERSAL DE ARQUIVOS
 // ============================================================================
 
 const USER_SEARCH_ROOTS = [
@@ -763,12 +1037,12 @@ const ALLOWED_SEARCH_ROOTS = [
   os.tmpdir()
 ];
 
-/** Garante que o caminho está dentro das raízes permitidas. Retorna null se OK, mensagem de erro se bloqueado. */
+/** Garante que o caminho estÃ¡ dentro das raÃ­zes permitidas. Retorna null se OK, mensagem de erro se bloqueado. */
 function checkSafePath(p: string): string | null {
   try {
     const resolved = path.resolve(p);
     if (resolved.split(path.sep).includes('..')) {
-      return 'PATH_TRAVERSAL_BLOCKED: caminhos com ".." não são permitidos.';
+      return 'PATH_TRAVERSAL_BLOCKED: caminhos com ".." nÃ£o sÃ£o permitidos.';
     }
     const resolvedNorm = resolved.toLowerCase();
     const allowed = ALLOWED_SEARCH_ROOTS.some(root => {
@@ -777,7 +1051,7 @@ function checkSafePath(p: string): string | null {
       return resolvedNorm === rootResolved || resolvedNorm.startsWith(rootWithSep);
     });
     if (!allowed) {
-      return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raízes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
+      return `PATH_OUT_OF_SCOPE: caminho '${resolved}' fora das raÃ­zes permitidas (Desktop, Documents, Downloads, Pictures, workspace LIORA, temp).`;
     }
     return null;
   } catch {
@@ -785,13 +1059,13 @@ function checkSafePath(p: string): string | null {
   }
 }
 
-/** Compatibilidade: versão que lança (usada internamente por fluxos que já capturam) */
+/** Compatibilidade: versÃ£o que lanÃ§a (usada internamente por fluxos que jÃ¡ capturam) */
 function assertSafePath(p: string): void {
   const err = checkSafePath(p);
   if (err) throw new Error(err);
 }
 
-/** Raízes de busca padrão permitidas (pastas do usuário existentes) */
+/** RaÃ­zes de busca padrÃ£o permitidas (pastas do usuÃ¡rio existentes) */
 function defaultSearchRoots(): string[] {
   return USER_SEARCH_ROOTS.filter((r) => {
     try {
@@ -803,7 +1077,7 @@ function defaultSearchRoots(): string[] {
 }
 
 /**
- * file_search_and_read (R0) — busca recursiva real com filtros + leitura.
+ * file_search_and_read (R0) â€” busca recursiva real com filtros + leitura.
  */
 export const fileSearchAndReadTool: ToolDefinition<{
   query?: string;
@@ -814,19 +1088,19 @@ export const fileSearchAndReadTool: ToolDefinition<{
   maxReadBytes?: number;
 }, any> = {
   name: 'file_search_and_read',
-  description: 'Busca arquivos reais no disco do usuário (Desktop, Documentos, Downloads, Pictures e workspace LIORA) por nome ou conteúdo, com filtro por extensão (.txt, .pdf, .docx, .xlsx, .json, etc.), e pode ler o conteúdo total ou parcial. Use para "encontre meu relatório", "abra o arquivo X", "o que está escrito no documento Y".',
+  description: 'Busca arquivos reais no disco do usuÃ¡rio (Desktop, Documentos, Downloads, Pictures e workspace LIORA) por nome ou conteÃºdo, com filtro por extensÃ£o (.txt, .pdf, .docx, .xlsx, .json, etc.), e pode ler o conteÃºdo total ou parcial. Use para "encontre meu relatÃ³rio", "abra o arquivo X", "o que estÃ¡ escrito no documento Y".',
   category: 'workspace',
   riskLevel: 'R0',
   isSimulated: false,
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Termo de busca no nome do arquivo (case-insensitive). Vazio = listar todos com o filtro de extensão.' },
-      extensions: { type: 'array', items: { type: 'string' }, description: 'Filtro por extensões (ex: [".pdf", ".docx"]). Vazio = todos os arquivos.' },
-      rootPath: { type: 'string', description: 'Pasta raiz para a busca. Padrão: pasta do usuário (Desktop/Docs/Downloads).' },
-      maxResults: { type: 'number', description: 'Máximo de resultados (1-100). Padrão 20.', default: 20 },
-      readContent: { type: 'boolean', description: 'Se true, lê o conteúdo do(s) primeiro(s) arquivo(s) encontrado(s) (apenas texto: txt/json/md/csv/log/code).' },
-      maxReadBytes: { type: 'number', description: 'Máximo de bytes a ler por arquivo (padrão 10000).' }
+      query: { type: 'string', description: 'Termo de busca no nome do arquivo (case-insensitive). Vazio = listar todos com o filtro de extensÃ£o.' },
+      extensions: { type: 'array', items: { type: 'string' }, description: 'Filtro por extensÃµes (ex: [".pdf", ".docx"]). Vazio = todos os arquivos.' },
+      rootPath: { type: 'string', description: 'Pasta raiz para a busca. PadrÃ£o: pasta do usuÃ¡rio (Desktop/Docs/Downloads).' },
+      maxResults: { type: 'number', description: 'MÃ¡ximo de resultados (1-100). PadrÃ£o 20.', default: 20 },
+      readContent: { type: 'boolean', description: 'Se true, lÃª o conteÃºdo do(s) primeiro(s) arquivo(s) encontrado(s) (apenas texto: txt/json/md/csv/log/code).' },
+      maxReadBytes: { type: 'number', description: 'MÃ¡ximo de bytes a ler por arquivo (padrÃ£o 10000).' }
     },
     additionalProperties: false
   },
@@ -856,7 +1130,7 @@ export const fileSearchAndReadTool: ToolDefinition<{
 
       const walk = async (dir: string, depth: number): Promise<void> => {
         if (depth > 6 || results.length >= maxResults) return;
-        let entries;
+        let entries: any[];
         try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
         for (const entry of entries) {
           if (results.length >= maxResults) return;
@@ -872,7 +1146,7 @@ export const fileSearchAndReadTool: ToolDefinition<{
               const stat = await fsp.stat(full);
               const item: any = { path: full, name: entry.name, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() };
               results.push(item);
-            } catch { /* arquivo travado/sem permissão — ignora */ }
+            } catch { /* arquivo travado/sem permissÃ£o â€” ignora */ }
           }
         }
       };
@@ -882,10 +1156,10 @@ export const fileSearchAndReadTool: ToolDefinition<{
         await walk(rootDir, 0);
       }
 
-    // Ordena por modificação mais recente
+    // Ordena por modificaÃ§Ã£o mais recente
     results.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
 
-    // Leitura de conteúdo (apenas formatos textuais seguros)
+    // Leitura de conteÃºdo (apenas formatos textuais seguros)
     if (params.readContent && results.length > 0) {
       const TEXTUAL = new Set(['.txt', '.json', '.md', '.csv', '.log', '.xml', '.yml', '.yaml', '.ts', '.js', '.py', '.rs', '.html', '.css', '.ini', '.cfg']);
       const maxBytes = Math.max(200, Math.min(50000, params.maxReadBytes || 10000));
@@ -896,11 +1170,11 @@ export const fileSearchAndReadTool: ToolDefinition<{
           const truncated = buf.length > maxBytes;
           first.content = buf.slice(0, maxBytes).toString('utf8');
           first.truncated = truncated;
-        } catch { /* leitura falhou — segue sem conteúdo */ }
+        } catch { /* leitura falhou â€” segue sem conteÃºdo */ }
       } else {
         first.content = null;
         first.truncated = false;
-        first.note = `Formato binário '${path.extname(first.name)}' não é legível como texto — use a captura de tela ou abra o arquivo no aplicativo adequado.`;
+        first.note = `Formato binÃ¡rio '${path.extname(first.name)}' nÃ£o Ã© legÃ­vel como texto â€” use a captura de tela ou abra o arquivo no aplicativo adequado.`;
       }
     }
 
@@ -912,8 +1186,8 @@ export const fileSearchAndReadTool: ToolDefinition<{
 };
 
 /**
- * file_write_and_modify (R2) — mutação real de arquivos: criar, escrever,
- * editar, renomear, zipar e excluir. TODAS as operações R2 (destructivas).
+ * file_write_and_modify (R2) â€” mutaÃ§Ã£o real de arquivos: criar, escrever,
+ * editar, renomear, zipar e excluir. TODAS as operaÃ§Ãµes R2 (destructivas).
  */
 export const fileWriteAndModifyTool: ToolDefinition<{
   operation: 'create' | 'write' | 'append' | 'rename' | 'delete' | 'zip' | 'mkdir';
@@ -924,20 +1198,20 @@ export const fileWriteAndModifyTool: ToolDefinition<{
   recursive?: boolean;
 }, any> = {
   name: 'file_write_and_modify',
-  description: 'Cria, escreve, edita, renomeia, compacta (.zip) e exclui arquivos e pastas no disco do usuário (Desktop, Documentos, Downloads, workspace LIORA). TODAS as operações são destrutivas ou mutáveis (R2) e exigem confirmação explícita do operador antes de executar.',
+  description: 'Cria, escreve, edita, renomeia, compacta (.zip) e exclui arquivos e pastas no disco do usuÃ¡rio (Desktop, Documentos, Downloads, workspace LIORA). TODAS as operaÃ§Ãµes sÃ£o destrutivas ou mutÃ¡veis (R2) e exigem confirmaÃ§Ã£o explÃ­cita do operador antes de executar.',
   category: 'workspace',
   riskLevel: 'R2',
   isSimulated: false,
-  timeoutMs: 70000, // zip usa 60s internamente — antes o registry abortava em 5s com falso timeout
+  timeoutMs: 70000, // zip usa 60s internamente â€” antes o registry abortava em 5s com falso timeout
   parameters: {
     type: 'object',
     properties: {
-      operation: { type: 'string', enum: ['create', 'write', 'append', 'rename', 'delete', 'zip', 'mkdir'], description: 'Operação a executar no arquivo/pasta.' },
+      operation: { type: 'string', enum: ['create', 'write', 'append', 'rename', 'delete', 'zip', 'mkdir'], description: 'OperaÃ§Ã£o a executar no arquivo/pasta.' },
       filePath: { type: 'string', description: 'Caminho absoluto ou relativo do arquivo/pasta alvo.' },
-      content: { type: 'string', description: 'Conteúdo a gravar (create/write/append). Máx 1MB.' },
+      content: { type: 'string', description: 'ConteÃºdo a gravar (create/write/append). MÃ¡x 1MB.' },
       newPath: { type: 'string', description: 'Novo caminho/nome para rename.' },
       sourcePath: { type: 'string', description: 'Pasta de origem para zip (zip empacota esta pasta).' },
-      recursive: { type: 'boolean', description: 'Para mkdir/delete: aplicar recursivamente (padrão true para mkdir, false para delete).' }
+      recursive: { type: 'boolean', description: 'Para mkdir/delete: aplicar recursivamente (padrÃ£o true para mkdir, false para delete).' }
     },
     required: ['operation', 'filePath'],
     additionalProperties: false
@@ -965,7 +1239,7 @@ export const fileWriteAndModifyTool: ToolDefinition<{
         await fsp.mkdir(path.dirname(target), { recursive: true });
         await fsp.appendFile(target, content, 'utf8');
         const stat = await fsp.stat(target);
-        return { success: true, operation: op, filePath: target, totalBytes: stat.size, message: `Conteúdo adicionado ao final de '${path.basename(target)}' (total: ${stat.size} bytes).`, simulated: false, timestamp: new Date().toISOString() };
+        return { success: true, operation: op, filePath: target, totalBytes: stat.size, message: `ConteÃºdo adicionado ao final de '${path.basename(target)}' (total: ${stat.size} bytes).`, simulated: false, timestamp: new Date().toISOString() };
       }
 
       if (op === 'rename') {
@@ -984,7 +1258,7 @@ export const fileWriteAndModifyTool: ToolDefinition<{
           stat = await fsp.stat(target);
         } catch (statErr: any) {
           if (statErr?.code === 'ENOENT') {
-            return { success: false, operation: op, error: `FILE_NOT_FOUND: '${path.basename(target)}' não foi encontrado no disco para exclusão.`, simulated: false, timestamp: new Date().toISOString() };
+            return { success: false, operation: op, error: `FILE_NOT_FOUND: '${path.basename(target)}' nÃ£o foi encontrado no disco para exclusÃ£o.`, simulated: false, timestamp: new Date().toISOString() };
           }
           throw statErr;
         }
@@ -994,7 +1268,7 @@ export const fileWriteAndModifyTool: ToolDefinition<{
         } else {
           await fsp.unlink(target);
         }
-        return { success: true, operation: op, filePath: target, message: `'${path.basename(target)}' excluído${stat.isDirectory() ? ' (pasta e conteúdo)' : ''}.`, simulated: false, timestamp: new Date().toISOString() };
+        return { success: true, operation: op, filePath: target, message: `'${path.basename(target)}' excluÃ­do${stat.isDirectory() ? ' (pasta e conteÃºdo)' : ''}.`, simulated: false, timestamp: new Date().toISOString() };
       }
 
       if (op === 'mkdir') {
@@ -1008,19 +1282,19 @@ export const fileWriteAndModifyTool: ToolDefinition<{
         if (zipErr) return { success: false, operation: op, error: zipErr, simulated: false, timestamp: new Date().toISOString() };
         const zipTarget = target.toLowerCase().endsWith('.zip') ? target : `${target}.zip`;
         if (os.platform() === 'win32') {
-          // PowerShell: Compress-Archive nativo (sem dependências)
+          // PowerShell: Compress-Archive nativo (sem dependÃªncias)
           const ps = `Compress-Archive -Path '${source.replace(/'/g, "''")}\\*' -DestinationPath '${zipTarget.replace(/'/g, "''")}' -Force`;
           const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 60000);
           if (res.code !== 0) return { success: false, operation: op, error: `ZIP_FAILED: ${res.stderr.slice(0, 200)}`, simulated: false, timestamp: new Date().toISOString() };
         } else {
           const res = await runReal(`cd ${JSON.stringify(path.dirname(source))} && zip -r ${JSON.stringify(zipTarget)} ${JSON.stringify(path.basename(source))}`, 60000);
-          if (res.code !== 0) return { success: false, operation: op, error: `ZIP_FAILED: ${res.stderr.slice(0, 200) || 'zip não instalado'}`, simulated: false, timestamp: new Date().toISOString() };
+          if (res.code !== 0) return { success: false, operation: op, error: `ZIP_FAILED: ${res.stderr.slice(0, 200) || 'zip nÃ£o instalado'}`, simulated: false, timestamp: new Date().toISOString() };
         }
         const stat = await fsp.stat(zipTarget);
         return { success: true, operation: op, filePath: zipTarget, bytesWritten: stat.size, message: `Compactado em '${path.basename(zipTarget)}' (${Math.round(stat.size / 1024)} KB).`, simulated: false, timestamp: new Date().toISOString() };
       }
 
-      return { success: false, operation: op, error: `UNKNOWN_OPERATION: '${op}' não suportada.`, simulated: false, timestamp: new Date().toISOString() };
+      return { success: false, operation: op, error: `UNKNOWN_OPERATION: '${op}' nÃ£o suportada.`, simulated: false, timestamp: new Date().toISOString() };
     } catch (err: any) {
       return { success: false, operation: op, error: `FILE_OPERATION_FAILED: ${err?.message || 'falha desconhecida no disco'}`, simulated: false, timestamp: new Date().toISOString() };
     }
@@ -1028,7 +1302,7 @@ export const fileWriteAndModifyTool: ToolDefinition<{
 };
 
 /**
- * open_application (R2 launch) — abre aplicativos diretamente pelo nome ou executável.
+ * open_application (R2 launch) â€” abre aplicativos diretamente pelo nome ou executÃ¡vel.
  * Resolve a expectativa do modelo ao receber comandos como "abre o spotify", "abre o bloco de notas", "inicie o chrome".
  */
 export const openApplicationTool: ToolDefinition<{
@@ -1037,7 +1311,7 @@ export const openApplicationTool: ToolDefinition<{
   application?: string;
 }, any> = {
   name: 'open_application',
-  description: 'Abre um aplicativo no computador pelo nome ou comando executável (ex: "spotify", "notepad", "calc", "chrome"). Risco R2.',
+  description: 'Abre um aplicativo no computador pelo nome ou comando executÃ¡vel (ex: "spotify", "notepad", "calc", "chrome"). Risco R2.',
   category: 'system',
   riskLevel: 'R2',
   isSimulated: false,
@@ -1046,7 +1320,7 @@ export const openApplicationTool: ToolDefinition<{
     type: 'object',
     properties: {
       appName: { type: 'string', description: 'Nome do aplicativo a ser aberto (ex: "spotify", "notepad", "calc", "chrome").' },
-      appPath: { type: 'string', description: 'Caminho ou comando executável alternativo do aplicativo.' },
+      appPath: { type: 'string', description: 'Caminho ou comando executÃ¡vel alternativo do aplicativo.' },
       application: { type: 'string', description: 'Alias para o nome do aplicativo.' }
     },
     additionalProperties: false
@@ -1072,7 +1346,7 @@ export const openApplicationTool: ToolDefinition<{
 };
 
 /**
- * open_browser (R2) — abre o navegador web real do usuário (Chrome, Edge, Opera ou padrão)
+ * open_browser (R2) â€” abre o navegador web real do usuÃ¡rio (Chrome, Edge, Opera ou padrÃ£o)
  * opcionalmente carregando uma URL HTTP/HTTPS segura, com adaptabilidade para Cloud Web Preview.
  */
 export const openBrowserTool: ToolDefinition<{
@@ -1080,7 +1354,7 @@ export const openBrowserTool: ToolDefinition<{
   browser?: 'default' | 'chrome' | 'msedge' | 'opera' | 'firefox';
 }, any> = {
   name: 'open_browser',
-  description: 'Abre o navegador web padrão (ou Chrome/Edge/Opera) no computador do usuário, com URL opcional HTTP/HTTPS. Risco R2.',
+  description: 'Abre o navegador web padrÃ£o (ou Chrome/Edge/Opera) no computador do usuÃ¡rio, com URL opcional HTTP/HTTPS. Risco R2.',
   category: 'system',
   riskLevel: 'R2',
   isSimulated: false,
@@ -1088,8 +1362,8 @@ export const openBrowserTool: ToolDefinition<{
   parameters: {
     type: 'object',
     properties: {
-      url: { type: 'string', description: 'URL HTTP/HTTPS opcional para abrir no navegador (padrão: https://www.google.com).' },
-      browser: { type: 'string', enum: ['default', 'chrome', 'msedge', 'opera', 'firefox'], description: 'Navegador preferido (padrão: default).' }
+      url: { type: 'string', description: 'URL HTTP/HTTPS opcional para abrir no navegador (padrÃ£o: https://www.google.com).' },
+      browser: { type: 'string', enum: ['default', 'chrome', 'msedge', 'opera', 'firefox'], description: 'Navegador preferido (padrÃ£o: default).' }
     },
     additionalProperties: false
   },
@@ -1120,7 +1394,7 @@ export const openBrowserTool: ToolDefinition<{
         success: false,
         url: rawUrl,
         browser: safeBrowser,
-        error: 'INVALID_URL: URL fornecida é inválida.',
+        error: 'INVALID_URL: URL fornecida Ã© invÃ¡lida.',
         simulated: false,
         timestamp: new Date().toISOString()
       };
@@ -1131,7 +1405,7 @@ export const openBrowserTool: ToolDefinition<{
         success: false,
         url: rawUrl,
         browser: safeBrowser,
-        error: `UNSAFE_URL_PROTOCOL: protocolo '${parsedUrl.protocol}' não permitido. Use http:// ou https://.`,
+        error: `UNSAFE_URL_PROTOCOL: protocolo '${parsedUrl.protocol}' nÃ£o permitido. Use http:// ou https://.`,
         simulated: false,
         timestamp: new Date().toISOString()
       };
@@ -1165,17 +1439,32 @@ export const openBrowserTool: ToolDefinition<{
 
     const platform = os.platform();
     if (platform === 'win32') {
-      const res = safeBrowser === 'default'
-        ? await runFile('rundll32.exe', ['url.dll,FileProtocolHandler', safeUrl], 8000)
-        : await runFile('cmd.exe', ['/C', 'start', '', safeBrowser, safeUrl], 8000);
+      // Navegadores podem estar ALI no PATH (chrome, msedge, opera). `Start-Process
+      // -FilePath 'chrome'` sem resolução falha silenciosamente quando o dir
+      // atual não está no PATH; resolvemos como o shell faria.
+      const exeMap: Record<string, string> = { chrome: 'chrome', msedge: 'msedge', opera: 'opera', firefox: 'firefox' };
+      const browserExe = exeMap[safeBrowser];
+      let res: { code: number; stdout: string; stderr: string };
+      if (safeBrowser === 'default' || !browserExe) {
+        res = await runFile('rundll32.exe', ['url.dll,FileProtocolHandler', safeUrl], 8000);
+      } else {
+        const ps = `$exe = '${browserExe.replace(/'/g, "''")}';
+$app = Get-Command -Name $exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;
+if (-not $app) { Write-Output 'NOT_INSTALLED'; exit 3 }
+Start-Process -FilePath $app.Source -ArgumentList '${safeUrl.replace(/'/g, "''")}' -ErrorAction Stop;
+Write-Output 'OK'`;
+        const psRes = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], 10000);
+        res = { code: psRes.code, stdout: psRes.stdout, stderr: psRes.stdout.includes('NOT_INSTALLED') ? `NAVEGADOR_NAO_INSTALADO: '${browserExe}' não foi encontrado no PATH deste PC.` : psRes.stderr };
+      }
+      const ok = res.code === 0 && !res.stderr.includes('NAVEGADOR_NAO_INSTALADO');
       return {
-        success: res.code === 0,
+        success: ok,
         url: safeUrl,
         browser: safeBrowser,
-        message: res.code === 0
+        message: ok
           ? `Navegador (${safeBrowser}) aberto em '${safeUrl}'.`
-          : `Falha ao abrir navegador (${safeBrowser}): ${res.stderr.slice(0, 150) || `código ${res.code}`}`,
-        error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || `Falha ao iniciar navegador '${safeBrowser}'.`),
+          : `Falha ao abrir navegador (${safeBrowser}): ${res.stderr.slice(0, 200) || `código ${res.code}`}`,
+        error: ok ? undefined : (res.stderr.slice(0, 200) || `Falha ao iniciar navegador '${safeBrowser}'.`),
         simulated: false,
         timestamp: new Date().toISOString()
       };
@@ -1215,8 +1504,215 @@ export const openBrowserTool: ToolDefinition<{
       success: res.code === 0,
       url: safeUrl,
       browser: safeBrowser,
-      message: res.code === 0 ? `Navegador aberto em '${safeUrl}'.` : `Falha ao abrir navegador: ${res.stderr.slice(0, 150) || `código ${res.code}`}`,
+      message: res.code === 0 ? `Navegador aberto em '${safeUrl}'.` : `Falha ao abrir navegador: ${res.stderr.slice(0, 150) || `cÃ³digo ${res.code}`}`,
       error: res.code === 0 ? undefined : (res.stderr.slice(0, 150) || 'Falha ao iniciar navegador no Linux.'),
+      simulated: false,
+      timestamp: new Date().toISOString()
+    };
+  }
+};
+
+// ============================================================================
+// MÓDULO 4 — INSPEÇÃO DE INTERFACE (controle de apps sem adivinhar pixels)
+// ============================================================================
+//
+// Por que existe (relato de campo): "peço para abrir um documento em branco e
+// ela manda Ctrl+N, mas o app mostra uma tela de escolha". Adivinhar atalhos por
+// programa não escala. A saída confiável no Windows é ENUMERAR a árvore real de
+// janelas (Win32 EnumWindows/EnumChildWindows), que retorna o campo de edição,
+// os botões e a barra de status de cada app. Isso é nativo, sem COM e estável —
+// validado neste projeto com o Bloco de Notas (retorna `Edit` + status bar).
+//
+// UIAutomation foi testado e descartado: neste ambiente a árvore variou de 3 a
+// 21 nós entre execuções, o que tornaria o comportamento não determinístico.
+
+export const pcInspectAppUiTool: ToolDefinition<{
+  target?: string;
+  pid?: number;
+  includeHidden?: boolean;
+}, any> = {
+  name: 'pc_inspect_app_ui',
+  description: 'Inspeciona a interface REAL de um aplicativo aberto no Windows: lista janela, campos de edição, botões, listas e a barra de status (com o texto atual). Use ANTES de automatizar um app para descobrir o que está na tela — em vez de supor atalhos como Ctrl+N. Retorna nomes e identificadores que podem ser usados em pc_simulate_input.',
+  category: 'system',
+  riskLevel: 'R0',
+  isSimulated: false,
+  timeoutMs: 20000,
+  parameters: {
+    type: 'object',
+    properties: {
+      target: { type: 'string', description: 'Nome do processo ou parte do título da janela (ex: "notepad", "Word", "Chrome"). Se omitido, usa a janela em primeiro plano.' },
+      pid: { type: 'number', description: 'PID exato do processo (opcional, tem prioridade sobre target).' },
+      includeHidden: { type: 'boolean', description: 'Incluir janelas/controles ocultos (padrão false).', default: false }
+    },
+    additionalProperties: false
+  },
+  outputSchema: { type: 'object', requiredFields: ['success', 'windows', 'simulated'] },
+  execute: async (params) => {
+    if (os.platform() !== 'win32') {
+      return {
+        success: false,
+        windows: [],
+        error: 'UI_INSPECT_UNSUPPORTED: inspeção de interface disponível apenas no Windows.',
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+    if (isOsDryRun()) {
+      return { success: true, dryRun: true, windows: [], simulated: true, timestamp: new Date().toISOString() };
+    }
+
+    const safeTarget = String(params.target || '').replace(/[^\w\s.\-À-ÿ]/g, '').slice(0, 60);
+    const pidArg = params.pid ? Number(params.pid) : 0;
+    const includeHidden = params.includeHidden ? '$true' : '$false';
+
+    const ps = `
+$ErrorActionPreference = 'Stop';
+$pidTarget = ${pidArg};
+$target = '${safeTarget}';
+
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class LioraUi {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr p, EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+
+  public static string Describe(uint pid, bool includeHidden, IntPtr onlyWindow) {
+    var sb = new StringBuilder();
+    EnumWindows((h, l) => {
+      uint wpid; GetWindowThreadProcessId(h, out wpid);
+      if (pid != 0) { if (wpid != pid) return true; }
+      if (onlyWindow != IntPtr.Zero) { if (h != onlyWindow) return true; }
+      if (!includeHidden) { if (!IsWindowVisible(h)) return true; }
+      var title = new StringBuilder(512); GetWindowText(h, title, 512);
+      if (title.Length == 0) return true;
+      var cls = new StringBuilder(256); GetClassName(h, cls, 256);
+      RECT r; GetWindowRect(h, out r);
+      sb.Append("WINDOW|" + title.ToString() + "|" + cls.ToString() + "|" + wpid + "|" + r.Left + "," + r.Top + "," + (r.Right-r.Left) + "x" + (r.Bottom-r.Top) + "[NL]");
+      int idx = 0;
+      EnumChildWindows(h, (c, l2) => {
+        var ct = new StringBuilder(512); GetWindowText(c, ct, 512);
+        var cc = new StringBuilder(256); GetClassName(c, cc, 256);
+        bool vis = IsWindowVisible(c);
+        bool en = IsWindowEnabled(c);
+        bool visAllowed = includeHidden ? true : vis;
+        if (!visAllowed) return true;
+        RECT cr; GetWindowRect(c, out cr);
+        string ctext = ct.ToString();
+        if (ctext.Length == 0) ctext = "-";
+        sb.Append("CHILD|" + idx + "|" + ctext + "|" + cc.ToString() + "|" + (vis ? "1" : "0") + "|" + (en ? "1" : "0") + "|" + cr.Left + "," + cr.Top + "," + (cr.Right-cr.Left) + "x" + (cr.Bottom-cr.Top) + "[NL]");
+        idx++;
+        return true;
+      }, IntPtr.Zero);
+      return true;
+    }, IntPtr.Zero);
+    return sb.ToString();
+  }
+}
+"@
+if ($pidTarget -eq 0 -and $target) {
+  $cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { ($_.ProcessName -like "*$target*") -or ($_.MainWindowTitle -like "*$target*") } | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1;
+  if ($cands) { $pidTarget = [uint32]$cands.Id }
+}
+$onlyWindow = [IntPtr]::Zero;
+if ($pidTarget -eq 0) { $onlyWindow = [LioraUi]::GetForegroundWindow(); }
+$result = [LioraUi]::Describe([uint32]$pidTarget, ${includeHidden}, $onlyWindow)
+Write-Output $result
+`;
+
+    const res = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `[Console]::OutputEncoding=[Text.Encoding]::UTF8; chcp 65001 > $null; ${ps}`], 18000);
+    // Decodifica explicitamente como UTF-8 (execFile usa o codepage do SO).
+    if (res.code !== 0 && !res.stdout.trim()) {
+      return {
+        success: false,
+        windows: [],
+        error: `UI_INSPECT_FAILED: ${res.stderr.slice(0, 200) || 'PowerShell não retornou dados'}`,
+        simulated: false,
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const windows: any[] = [];
+    let currentWindow: any = null;
+    const parseRect = (raw: string) => {
+      const [x, y, size] = String(raw || '').split(',');
+      const [w, h] = String(size || '').split('x');
+      return {
+        left: Number(x) || 0,
+        top: Number(y) || 0,
+        width: Number(w) || 0,
+        height: Number(h) || 0
+      };
+    };
+
+    for (const rawLine of res.stdout.split('[NL]')) {
+      const line = rawLine.trimEnd();
+      if (!line) continue;
+      const cols = line.split('|');
+      if (cols[0] === 'WINDOW' && cols.length >= 5) {
+        currentWindow = {
+          title: cols[1],
+          className: cols[2],
+          pid: Number(cols[3]),
+          rect: parseRect(cols[4]),
+          controls: []
+        };
+        windows.push(currentWindow);
+      } else if (cols[0] === 'CHILD' && currentWindow && cols.length >= 7) {
+        currentWindow.controls.push({
+          index: Number(cols[1]),
+          text: cols[2] === '-' ? '' : cols[2],
+          className: cols[3],
+          visible: cols[4] === '1',
+          enabled: cols[5] === '1',
+          rect: parseRect(cols[6])
+        });
+      }
+    }
+
+    // Classificação amigável para o modelo decidir a ação certa.
+    const classify = (cls: string): string => {
+      const c = cls.toLowerCase();
+      if (/^edit$|richedit|scintilla/.test(c)) return 'text_field';
+      if (/button/.test(c)) return 'button';
+      if (/systreeview|syslistview|listbox/.test(c)) return 'list';
+      if (/combobox/.test(c)) return 'dropdown';
+      if (/msctls_statusbar/.test(c)) return 'status_bar';
+      if (/msctls_trackbar/.test(c)) return 'slider';
+      if (/tab/.test(c)) return 'tabs';
+      if (/toolbar/.test(c)) return 'toolbar';
+      return 'other';
+    };
+    for (const w of windows) {
+      for (const c of w.controls) c.kind = classify(c.className);
+      w.summary = {
+        textFields: w.controls.filter((c: any) => c.kind === 'text_field').length,
+        buttons: w.controls.filter((c: any) => c.kind === 'button').length,
+        lists: w.controls.filter((c: any) => c.kind === 'list').length,
+        menus: w.controls.filter((c: any) => c.kind === 'other' && /menu/i.test(c.className)).length
+      };
+    }
+
+    const main = windows[0];
+    return {
+      success: windows.length > 0,
+      windows,
+      count: windows.length,
+      mainWindowTitle: main?.title,
+      message: windows.length === 0
+        ? 'Nenhuma janela encontrada para o alvo informado.'
+        : `Janela '${main?.title}' inspecionada: ${main?.summary.textFields} campo(s) de texto, ${main?.summary.buttons} botão(ões), ${main?.summary.lists} lista(s).`,
       simulated: false,
       timestamp: new Date().toISOString()
     };

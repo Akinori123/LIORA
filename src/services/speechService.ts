@@ -1,6 +1,8 @@
 import { integrationsVault } from './integrationsVault';
 import { audioGate } from './audioGate';
 import { voiceManager } from './voiceManager';
+import { parseConsentVoiceDecision } from '../utils/consentVoiceParser';
+import { createAudioChunkProcessor, AudioChunkProcessor } from '../utils/audioProcessor';
 
 // Interface para o Web Speech Recognition API
 interface SpeechRecognitionEventLike extends Event {
@@ -64,6 +66,11 @@ class SpeechService {
   private silentGainNode: GainNode | null = null;
   private rawAudioSamples: Float32Array[] = [];
   private animFrameId: number | null = null;
+  // Processador moderno (AudioWorklet) ou fallback legado — ver utils/audioProcessor
+  private micChunkProcessor: AudioChunkProcessor | null = null;
+  // Loop do medidor espectral de fallback (quando não há microfone físico).
+  // Precisava de handle próprio para ser cancelado no teardown.
+  private fallbackIntervalId: ReturnType<typeof setInterval> | null = null;
   // CORREÇÃO (Etapa 7): loop do medidor por setInterval (sobrevive à minimização)
   private meterIntervalId: ReturnType<typeof setInterval> | null = null;
   private lastEmitTime: number = 0;
@@ -77,12 +84,14 @@ class SpeechService {
 
   private currentAudioElement: HTMLAudioElement | null = null;
   private currentAudioSource: AudioBufferSourceNode | null = null;
+  private isStartingMeter: boolean = false;
   private ttsAbortController: AbortController | null = null;
   private ttsAudioCache = new Map<string, AudioBuffer>();
   private activeNeuralVoice: string = 'Aoede';
   private activeSpeakId: number = 0;
   private streamingEpoch: number = 0;
   private isWarmingTtsCache: boolean = false;
+  private webSpeechNetworkFails: number = 0;
 
   constructor() {
     this.initRecognition();
@@ -328,6 +337,10 @@ class SpeechService {
     this.selectedDeviceId = id;
     if (typeof window !== 'undefined' && (this.mediaStream || this.micSourceNode || this.shouldBeListening)) {
       const wasListening = this.shouldBeListening;
+      // CORREÇÃO: `acquireMediaStream()` reutiliza a stream existente enquanto ela
+      // estiver `active` — trocar o dispositivo no menu deixava a stream antiga
+      // viva e o microfone antigo continuava sendo usado. O teardown completo
+      // encerra as trilhas de hardware para que o novo device seja aberto.
       this.stopAudioMeter(true);
       if (wasListening) {
         this.shouldBeListening = true;
@@ -421,6 +434,8 @@ class SpeechService {
 
   private async startAudioMeter() {
     if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
+    if (this.isStartingMeter) return;
+    this.isStartingMeter = true;
     try {
       // Cancela qualquer loop de animação prévio para impedir multiplicidade de frames
       if (this.animFrameId) {
@@ -429,7 +444,7 @@ class SpeechService {
       }
 
       if (!this.mediaStream || !this.mediaStream.active) {
-        console.log('[GlobalVoiceBar AudioContext] startAudioMeter: Solicitando stream via acquireMediaStream...');
+        console.debug('[GlobalVoiceBar AudioContext] startAudioMeter: Solicitando stream via acquireMediaStream...');
         this.mediaStream = await this.acquireMediaStream();
       }
 
@@ -477,24 +492,29 @@ class SpeechService {
         // Fallback silencioso se MediaRecorder não suportar webm
       }
 
-      if (!this.scriptProcessor) {
+      if (!this.scriptProcessor && !this.micChunkProcessor) {
         this.rawAudioSamples = [];
-        this.scriptProcessor = audioCtx.createScriptProcessor(2048, 1, 1);
-        this.scriptProcessor.onaudioprocess = (e) => {
+        // CORREÇÃO (depreciação): AudioWorklet com fallback para ScriptProcessor.
+        // Coleta os mesmos blocos de 2048 amostras do micGainNode (WAV p/ Gemini).
+        void createAudioChunkProcessor(audioCtx, 2048, (channelData) => {
           if (!this.shouldBeListening) return;
-          const channelData = e.inputBuffer.getChannelData(0);
           this.rawAudioSamples.push(new Float32Array(channelData));
           if (this.rawAudioSamples.length > 500) {
             this.rawAudioSamples.shift();
           }
-        };
-        this.micGainNode.connect(this.scriptProcessor);
+        }).then((processor) => {
+          this.micChunkProcessor = processor;
+          if (this.shouldBeListening && this.micGainNode) {
+            processor.connect(this.micGainNode);
+          }
+        }).catch((err) => {
+          console.warn('[SpeechService] Falha ao iniciar processador de áudio:', err);
+        });
         if (!this.silentGainNode) {
           this.silentGainNode = audioCtx.createGain();
           this.silentGainNode.gain.value = 0;
+          this.silentGainNode.connect(audioCtx.destination);
         }
-        this.scriptProcessor.connect(this.silentGainNode);
-        this.silentGainNode.connect(audioCtx.destination);
       }
 
       // CORREÇÃO (Etapa 7 — microfone morre ao minimizar): o requestAnimationFrame
@@ -600,6 +620,8 @@ class SpeechService {
     } catch (err: any) {
       console.info('[GlobalVoiceBar AudioContext] Microfone físico não inicializado. Ativando sintetizador espectral de fallback:', err?.message || err);
       this.startFallbackAudioMeter();
+    } finally {
+      this.isStartingMeter = false;
     }
   }
 
@@ -648,12 +670,29 @@ class SpeechService {
 
   private startFallbackAudioMeter() {
     this.isFallbackMeterActive = true;
+    // CORREÇÃO (handles órfãos): o loop anterior usava requestAnimationFrame e só
+    // parava via `shouldBeListening` — com a janela minimizada o rAF PAUSA, e o id
+    // do frame nunca era usado para cancelar em stopAudioMeter (que só cancelava
+    // `this.animFrameId`, sobrescrito a cada frame). Resultado: loops duplicados a
+    // cada restart -> bursts de nível de áudio falso. Agora o loop é um	timers
+    // rastreado e sempre cancelado no teardown.
+    if (this.fallbackIntervalId) {
+      clearInterval(this.fallbackIntervalId);
+      this.fallbackIntervalId = null;
+    }
     let tick = 0;
     let smoothedLevel = 0;
     let lastEmitTime = 0;
 
-    const pollFallback = (timestamp: number) => {
-      if (!this.shouldBeListening) return;
+    const pollFallback = () => {
+      if (!this.shouldBeListening) {
+        if (this.fallbackIntervalId) {
+          clearInterval(this.fallbackIntervalId);
+          this.fallbackIntervalId = null;
+        }
+        this.isFallbackMeterActive = false;
+        return;
+      }
       tick += 0.08;
       const isTalking = this.isSpeaking();
       const targetLevel = isTalking 
@@ -662,6 +701,7 @@ class SpeechService {
 
       smoothedLevel = Math.round(smoothedLevel * 0.75 + targetLevel * 0.25);
 
+      const timestamp = performance.now();
       if (!lastEmitTime || timestamp - lastEmitTime >= 50) {
         lastEmitTime = timestamp;
 
@@ -676,10 +716,8 @@ class SpeechService {
         }
         this.frequencyListeners.forEach(listener => listener(frequencyBins));
       }
-
-      this.animFrameId = requestAnimationFrame(pollFallback);
     };
-    this.animFrameId = requestAnimationFrame(pollFallback);
+    this.fallbackIntervalId = setInterval(pollFallback, 50);
   }
 
   public async getRecordedAudioBlob(): Promise<{ data: string; mimeType: string } | null> {
@@ -752,6 +790,12 @@ class SpeechService {
       cancelAnimationFrame(this.animFrameId);
       this.animFrameId = null;
     }
+    // CORREÇÃO (handles órfãos): o loop do medidor espectral de fallback também
+    // precisa ser cancelado aqui — antes sobrevivia e re-emitia níveis falsos.
+    if (this.fallbackIntervalId) {
+      clearInterval(this.fallbackIntervalId);
+      this.fallbackIntervalId = null;
+    }
     // CORREÇÃO (Etapa E): limpa o intervalo do medidor em TODAS as rotas de
     // desligamento — antes o intervalo sobrevivia a stopListening simples e o
     // VAD continuava rodando (emitindo nível 0 silenciosamente) com mic "desligado".
@@ -780,6 +824,13 @@ class SpeechService {
         this.scriptProcessor.disconnect();
       } catch {}
       this.scriptProcessor = null;
+    }
+
+    if (this.micChunkProcessor) {
+      try {
+        this.micChunkProcessor.dispose();
+      } catch {}
+      this.micChunkProcessor = null;
     }
 
     if (this.silentGainNode) {
@@ -865,11 +916,31 @@ class SpeechService {
         const fullText = (finalTranscript || interimTranscript).trim();
         if (fullText) {
           if (this.isSpeaking()) {
-            console.log('[SpeechService Barge-In STT] Palavra do usuário reconhecida. Interrompendo resposta da LIORA...');
-            this.stopSpeaking();
+            // Anti-Echo & Barge-In Consciente:
+            // Se a LIORA está falando, verifica se é um comando explícito de parada ou uma decisão de consentimento.
+            const normLower = fullText.toLowerCase().trim();
+            const isStopCommand = /^(?:para|parar|pare|cancela|cancelar|silencio|silêncio|quieta|chega|stop|shh|calada)$/i.test(normLower) ||
+              /\b(?:para|parar|pare|cancela|cancelar|silencio|silêncio|chega)\s+liora\b/i.test(normLower);
+
+            const consentDecision = parseConsentVoiceDecision(normLower);
+
+            if (isStopCommand || consentDecision) {
+              console.log('[SpeechService Barge-In STT] Comando de parada ou decisão de consentimento do usuário reconhecido:', fullText);
+              this.stopSpeaking();
+              if (consentDecision) {
+                this.userSpokeInSession = true;
+                onResult(fullText, Boolean(finalTranscript));
+              }
+              return;
+            }
+
+            // Se não for comando de parada nem decisão de consentimento, é eco do próprio alto-falante captado pelo microfone.
+            // Ignora para não cortar a fala da LIORA na metade nem disparar loops de auto-reconhecimento.
+            return;
           }
 
           this.userSpokeInSession = true;
+          this.webSpeechNetworkFails = 0;
           onResult(fullText, Boolean(finalTranscript));
 
           if (finalTranscript && this.autoSendCallback) {
@@ -889,14 +960,22 @@ class SpeechService {
       };
 
       rec.onerror = (event: SpeechRecognitionErrorEventLike) => {
-        console.warn('[SpeechService] Evento de erro:', event.error);
         if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+          console.warn('[SpeechService] Permissão de microfone negada:', event.error);
           this.shouldBeListening = false;
           this.stopAudioMeter();
           onError?.('Permissão de microfone negada. Clique no cadeado na barra de endereços do navegador e autorize o microfone.');
         } else if (event.error === 'no-speech') {
           // Normal: silêncio transitório. Não aborta escuta contínua.
+        } else if (event.error === 'network') {
+          // Web Speech API do Chromium/WebView2 não consegue alcançar os servidores proprietários do Google Speech (comum em WebView2 no Windows).
+          // Não polui o console nem assusta o usuário na interface com erro: o VAD e o pipeline de áudio PCM/Gemini continuam 100% ativos!
+          this.webSpeechNetworkFails = (this.webSpeechNetworkFails || 0) + 1;
+          if (this.webSpeechNetworkFails <= 1) {
+            console.info('[SpeechService] Web Speech API em nuvem não disponível neste ambiente (network). Microfone operando via áudio PCM nativo + VAD.');
+          }
         } else {
+          console.warn('[SpeechService] Evento de erro:', event.error);
           onError?.(event.message || `Status do microfone: ${event.error}`);
         }
       };
@@ -907,6 +986,9 @@ class SpeechService {
         // evitando que o Chrome trave a escuta após pausas!
         if (this.shouldBeListening) {
           if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          // Se o Web Speech API falhar repetidamente por network (comum no WebView2/Tauri),
+          // aplica backoff para evitar laço agressivo de 100ms que consome CPU e inunda o log
+          const delay = (this.webSpeechNetworkFails >= 2) ? 15000 : 500;
           this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
             if (this.shouldBeListening) {
@@ -916,7 +998,7 @@ class SpeechService {
                 console.warn('[SpeechService] Tentativa de reconexão do microfone:', e);
               }
             }
-          }, 100);
+          }, delay);
         } else {
           onEnd?.();
         }
@@ -1045,6 +1127,16 @@ class SpeechService {
     }
     const isDeterministicOverride = Boolean(options?.isDeterministicOverride ?? audioGate.isLiveSuppressed());
 
+    // CORREÇÃO (voz dupla — relato de campo "apareceu 2 vozes, uma offline e
+    // outra da API"): quando a fala é DETERMINÍSTICA (confirmação/resultado de
+    // ferramenta), ela precisa ser a ÚNICA voz. Antes o override só liberava o
+    // canal neural_tts, deixando o Gemini Live falando em paralelo por cima do
+    // TTS — dois áudios simultâneos. Aqui o Live é interrompido e suprimido
+    // enquanto a fala determinística está no ar.
+    if (isDeterministicOverride) {
+      audioGate.suppressLiveFor(4500);
+    }
+
     // Gate estrito de exclusão mútua: se o canal Live WS está ativo e não foi suprimido,
     // nunca empilha uma segunda voz paralela nem aborta o canal Live antes da hora.
     if (!audioGate.canAcquire('neural_tts', { isDeterministicOverride })) {
@@ -1167,8 +1259,8 @@ class SpeechService {
         if (data.fallbackToNative || data.code === 'QUOTA_EXHAUSTED' || !data.success) {
           audioGate.releaseChannel('neural_tts');
           voiceManager.releaseLock('stream');
-          console.warn('[SpeechService] Gemini TTS indisponível ou cota esgotada. Concluindo de forma limpa (sem voz robótica nativa em conflito).');
-          onEnd?.();
+          console.info('[SpeechService] Gemini TTS indisponível ou cota esgotada. Alternando para voz nativa pt-BR do sistema.');
+          this.speakFallbackBrowser(cleanText, onStart, onEnd, isDeterministicOverride);
           return;
         }
 
@@ -1226,6 +1318,12 @@ class SpeechService {
           source.start(0);
           return;
         }
+      } else {
+        audioGate.releaseChannel('neural_tts');
+        voiceManager.releaseLock('stream');
+        console.info(`[SpeechService] Gemini TTS respondeu com status ${res.status}. Alternando para síntese nativa.`);
+        this.speakFallbackBrowser(cleanText, onStart, onEnd, isDeterministicOverride);
+        return;
       }
     } catch (e: any) {
       if (this.ttsAbortController === abortCtrl) {
@@ -1238,11 +1336,15 @@ class SpeechService {
         return;
       }
       console.warn('[SpeechService] Falha na síntese Gemini TTS:', e);
+      audioGate.releaseChannel('neural_tts');
+      voiceManager.releaseLock('stream');
+      this.speakFallbackBrowser(cleanText, onStart, onEnd, isDeterministicOverride);
+      return;
     }
 
     audioGate.releaseChannel('neural_tts');
     voiceManager.releaseLock('stream');
-    onEnd?.();
+    this.speakFallbackBrowser(cleanText, onStart, onEnd, isDeterministicOverride);
   }
 
   private speakFallbackBrowser(
@@ -1269,7 +1371,8 @@ class SpeechService {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = 'pt-BR';
-      utterance.rate = 1.05;
+      const storeRate = (typeof window !== 'undefined' && (window as any).__LIORA_STORE__?.getState?.()?.settings?.speechRate) || 1.05;
+      utterance.rate = storeRate;
       utterance.pitch = 1.0;
 
       // Seleciona a melhor voz natural pt-BR instalada no Windows (Microsoft Francisca, Maria, etc.)
@@ -1296,7 +1399,11 @@ class SpeechService {
       };
 
       utterance.onerror = (e) => {
-        console.warn('[SpeechService Fallback TTS Error]:', e);
+        // 'interrupted' é comportamento normal: nova fala cancela a anterior.
+        // Não logar como erro poluindo o console.
+        if (e.error !== 'interrupted' && e.error !== 'canceled') {
+          console.warn('[SpeechService Fallback TTS Error]:', e.error, e);
+        }
         if (this.currentUtterance === utterance) {
           this.currentUtterance = null;
         }
